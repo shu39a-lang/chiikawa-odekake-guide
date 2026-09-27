@@ -7,14 +7,17 @@ struct ChiikawaGuideApp: App {
     var body: some Scene {
         WindowGroup {
             GuideRootView()
+                .preferredColorScheme(.light)
         }
     }
 }
 
 private enum GuideStyle {
-    static let navy = Color(red: 0.09, green: 0.16, blue: 0.31)
-    static let yellow = Color(red: 1.00, green: 0.85, blue: 0.27)
-    static let background = Color(red: 0.96, green: 0.98, blue: 1.00)
+    static let navy = Color(red: 0.15, green: 0.22, blue: 0.30)
+    static let yellow = Color(red: 1.00, green: 0.86, blue: 0.48)
+    static let background = Color(red: 0.985, green: 0.978, blue: 0.953)
+    static let blush = Color(red: 1.00, green: 0.92, blue: 0.83)
+    static let muted = Color(red: 0.36, green: 0.39, blue: 0.42)
 }
 
 private struct GuideItem: Identifiable, Decodable {
@@ -370,6 +373,7 @@ struct GuideRootView: View {
                         if !productPages.isEmpty {
                             Text("商品ページの例")
                                 .font(.headline)
+                                .foregroundStyle(GuideStyle.navy)
                                 .padding(.top, 6)
                             Text("売り切れの場合もあります。在庫はリンク先で確認してください。")
                                 .font(.subheadline)
@@ -381,6 +385,7 @@ struct GuideRootView: View {
                         if !salesPages.isEmpty {
                             Text("販売サイト・一覧から探す")
                                 .font(.headline)
+                                .foregroundStyle(GuideStyle.navy)
                                 .padding(.top, 6)
                             ForEach(salesPages) { item in
                                 GuideCard(item: item, today: today, savedItemIDs: $savedItemIDs)
@@ -409,7 +414,7 @@ struct GuideRootView: View {
                 .padding(18)
             }
             .background(GuideStyle.background)
-            .navigationTitle("おでかけ・グッズ案内")
+            .navigationTitle("おでかけガイド")
             .navigationBarTitleDisplayMode(.inline)
             .searchable(text: $searchText, prompt: "名前・地域で探す")
             .toolbar {
@@ -430,16 +435,29 @@ struct GuideRootView: View {
     }
 
     private func header(for tab: GuideTab) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(tab.rawValue).font(.title2.bold())
-            Text(tab == .events ? "開催中・開催予定の催しを探して、公式ページで詳細を確認。" :
-                    tab == .shops ? "近くのお店や施設を探す。" : "公式の販売先からグッズを探す。")
-                .font(.subheadline)
+        HStack(alignment: .center, spacing: 14) {
+            VStack(alignment: .leading, spacing: 9) {
+                Text("おでかけを、もっと楽しく")
+                    .font(.caption.bold())
+                    .foregroundStyle(GuideStyle.muted)
+                Text(tab.rawValue)
+                    .font(.title2.bold())
+                    .foregroundStyle(GuideStyle.navy)
+                Text(tab == .events ? "開催中・これからのイベント" :
+                        tab == .shops ? "行ってみたいお店や施設" : "公式ショップでグッズを探す")
+                    .font(.subheadline)
+                    .foregroundStyle(GuideStyle.muted)
+            }
+            Spacer(minLength: 0)
+            Image(systemName: tab.symbol)
+                .font(.title2.weight(.semibold))
+                .foregroundStyle(GuideStyle.navy)
+                .frame(width: 54, height: 54)
+                .background(.white.opacity(0.8), in: RoundedRectangle(cornerRadius: 18))
         }
-        .foregroundStyle(.white)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(20)
-        .background(GuideStyle.navy, in: RoundedRectangle(cornerRadius: 18))
+        .padding(18)
+        .background(GuideStyle.blush, in: RoundedRectangle(cornerRadius: 22))
     }
 }
 
@@ -466,7 +484,7 @@ private struct GuideCard: View {
                 Text(item.startsOn.map { $0 > today } == true ? "開催予定" : item.badge)
                     .padding(.horizontal, 10).padding(.vertical, 5)
                     .background(GuideStyle.yellow, in: Capsule())
-                Text(item.region).foregroundStyle(.secondary)
+                Text(item.region).foregroundStyle(GuideStyle.muted)
                 Spacer()
                 Button(action: toggleSaved) {
                     Image(systemName: isSaved ? "bookmark.fill" : "bookmark")
@@ -477,16 +495,20 @@ private struct GuideCard: View {
                 .accessibilityLabel(isSaved ? "保存を解除" : "後で見るために保存")
             }
             .font(.caption.bold())
-            Text(item.title).font(.headline)
+            Text(item.title)
+                .font(.headline)
+                .foregroundStyle(GuideStyle.navy)
             if let period = item.period {
                 Label(period, systemImage: "calendar")
                     .font(.subheadline.bold())
+                    .foregroundStyle(GuideStyle.navy)
             }
             if let venue = item.venue {
                 Label(venue, systemImage: "mappin")
                     .font(.subheadline)
+                    .foregroundStyle(GuideStyle.muted)
             }
-            Text(item.detail).font(.subheadline).foregroundStyle(.secondary)
+            Text(item.detail).font(.subheadline).foregroundStyle(GuideStyle.muted)
             Button {
                 openURL(item.url)
             } label: {
@@ -496,14 +518,16 @@ private struct GuideCard: View {
                     Image(systemName: "arrow.up.right")
                 }
                 .font(.subheadline.bold())
-                .foregroundStyle(.white)
-                .padding(14)
-                .background(GuideStyle.navy, in: RoundedRectangle(cornerRadius: 11))
+                .foregroundStyle(GuideStyle.navy)
+                .padding(13)
+                .background(GuideStyle.background, in: RoundedRectangle(cornerRadius: 12))
             }
             .accessibilityHint("外部の公式ページを開きます")
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(17)
-        .background(.white, in: RoundedRectangle(cornerRadius: 18))
+        .background(.white, in: RoundedRectangle(cornerRadius: 20))
+        .overlay(RoundedRectangle(cornerRadius: 20)
+            .stroke(GuideStyle.navy.opacity(0.08), lineWidth: 1))
     }
 }
