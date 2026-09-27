@@ -1,0 +1,30 @@
+name: iPhone app compile check
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Xcode version
+        run: xcodebuild -version
+
+      - name: Build for iPhone simulator
+        run: |
+          xcodebuild \
+            -project OdekakeGuide.xcodeproj \
+            -scheme OdekakeGuide \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO \
+            CURRENT_PROJECT_VERSION="${GITHUB_RUN_NUMBER}" \
+            build
