@@ -11,6 +11,57 @@ workflows:
         distribution_type: app_store
         bundle_identifier: com.shu39a.odekakeguide
     scripts:
+      - name: アプリアイコンとビルド番号を設定
+        script: |
+          python3 <<'PY'
+          import json, math, os, struct, zlib
+          from pathlib import Path
+
+          catalog = Path('OdekakeGuide/OdekakeGuide/Assets.xcassets/AppIcon.appiconset')
+          catalog.mkdir(parents=True, exist_ok=True)
+          size = 1024
+          rows = []
+          for y in range(size):
+              row = bytearray(b'\0')
+              for x in range(size):
+                  d = math.hypot(x - 512, y - 512)
+                  ring = 260 <= d <= 298
+                  pin = math.hypot(x - 512, y - 470) <= 80
+                  trail = 476 <= x <= 548 and 520 <= y <= 720
+                  row.extend((248, 252, 255) if ring or pin or trail else (28, 112, 190))
+              rows.append(row)
+          def chunk(tag, data):
+              return struct.pack('!I', len(data)) + tag + data + struct.pack('!I', zlib.crc32(tag + data) & 0xffffffff)
+          png = (b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('!2I5B', size, size, 8, 2, 0, 0, 0))
+                 + chunk(b'IDAT', zlib.compress(b''.join(rows), 9)) + chunk(b'IEND', b''))
+          (catalog / 'AppIcon.png').write_bytes(png)
+          (catalog / 'Contents.json').write_text(json.dumps({
+              'images': [{'filename': 'AppIcon.png', 'idiom': 'universal', 'platform': 'ios', 'size': '1024x1024'}],
+              'info': {'author': 'xcode', 'version': 1}
+          }))
+
+          project = Path('OdekakeGuide.xcodeproj/project.pbxproj')
+          content = project.read_text()
+          def change(old, new, count):
+              global content
+              assert content.count(old) == count, f'Xcode project mismatch: {old}'
+              content = content.replace(old, new)
+          change('  A10000000000000000000001 = {isa = PBXBuildFile; fileRef = A10000000000000000000011; };',
+                 '  A10000000000000000000001 = {isa = PBXBuildFile; fileRef = A10000000000000000000011; };\n  A10000000000000000000002 = {isa = PBXBuildFile; fileRef = A10000000000000000000012; };', 1)
+          change('  A10000000000000000000011 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChiikawaGuideApp.swift; sourceTree = "<group>"; };',
+                 '  A10000000000000000000011 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChiikawaGuideApp.swift; sourceTree = "<group>"; };\n  A10000000000000000000012 = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };', 1)
+          change('children = (A10000000000000000000011,);',
+                 'children = (A10000000000000000000011, A10000000000000000000012,);', 1)
+          change('   files = ();\n   runOnlyForDeploymentPostprocessing = 0;\n  };\n  A10000000000000000000032',
+                 '   files = (A10000000000000000000002,);\n   runOnlyForDeploymentPostprocessing = 0;\n  };\n  A10000000000000000000032', 1)
+          change('    CODE_SIGN_STYLE = Automatic;',
+                 '    ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;\n    CODE_SIGN_STYLE = Automatic;', 2)
+          build_number = os.environ['BUILD_NUMBER']
+          assert build_number.isdigit()
+          change('    CURRENT_PROJECT_VERSION = 1;',
+                 f'    CURRENT_PROJECT_VERSION = {build_number};', 2)
+          project.write_text(content)
+          PY
       - name: 署名プロファイルを設定
         script: xcode-project use-profiles
       - name: iPhone用IPAを作成
@@ -20,3 +71,6 @@ workflows:
             --scheme OdekakeGuide
     artifacts:
       - build/ios/ipa/*.ipa
+    publishing:
+      app_store_connect:
+        auth: integration
