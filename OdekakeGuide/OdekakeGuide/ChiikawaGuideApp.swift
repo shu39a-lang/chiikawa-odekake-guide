@@ -512,6 +512,7 @@ struct GuideRootView: View {
                     .font(.subheadline)
                     .foregroundStyle(GuideStyle.muted)
                     .frame(maxWidth: 230, alignment: .leading)
+                    .padding(.top, 20)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(17)
@@ -522,16 +523,15 @@ struct GuideRootView: View {
 
     private func searchPanel(for tab: GuideTab) -> some View {
         VStack(alignment: .leading, spacing: 13) {
-            ZStack(alignment: .topTrailing) {
-                SeasonArt(name: "summer")
-                    .frame(width: 154, height: 106)
-                    .offset(x: 10, y: -13)
+            VStack(alignment: .leading, spacing: 0) {
                 Text("どんなおでかけを探しますか？")
                     .font(.headline)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.top, 2)
+                    .foregroundStyle(.white)
+                    .fixedSize(horizontal: false, vertical: true)
+                SeasonArt(name: "summer")
+                    .frame(width: 180, height: 124)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
             }
-            .frame(height: 54)
             if tab == .events {
                 Text("日付").font(.subheadline.bold()).foregroundStyle(GuideStyle.muted)
                 HStack(spacing: 6) {
@@ -559,20 +559,26 @@ struct GuideRootView: View {
                             }
                         }
                         .frame(maxWidth: .infinity, minHeight: 44)
-                        .background(.white, in: RoundedRectangle(cornerRadius: 9))
-                        .foregroundStyle(GuideStyle.navy)
+                        .background(GuideStyle.header, in: RoundedRectangle(cornerRadius: 9))
+                        .foregroundStyle(.white)
+                        .tint(.white)
+                        .overlay(RoundedRectangle(cornerRadius: 9).stroke(GuideStyle.border))
                     }
                 }
             } else if tab == .shops {
                 menuField("地域", selection: $shopRegion, values: regions(for: .shop))
             }
             Text("キーワード").font(.subheadline.bold()).foregroundStyle(GuideStyle.muted)
-            TextField("イベント名・場所・好きなもの", text: $searchText)
+            TextField("", text: $searchText,
+                      prompt: Text("イベント名・場所・好きなもの")
+                        .foregroundColor(GuideStyle.muted))
                 .textFieldStyle(.plain)
-                .foregroundStyle(GuideStyle.navy)
+                .foregroundStyle(.white)
+                .tint(.white)
                 .padding(12)
                 .frame(minHeight: 48)
-                .background(.white, in: RoundedRectangle(cornerRadius: 9))
+                .background(GuideStyle.header, in: RoundedRectangle(cornerRadius: 9))
+                .overlay(RoundedRectangle(cornerRadius: 9).stroke(GuideStyle.border))
                 .autocorrectionDisabled()
             HStack(spacing: 8) {
                 Button("おでかけを探す →") {
@@ -613,8 +619,10 @@ struct GuideRootView: View {
                 ForEach(values, id: \.self) { Text($0) }
             }
             .frame(maxWidth: .infinity, minHeight: 44)
-            .background(.white, in: RoundedRectangle(cornerRadius: 9))
-            .foregroundStyle(GuideStyle.navy)
+            .background(GuideStyle.header, in: RoundedRectangle(cornerRadius: 9))
+            .foregroundStyle(.white)
+            .tint(.white)
+            .overlay(RoundedRectangle(cornerRadius: 9).stroke(GuideStyle.border))
         }
     }
 
