@@ -33,6 +33,7 @@ private struct GuideItem: Identifiable, Decodable {
     var period: String? = nil
     var venue: String? = nil
     var startsOn: String? = nil
+    var eventType: String? = nil
     var endsOn: String? = nil // yyyy-MM-dd。終了日の翌日から一覧に表示しない。
 }
 
@@ -44,16 +45,20 @@ private struct GuideFeed: Decodable {
 
 private enum GuideData {
     // 初期データは手動確認。公開前・公開後も開催日とリンクを定期的に更新する。
-    static let checkedOn = "2026年9月27日"
-    static let feedURL = URL(string: "https://chiikawa-odekake-guide.shu-tok39.chatgpt.site/guide-data.json")!
+    static let checkedOn = "2026年9月28日"
+    static let feedURL = URL(string: "https://chiikawa-odekake-guide.shu-tok39.chatgpt.site/guide-data-v2.json")!
     static let privacyURL = URL(string: "https://chiikawa-odekake-guide.shu-tok39.chatgpt.site/privacy.html")!
     static let allowedHosts: Set<String> = [
         "www.tokyo-skytree.jp", "chiikawapark-tokyo.jp", "cafe.parco.jp",
         "chiikawa-info.jp", "www.chiikawamogumogu.jp", "chiikawabakery.jp",
-        "chiikawamarket.jp", "eshop.fujitv.co.jp"
+        "chiikawamarket.jp", "eshop.fujitv.co.jp",
+        "www.sapporo.travel", "www.sapporo-kokusai.jp", "www.expo2025.or.jp",
+        "hololivepro.com", "www.sakaepark.co.jp", "www.crossroadfukuoka.jp",
+        "www.hetalia-20thex.com", "szo.handmade-marche.jp",
+        "www.kagoshima-kankou.com", "www.creema.jp", "minne.com"
     ]
     static func isValid(_ feed: GuideFeed) -> Bool {
-        feed.schemaVersion == 1 && !feed.checkedOn.isEmpty &&
+        feed.schemaVersion == 2 && !feed.checkedOn.isEmpty &&
         (1...500).contains(feed.items.count) &&
         Set(feed.items.map(\.id)).count == feed.items.count &&
         feed.items.allSatisfy { item in
@@ -62,12 +67,22 @@ private enum GuideData {
             !item.title.isEmpty && !item.button.isEmpty
         }
     }
-    static func localToday() -> String {
+    static func dateString(_ date: Date) -> String {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd"
         formatter.timeZone = TimeZone(identifier: "Asia/Tokyo")
-        return formatter.string(from: Date())
+        return formatter.string(from: date)
     }
+    static func localToday() -> String { dateString(Date()) }
+    static let bundledItems: [GuideItem] = {
+        let text = #"""
+{"schemaVersion":2,"checkedOn":"2026年9月28日","items":[{"id":"skytree","title":"ちいかわ☆星ふるスカイツリー®とひみつの島","detail":"東京スカイツリー／10月31日まで。展示や限定メニューなど。","region":"東京","badge":"開催中","button":"公式のイベント詳細","url":"https://www.tokyo-skytree.jp/event/special/chiikawa/","period":"2026年7月10日〜10月31日","venue":"東京スカイツリー","endsOn":"2026-10-31","category":"event","eventType":"character","startsOn":"2026-07-10"},{"id":"cafe-osaka","title":"映画ちいかわ コラボレーションカフェ","detail":"心斎橋PARCO／9月28日まで。予約や利用条件を会場ページで確認。","region":"大阪","badge":"9月28日まで","button":"会場の詳細","url":"https://cafe.parco.jp/event/information/chiikawamovie_cafe_osaka?area=029441","period":"2026年7月24日〜9月28日","venue":"心斎橋PARCO","endsOn":"2026-09-28","category":"event","eventType":"character","startsOn":"2026-07-24"},{"id":"machida-popup","title":"ちいかわ POP UP STORE 町田モディ","detail":"町田駅近くの期間限定店。入店方法は公式ページで確認。","region":"東京","badge":"期間限定","button":"町田の公式ページ","url":"https://chiikawa-info.jp/p26/pus_matd/","period":"2026年10月9日〜11月1日","venue":"町田モディ 4F イベントスペース","startsOn":"2026-10-09","endsOn":"2026-11-01","category":"event","eventType":"character"},{"id":"popup","title":"期間限定ショップの催事一覧","detail":"開催地と期間は公式の催事一覧で確認できます。","region":"全国","badge":"随時更新","button":"公式の催事一覧","url":"https://chiikawa-info.jp/pus.html","category":"shop"},{"id":"tachikawa-magical","title":"まじかるちいかわ POP UP STORE 立川","detail":"グランデュオ立川の期間限定店。入店方法は公式ページで確認。","region":"東京","badge":"期間限定","button":"立川の公式ページ","url":"https://chiikawa-info.jp/p26/mg_tckw/index.html","period":"2026年9月30日〜11月8日","venue":"グランデュオ立川 2F","startsOn":"2026-09-30","endsOn":"2026-11-08","category":"event","eventType":"character"},{"id":"sapporo-magical","title":"まじかるちいかわ POP UP SHOP 札幌","detail":"期間限定店。入店方法は公式ページで確認。","region":"北海道","badge":"期間限定","button":"札幌の公式ページ","url":"https://chiikawa-info.jp/magical_store/kd_spr/index.html","period":"2026年10月2日〜11月3日","venue":"キデイランド POP UP SHOP","startsOn":"2026-10-02","endsOn":"2026-11-03","category":"event","eventType":"character"},{"id":"oita-land","title":"ちいかわらんど POP UP SHOP 大分","detail":"期間限定店。入店方法は公式ページで確認。","region":"大分","badge":"期間限定","button":"大分の公式ページ","url":"https://chiikawa-info.jp/chiikawaland/oita/index.html","period":"2026年9月11日〜10月12日","venue":"アミュプラザおおいた 2F","startsOn":"2026-09-11","endsOn":"2026-10-12","category":"event","eventType":"character"},{"id":"land","title":"ちいかわらんど","detail":"全国の常設店。営業時間・入店方法は各店舗の案内を確認。","region":"全国","badge":"常設店","button":"店舗一覧を見る","url":"https://chiikawa-info.jp/ck_land.html","category":"shop"},{"id":"park","title":"ちいかわパーク","detail":"東京・池袋。チケット販売と利用案内。","region":"東京","badge":"施設","button":"チケット案内","url":"https://chiikawapark-tokyo.jp/ticket","category":"shop"},{"id":"bakery-tokyo","title":"ちいかわベーカリー 表参道","detail":"オモカド3階。入店方法と営業時間を公式案内で確認。","region":"東京","badge":"飲食","button":"表参道店の案内","url":"https://chiikawabakery.jp/information/","category":"shop"},{"id":"bakery-osaka","title":"ちいかわベーカリー OSAKA","detail":"KITTE大阪3階。入店方法と営業時間を公式案内で確認。","region":"大阪","badge":"飲食","button":"大阪店の案内","url":"https://chiikawabakery.jp/information-osaka/","category":"shop"},{"id":"ramen-ikebukuro","title":"ちいかわラーメン 豚 池袋","detail":"池袋PARCO本館8階。予約・入店方法は公式案内で確認。","region":"東京","badge":"飲食","button":"池袋店の案内","url":"https://cafe.parco.jp/event/chiikawaramenbuta_ikebukuro?area=029688","category":"shop"},{"id":"ramen-shibuya","title":"ちいかわラーメン 豚 渋谷","detail":"渋谷PARCO地下1階。予約・入店方法は公式案内で確認。","region":"東京","badge":"飲食","button":"渋谷店の案内","url":"https://cafe.parco.jp/event/chiikawaramenbuta_shibuya?area=029979","category":"shop"},{"id":"mogumogu-kawagoe","title":"ちいかわもぐもぐ本舗 川越店","detail":"埼玉・川越。和をテーマにしたお菓子や雑貨のお店。","region":"埼玉","badge":"常設店","button":"川越店の案内","url":"https://www.chiikawamogumogu.jp/stores/kawagoe/","category":"shop"},{"id":"mogumogu-fushimi","title":"ちいかわもぐもぐ本舗 京都伏見店","detail":"京都・伏見。和をテーマにしたお菓子や雑貨のお店。","region":"京都","badge":"常設店","button":"京都伏見店の案内","url":"https://www.chiikawamogumogu.jp/stores/fushimi/","category":"shop"},{"id":"cafe","title":"コラボカフェ","detail":"開催中の会場や期間を確認。","region":"全国","badge":"飲食","button":"カフェ情報を見る","url":"https://chiikawa-info.jp/cafe.html","category":"shop"},{"id":"harajuku","title":"ちいかわらんど 原宿店","detail":"東京・原宿。来店前に入店方法を確認。","region":"東京","badge":"常設店","button":"原宿店の公式ページ","url":"https://chiikawa-info.jp/chiikawaland/harajuku/index.html","category":"shop"},{"id":"tokyo-station","title":"ちいかわらんど TOKYO Station","detail":"東京駅周辺の常設店。","region":"東京","badge":"常設店","button":"東京駅店の公式ページ","url":"https://chiikawa-info.jp/chiikawaland/tokyo/index.html","category":"shop"},{"id":"shinjuku","title":"ちいかわらんど 新宿店","detail":"東京・新宿の常設店。","region":"東京","badge":"常設店","button":"新宿店の公式ページ","url":"https://chiikawa-info.jp/chiikawaland/shinjuku/index.html","category":"shop"},{"id":"osaka","title":"ちいかわらんど 大阪梅田店","detail":"大阪・梅田の常設店。","region":"大阪","badge":"常設店","button":"大阪梅田店の公式ページ","url":"https://chiikawa-info.jp/chiikawaland/osaka/index.html","category":"shop"},{"id":"nagoya","title":"ちいかわらんど 名古屋パルコ店","detail":"愛知・名古屋の常設店。","region":"愛知","badge":"常設店","button":"名古屋店の公式ページ","url":"https://chiikawa-info.jp/chiikawaland/nagoya/index.html","category":"shop"},{"id":"market","title":"ちいかわマーケット","detail":"公式グッズショップ。価格・在庫は販売ページで確認。","region":"オンライン","badge":"公式ショップ","button":"ショップを開く","url":"https://chiikawamarket.jp/","category":"goods"},{"id":"plush-chiikawa","title":"ぬいぐるみS（ちいかわ）","detail":"公式の商品ページ。売り切れの場合は入荷のお知らせを確認。","region":"オンライン","badge":"商品ページ","button":"ぬいぐるみを見る","url":"https://chiikawamarket.jp/products/4589468435181","category":"goods"},{"id":"pen-hachiware","title":"ドクターグリップ 4+1（ハチワレ）","detail":"公式の商品ページ。価格・在庫は販売元で確認。","region":"オンライン","badge":"商品ページ","button":"文房具を見る","url":"https://chiikawamarket.jp/products/4901770775784","category":"goods"},{"id":"mug-chiikawa","title":"フェイスマグ（ちいかわ）","detail":"公式の商品ページ。売り切れの場合は入荷のお知らせを確認。","region":"オンライン","badge":"商品ページ","button":"マグカップを見る","url":"https://chiikawamarket.jp/products/4979274905471","category":"goods"},{"id":"restock","title":"再入荷商品","detail":"再入荷の一覧。個別商品の入荷通知は販売元で設定。","region":"オンライン","badge":"再入荷","button":"再入荷商品を見る","url":"https://chiikawamarket.jp/collections/restock","category":"goods"},{"id":"movie-goods","title":"映画ちいかわのグッズ","detail":"取扱店と販売情報を確認。","region":"全国","badge":"作品別","button":"取扱い情報を見る","url":"https://chiikawa-info.jp/p26/ck_movie/","category":"goods"},{"id":"new-goods","title":"新着商品","detail":"新しく掲載された商品を公式ショップで確認。","region":"オンライン","badge":"新着","button":"新着商品を見る","url":"https://chiikawamarket.jp/collections/newitems","category":"goods"},{"id":"preorder","title":"予約商品","detail":"発送予定や注文条件は各商品ページで確認。","region":"オンライン","badge":"予約","button":"予約商品を見る","url":"https://chiikawamarket.jp/collections/preorder","category":"goods"},{"id":"plush","title":"ぬいぐるみ・マスコット","detail":"公式ショップのカテゴリーから探す。","region":"オンライン","badge":"カテゴリー","button":"一覧を見る","url":"https://chiikawamarket.jp/collections/nuigurumi","category":"goods"},{"id":"fuji-tv","title":"フジテレビｅ!ショップ","detail":"アニメ関連グッズを販売元の一覧で確認。","region":"オンライン","badge":"販売サイト","button":"商品一覧を見る","url":"https://eshop.fujitv.co.jp/c/g_anime/B007088?sort=latest","category":"goods"},{"id":"sapporo-autumnfest","title":"さっぽろオータムフェスト","detail":"北海道各地の食を楽しむ秋の催し。","region":"北海道","venue":"札幌市・大通公園","startsOn":"2026-09-11","endsOn":"2026-10-03","period":"2026年9月11日〜10月3日","category":"event","eventType":"food","badge":"開催予定","button":"公式情報を見る","url":"https://www.sapporo.travel/autumnfest/"},{"id":"sapporo-kokusai-autumn","title":"札幌国際スキー場 秋祭り","detail":"紅葉ゴンドラと秋の味覚。","region":"北海道","venue":"札幌国際スキー場","startsOn":"2026-10-01","endsOn":"2026-10-20","period":"2026年10月1日〜10月20日","category":"event","eventType":"festival","badge":"開催予定","button":"公式情報を見る","url":"https://www.sapporo-kokusai.jp/autumn/"},{"id":"expo-futures-tokyo","title":"EXPO2025 Futures Tour 東京","detail":"大阪・関西万博の展示や作品を紹介する巡回イベント。","region":"東京","venue":"東京会場（詳細は公式ページ）","startsOn":"2026-10-10","endsOn":"2026-10-11","period":"2026年10月10日〜10月11日","category":"event","eventType":"exhibition","badge":"開催予定","button":"公式情報を見る","url":"https://www.expo2025.or.jp/officialblog/expo2025-f-tour1010/"},{"id":"hololive-tour-tokyo","title":"hololive Grand Reception 東京・前半","detail":"全国巡回展示会の東京会場。","region":"東京","venue":"TOKYO DREAM PARK 7階","startsOn":"2026-10-10","endsOn":"2026-10-28","period":"2026年10月10日〜10月28日","category":"event","eventType":"character","badge":"開催予定","button":"公式情報を見る","url":"https://hololivepro.com/news/20260821-01-298/"},{"id":"imo-fes-nagoya","title":"芋フェス！ IN 名古屋オアシス21","detail":"さつまいもグルメが集まる催し。","region":"愛知","venue":"オアシス21","startsOn":"2026-10-10","endsOn":"2026-10-12","period":"2026年10月10日〜10月12日","category":"event","eventType":"food","badge":"開催予定","button":"公式情報を見る","url":"https://www.sakaepark.co.jp/events/8010/"},{"id":"koishiwara-pottery","title":"小石原 秋の民陶むら祭","detail":"小石原焼・高取焼の窯元を巡る陶器市。","region":"福岡","venue":"福岡県東峰村・小石原地区","startsOn":"2026-10-10","endsOn":"2026-10-12","period":"2026年10月10日〜10月12日","category":"event","eventType":"craft","badge":"開催予定","button":"公式情報を見る","url":"https://www.crossroadfukuoka.jp/event/13730"},{"id":"hetalia-exhibition","title":"ヘタリア20周年原画展 WorldFesta","detail":"原画や記念グッズを楽しめる展覧会。","region":"東京","venue":"池袋・サンシャインシティ 展示ホールA","startsOn":"2026-10-17","endsOn":"2026-10-28","period":"2026年10月17日〜10月28日","category":"event","eventType":"exhibition","badge":"開催予定","button":"公式情報を見る","url":"https://www.hetalia-20thex.com/"},{"id":"shizuoka-marche","title":"静岡ハンドメイドマルシェ2026","detail":"全国の作家による作品や手作りフードが集まる催し。","region":"静岡","venue":"ツインメッセ静岡","startsOn":"2026-10-31","endsOn":"2026-11-01","period":"2026年10月31日〜11月1日","category":"event","eventType":"craft","badge":"開催予定","button":"公式情報を見る","url":"https://szo.handmade-marche.jp/"},{"id":"izumi-machiterasu","title":"いずみマチ・テラス","detail":"竹灯籠で街を彩る秋の催し。開催概要は県公式の一覧から確認。","region":"鹿児島","venue":"出水麓武家屋敷群地区","startsOn":"2026-10-31","endsOn":"2026-11-03","period":"2026年10月31日〜11月3日","category":"event","eventType":"festival","badge":"開催予定","button":"公式情報を見る","url":"https://www.kagoshima-kankou.com/event"},{"id":"creema","title":"Creema","detail":"作家によるハンドメイド作品を探せる販売サイト。","region":"オンライン","badge":"販売サイト","button":"Creemaで探す","url":"https://www.creema.jp/","category":"goods"},{"id":"minne","title":"minne","detail":"雑貨やクラフト作品を探せる販売サイト。","region":"オンライン","badge":"販売サイト","button":"minneで探す","url":"https://minne.com/","category":"goods"},{"id":"hololive-tour-tokyo-late","title":"hololive Grand Reception 東京・後半","detail":"全国巡回展示会の東京会場。前半と内容の一部が異なります。","region":"東京","venue":"TOKYO DREAM PARK 7階","startsOn":"2026-10-31","endsOn":"2026-11-23","period":"2026年10月31日〜11月23日","category":"event","eventType":"character","badge":"開催予定","button":"公式情報を見る","url":"https://hololivepro.com/news/20260821-01-298/"},{"id":"hetalia-exhibition-osaka","title":"ヘタリア20周年原画展 WorldFesta 大阪","detail":"原画や記念グッズを楽しめる展覧会。","region":"大阪","venue":"なんばパークスミュージアム","startsOn":"2026-11-07","endsOn":"2026-11-23","period":"2026年11月7日〜11月23日","category":"event","eventType":"exhibition","badge":"開催予定","button":"公式情報を見る","url":"https://www.hetalia-20thex.com/"}]}
+"""#
+        guard let data = text.data(using: .utf8),
+              let feed = try? JSONDecoder().decode(GuideFeed.self, from: data),
+              isValid(feed) else { return events + shops + goods }
+        return feed.items
+    }()
     static let events: [GuideItem] = [
         .init(id: "skytree", category: .event,
               title: "ちいかわ☆星ふるスカイツリー®とひみつの島",
@@ -235,9 +250,31 @@ private enum GuideTab: String, CaseIterable {
     }
 }
 
+private enum EventDateFilter: String, CaseIterable {
+    case upcoming = "これから", today = "今日", weekend = "今週末", chosen = "日付を選ぶ"
+}
+
+private enum EventTypeFilter: String, CaseIterable {
+    case all = "すべての種類", character = "キャラクター", craft = "雑貨・ハンドメイド"
+    case exhibition = "展示", food = "グルメ", festival = "季節のお祭り"
+    var dataValue: String {
+        switch self {
+        case .all: return "all"
+        case .character: return "character"
+        case .craft: return "craft"
+        case .exhibition: return "exhibition"
+        case .food: return "food"
+        case .festival: return "festival"
+        }
+    }
+}
+
 struct GuideRootView: View {
     @State private var selection: GuideTab = .events
     @State private var region = "全国"
+    @State private var dateFilter: EventDateFilter = .upcoming
+    @State private var eventType: EventTypeFilter = .all
+    @State private var chosenDate = Date()
     @State private var shopRegion = "全国"
     @State private var today = GuideData.localToday()
     @State private var savedOnly = false
@@ -276,7 +313,7 @@ struct GuideRootView: View {
     }
 
     private var availableItems: [GuideItem] {
-        remoteItems ?? (GuideData.events + GuideData.shops + GuideData.goods)
+        remoteItems ?? GuideData.bundledItems
     }
 
     private func regions(for category: GuideItem.Category) -> [String] {
@@ -320,10 +357,29 @@ struct GuideRootView: View {
     }
 
     private var filteredEvents: [GuideItem] {
-        availableItems.filter { item in
+        let selected = GuideData.dateString(chosenDate)
+        let weekend: (String, String) = {
+            let calendar = Calendar(identifier: .gregorian)
+            let weekday = calendar.component(.weekday, from: Date())
+            let saturday = calendar.date(byAdding: .day, value: (7 - weekday + 7) % 7, to: Date()) ?? Date()
+            let sunday = calendar.date(byAdding: .day, value: 1, to: saturday) ?? saturday
+            return (GuideData.dateString(saturday), GuideData.dateString(sunday))
+        }()
+        return availableItems.filter { item in
+            guard item.category == .event, let start = item.startsOn, let end = item.endsOn,
+                  end >= today else { return false }
             let inRegion = region == "全国" || item.region == region || item.region == "全国"
-            let inDate = item.endsOn.map { $0 >= today } ?? true
-            return item.category == .event && inRegion && inDate
+            let inType = eventType == .all || item.eventType == eventType.dataValue
+            let inDate: Bool
+            switch dateFilter {
+            case .upcoming: inDate = true
+            case .today: inDate = start <= today && end >= today
+            case .weekend: inDate = start <= weekend.1 && end >= weekend.0
+            case .chosen: inDate = start <= selected && end >= selected
+            }
+            return inRegion && inType && inDate
+        }.sorted {
+            max($0.startsOn ?? today, today) < max($1.startsOn ?? today, today)
         }
     }
 
@@ -339,6 +395,17 @@ struct GuideRootView: View {
                         }
                         .pickerStyle(.menu)
                         .accessibilityLabel("イベントの地域")
+                        Picker("日付", selection: $dateFilter) {
+                            ForEach(EventDateFilter.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                        }
+                        .pickerStyle(.menu)
+                        if dateFilter == .chosen {
+                            DatePicker("探したい日", selection: $chosenDate, displayedComponents: .date)
+                        }
+                        Picker("イベントの種類", selection: $eventType) {
+                            ForEach(EventTypeFilter.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                        }
+                        .pickerStyle(.menu)
                     }
                     if tab == .shops {
                         Picker("地域", selection: $shopRegion) {
@@ -405,7 +472,7 @@ struct GuideRootView: View {
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     }
-                    Text("非公式のファン向け案内です。権利者・販売元による運営ではありません。")
+                    Text("掲載先の権利者・販売元による運営ではありません。")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                     Link("プライバシーについて", destination: GuideData.privacyURL)
@@ -443,8 +510,8 @@ struct GuideRootView: View {
                 Text(tab.rawValue)
                     .font(.title2.bold())
                     .foregroundStyle(GuideStyle.navy)
-                Text(tab == .events ? "開催中・これからのイベント" :
-                        tab == .shops ? "行ってみたいお店や施設" : "公式ショップでグッズを探す")
+                Text(tab == .events ? "日付・地域・種類から探す" :
+                        tab == .shops ? "行ってみたいお店や施設" : "個性的な商品を探す")
                     .font(.subheadline)
                     .foregroundStyle(GuideStyle.muted)
             }
@@ -481,7 +548,8 @@ private struct GuideCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
-                Text(item.startsOn.map { $0 > today } == true ? "開催予定" : item.badge)
+                Text(item.category == .event ?
+                     (item.startsOn.map { $0 > today } == true ? "開催予定" : "開催中") : item.badge)
                     .padding(.horizontal, 10).padding(.vertical, 5)
                     .background(GuideStyle.yellow, in: Capsule())
                 Text(item.region).foregroundStyle(GuideStyle.muted)
