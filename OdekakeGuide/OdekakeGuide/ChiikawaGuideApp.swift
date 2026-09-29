@@ -1,985 +1,238 @@
 import SwiftUI
 
-// iPhoneアプリの最初の土台。Xcodeでこのファイルを追加する場合は、
-// 既存の @main App ファイルと重複しないよう、どちらか一方だけを使います。
-@main
-struct ChiikawaGuideApp: App {
-    var body: some Scene {
-        WindowGroup {
-            GuideRootView()
-                .preferredColorScheme(.dark)
-        }
+private struct Venue: Decodable {
+    let name: String
+    let detail: String
+    let url: String
+    let cuisine: String?
+
+    init(from decoder: Decoder) throws {
+        var values = try decoder.unkeyedContainer()
+        name = try values.decode(String.self)
+        detail = try values.decode(String.self)
+        url = try values.decode(String.self)
+        cuisine = values.isAtEnd ? nil : try values.decode(String.self)
     }
 }
 
-private enum GuideStyle {
-    static let navy = Color(red: 0.08, green: 0.17, blue: 0.29)
-    static let panel = Color(red: 0.13, green: 0.25, blue: 0.38)
-    static let header = Color(red: 0.09, green: 0.20, blue: 0.33)
-    static let yellow = Color(red: 0.95, green: 0.77, blue: 0.40)
-    static let background = navy
-    static let muted = Color(red: 0.82, green: 0.89, blue: 0.94)
-    static let border = Color(red: 0.43, green: 0.57, blue: 0.69)
+private struct Stop: Decodable {
+    let type: String
+    let duration: Int
+    let choices: [Venue]
 }
 
-private struct GuideItem: Identifiable, Decodable {
-    enum Category: String, Decodable, Equatable { case event, shop, goods }
+private struct DayRoute: Decodable, Identifiable {
     let id: String
-    let category: Category
+    let label: String
     let title: String
-    let detail: String
-    let region: String
-    let badge: String
-    let button: String
-    let url: URL
-    var period: String? = nil
-    var venue: String? = nil
-    var startsOn: String? = nil
-    var eventType: String? = nil
-    var endsOn: String? = nil // yyyy-MM-dd。終了日の翌日から一覧に表示しない。
-    var keywords: String? = nil
+    let description: String
+    let area: String
+    let gap: Int
+    let stops: [Stop]
 }
 
-private struct GuideSource: Decodable, Identifiable {
-    let title: String
-    let region: String
-    let detail: String
-    let url: URL
-    let types: [String]
-    let keywords: String
-    var id: String { url.absoluteString }
-}
+private struct GuideData: Decodable {
+    let routes: [DayRoute]
+    let notes: [String: String]
+    let visitMinutes: [String: Int]
 
-private struct GuideFeed: Decodable {
-    let schemaVersion: Int
-    let checkedOn: String
-    let items: [GuideItem]
-    let sources: [GuideSource]?
-}
-
-private enum GuideData {
-    // 初期データは手動確認。公開前・公開後も開催日とリンクを定期的に更新する。
-    static let checkedOn = "2026年9月28日"
-    static let feedURL = URL(string: "https://chiikawa-odekake-guide.shu-tok39.chatgpt.site/guide-data-v2.json")!
-    static let privacyURL = URL(string: "https://chiikawa-odekake-guide.shu-tok39.chatgpt.site/privacy.html")!
-    static let allowedHosts: Set<String> = [
-        "www.tokyo-skytree.jp", "chiikawapark-tokyo.jp", "cafe.parco.jp",
-        "chiikawa-info.jp", "www.chiikawamogumogu.jp", "chiikawabakery.jp",
-        "chiikawamarket.jp", "eshop.fujitv.co.jp",
-        "www.sapporo.travel", "www.sapporo-kokusai.jp", "www.expo2025.or.jp",
-        "hololivepro.com", "www.sakaepark.co.jp", "www.crossroadfukuoka.jp",
-        "www.hetalia-20thex.com", "szo.handmade-marche.jp",
-        "www.kagoshima-kankou.com", "www.creema.jp", "minne.com",
-        "www.tokyo-park.or.jp", "www.welcome.city.yokohama.jp",
-        "osaka-info.jp", "www.visit-hokkaido.jp", "www.tohokukanko.jp",
-        "www.aichinow.pref.aichi.jp", "ja.kyoto.travel", "www.okinawastory.jp"
-    ]
-    static func isValid(_ feed: GuideFeed) -> Bool {
-        feed.schemaVersion == 2 && !feed.checkedOn.isEmpty &&
-        (1...500).contains(feed.items.count) &&
-        Set(feed.items.map(\.id)).count == feed.items.count &&
-        feed.items.allSatisfy { item in
-            item.url.scheme == "https" &&
-            item.url.host.map { allowedHosts.contains($0) } == true &&
-            !item.title.isEmpty && !item.button.isEmpty
-        } && (feed.sources ?? []).allSatisfy { source in
-            source.url.scheme == "https" &&
-            source.url.host.map { allowedHosts.contains($0) } == true
-        }
-    }
-    static func dateString(_ date: Date) -> String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd"
-        formatter.timeZone = TimeZone(identifier: "Asia/Tokyo")
-        return formatter.string(from: date)
-    }
-    static func localToday() -> String { dateString(Date()) }
-    static let bundledFeed: GuideFeed? = {
-        let text = #"""
-{"schemaVersion":2,"checkedOn":"2026年9月28日","items":[{"id":"skytree","title":"ちいかわ☆星ふるスカイツリー®とひみつの島","detail":"東京スカイツリー／10月31日まで。展示や限定メニューなど。","region":"東京","badge":"開催中","button":"公式のイベント詳細","url":"https://www.tokyo-skytree.jp/event/special/chiikawa/","period":"2026年7月10日〜10月31日","venue":"東京スカイツリー","endsOn":"2026-10-31","category":"event","eventType":"character","startsOn":"2026-07-10"},{"id":"cafe-osaka","title":"映画ちいかわ コラボレーションカフェ","detail":"心斎橋PARCO／9月28日まで。予約や利用条件を会場ページで確認。","region":"大阪","badge":"9月28日まで","button":"会場の詳細","url":"https://cafe.parco.jp/event/information/chiikawamovie_cafe_osaka?area=029441","period":"2026年7月24日〜9月28日","venue":"心斎橋PARCO","endsOn":"2026-09-28","category":"event","eventType":"character","startsOn":"2026-07-24"},{"id":"machida-popup","title":"ちいかわ POP UP STORE 町田モディ","detail":"町田駅近くの期間限定店。入店方法は公式ページで確認。","region":"東京","badge":"期間限定","button":"町田の公式ページ","url":"https://chiikawa-info.jp/p26/pus_matd/","period":"2026年10月9日〜11月1日","venue":"町田モディ 4F イベントスペース","startsOn":"2026-10-09","endsOn":"2026-11-01","category":"event","eventType":"character"},{"id":"popup","title":"期間限定ショップの催事一覧","detail":"開催地と期間は公式の催事一覧で確認できます。","region":"全国","badge":"随時更新","button":"公式の催事一覧","url":"https://chiikawa-info.jp/pus.html","category":"shop"},{"id":"tachikawa-magical","title":"まじかるちいかわ POP UP STORE 立川","detail":"グランデュオ立川の期間限定店。入店方法は公式ページで確認。","region":"東京","badge":"期間限定","button":"立川の公式ページ","url":"https://chiikawa-info.jp/p26/mg_tckw/index.html","period":"2026年9月30日〜11月8日","venue":"グランデュオ立川 2F","startsOn":"2026-09-30","endsOn":"2026-11-08","category":"event","eventType":"character"},{"id":"sapporo-magical","title":"まじかるちいかわ POP UP SHOP 札幌","detail":"期間限定店。入店方法は公式ページで確認。","region":"北海道","badge":"期間限定","button":"札幌の公式ページ","url":"https://chiikawa-info.jp/magical_store/kd_spr/index.html","period":"2026年10月2日〜11月3日","venue":"キデイランド POP UP SHOP","startsOn":"2026-10-02","endsOn":"2026-11-03","category":"event","eventType":"character"},{"id":"oita-land","title":"ちいかわらんど POP UP SHOP 大分","detail":"期間限定店。入店方法は公式ページで確認。","region":"大分","badge":"期間限定","button":"大分の公式ページ","url":"https://chiikawa-info.jp/chiikawaland/oita/index.html","period":"2026年9月11日〜10月12日","venue":"アミュプラザおおいた 2F","startsOn":"2026-09-11","endsOn":"2026-10-12","category":"event","eventType":"character"},{"id":"land","title":"ちいかわらんど","detail":"全国の常設店。営業時間・入店方法は各店舗の案内を確認。","region":"全国","badge":"常設店","button":"店舗一覧を見る","url":"https://chiikawa-info.jp/ck_land.html","category":"shop"},{"id":"park","title":"ちいかわパーク","detail":"東京・池袋。チケット販売と利用案内。","region":"東京","badge":"施設","button":"チケット案内","url":"https://chiikawapark-tokyo.jp/ticket","category":"shop"},{"id":"bakery-tokyo","title":"ちいかわベーカリー 表参道","detail":"オモカド3階。入店方法と営業時間を公式案内で確認。","region":"東京","badge":"飲食","button":"表参道店の案内","url":"https://chiikawabakery.jp/information/","category":"shop"},{"id":"bakery-osaka","title":"ちいかわベーカリー OSAKA","detail":"KITTE大阪3階。入店方法と営業時間を公式案内で確認。","region":"大阪","badge":"飲食","button":"大阪店の案内","url":"https://chiikawabakery.jp/information-osaka/","category":"shop"},{"id":"ramen-ikebukuro","title":"ちいかわラーメン 豚 池袋","detail":"池袋PARCO本館8階。予約・入店方法は公式案内で確認。","region":"東京","badge":"飲食","button":"池袋店の案内","url":"https://cafe.parco.jp/event/chiikawaramenbuta_ikebukuro?area=029688","category":"shop"},{"id":"ramen-shibuya","title":"ちいかわラーメン 豚 渋谷","detail":"渋谷PARCO地下1階。予約・入店方法は公式案内で確認。","region":"東京","badge":"飲食","button":"渋谷店の案内","url":"https://cafe.parco.jp/event/chiikawaramenbuta_shibuya?area=029979","category":"shop"},{"id":"mogumogu-kawagoe","title":"ちいかわもぐもぐ本舗 川越店","detail":"埼玉・川越。和をテーマにしたお菓子や雑貨のお店。","region":"埼玉","badge":"常設店","button":"川越店の案内","url":"https://www.chiikawamogumogu.jp/stores/kawagoe/","category":"shop"},{"id":"mogumogu-fushimi","title":"ちいかわもぐもぐ本舗 京都伏見店","detail":"京都・伏見。和をテーマにしたお菓子や雑貨のお店。","region":"京都","badge":"常設店","button":"京都伏見店の案内","url":"https://www.chiikawamogumogu.jp/stores/fushimi/","category":"shop"},{"id":"cafe","title":"コラボカフェ","detail":"開催中の会場や期間を確認。","region":"全国","badge":"飲食","button":"カフェ情報を見る","url":"https://chiikawa-info.jp/cafe.html","category":"shop"},{"id":"harajuku","title":"ちいかわらんど 原宿店","detail":"東京・原宿。来店前に入店方法を確認。","region":"東京","badge":"常設店","button":"原宿店の公式ページ","url":"https://chiikawa-info.jp/chiikawaland/harajuku/index.html","category":"shop"},{"id":"tokyo-station","title":"ちいかわらんど TOKYO Station","detail":"東京駅周辺の常設店。","region":"東京","badge":"常設店","button":"東京駅店の公式ページ","url":"https://chiikawa-info.jp/chiikawaland/tokyo/index.html","category":"shop"},{"id":"shinjuku","title":"ちいかわらんど 新宿店","detail":"東京・新宿の常設店。","region":"東京","badge":"常設店","button":"新宿店の公式ページ","url":"https://chiikawa-info.jp/chiikawaland/shinjuku/index.html","category":"shop"},{"id":"osaka","title":"ちいかわらんど 大阪梅田店","detail":"大阪・梅田の常設店。","region":"大阪","badge":"常設店","button":"大阪梅田店の公式ページ","url":"https://chiikawa-info.jp/chiikawaland/osaka/index.html","category":"shop"},{"id":"nagoya","title":"ちいかわらんど 名古屋パルコ店","detail":"愛知・名古屋の常設店。","region":"愛知","badge":"常設店","button":"名古屋店の公式ページ","url":"https://chiikawa-info.jp/chiikawaland/nagoya/index.html","category":"shop"},{"id":"market","title":"ちいかわマーケット","detail":"公式グッズショップ。価格・在庫は販売ページで確認。","region":"オンライン","badge":"公式ショップ","button":"ショップを開く","url":"https://chiikawamarket.jp/","category":"goods"},{"id":"plush-chiikawa","title":"ぬいぐるみS（ちいかわ）","detail":"公式の商品ページ。売り切れの場合は入荷のお知らせを確認。","region":"オンライン","badge":"商品ページ","button":"ぬいぐるみを見る","url":"https://chiikawamarket.jp/products/4589468435181","category":"goods"},{"id":"pen-hachiware","title":"ドクターグリップ 4+1（ハチワレ）","detail":"公式の商品ページ。価格・在庫は販売元で確認。","region":"オンライン","badge":"商品ページ","button":"文房具を見る","url":"https://chiikawamarket.jp/products/4901770775784","category":"goods"},{"id":"mug-chiikawa","title":"フェイスマグ（ちいかわ）","detail":"公式の商品ページ。売り切れの場合は入荷のお知らせを確認。","region":"オンライン","badge":"商品ページ","button":"マグカップを見る","url":"https://chiikawamarket.jp/products/4979274905471","category":"goods"},{"id":"restock","title":"再入荷商品","detail":"再入荷の一覧。個別商品の入荷通知は販売元で設定。","region":"オンライン","badge":"再入荷","button":"再入荷商品を見る","url":"https://chiikawamarket.jp/collections/restock","category":"goods"},{"id":"movie-goods","title":"映画ちいかわのグッズ","detail":"取扱店と販売情報を確認。","region":"全国","badge":"作品別","button":"取扱い情報を見る","url":"https://chiikawa-info.jp/p26/ck_movie/","category":"goods"},{"id":"new-goods","title":"新着商品","detail":"新しく掲載された商品を公式ショップで確認。","region":"オンライン","badge":"新着","button":"新着商品を見る","url":"https://chiikawamarket.jp/collections/newitems","category":"goods"},{"id":"preorder","title":"予約商品","detail":"発送予定や注文条件は各商品ページで確認。","region":"オンライン","badge":"予約","button":"予約商品を見る","url":"https://chiikawamarket.jp/collections/preorder","category":"goods"},{"id":"plush","title":"ぬいぐるみ・マスコット","detail":"公式ショップのカテゴリーから探す。","region":"オンライン","badge":"カテゴリー","button":"一覧を見る","url":"https://chiikawamarket.jp/collections/nuigurumi","category":"goods"},{"id":"fuji-tv","title":"フジテレビｅ!ショップ","detail":"アニメ関連グッズを販売元の一覧で確認。","region":"オンライン","badge":"販売サイト","button":"商品一覧を見る","url":"https://eshop.fujitv.co.jp/c/g_anime/B007088?sort=latest","category":"goods"},{"id":"sapporo-autumnfest","title":"さっぽろオータムフェスト","detail":"北海道各地の食を楽しむ秋の催し。","region":"北海道","venue":"札幌市・大通公園","startsOn":"2026-09-11","endsOn":"2026-10-03","period":"2026年9月11日〜10月3日","category":"event","eventType":"food","badge":"開催予定","button":"公式情報を見る","url":"https://www.sapporo.travel/autumnfest/"},{"id":"sapporo-kokusai-autumn","title":"札幌国際スキー場 秋祭り","detail":"紅葉ゴンドラと秋の味覚。","region":"北海道","venue":"札幌国際スキー場","startsOn":"2026-10-01","endsOn":"2026-10-20","period":"2026年10月1日〜10月20日","category":"event","eventType":"festival","badge":"開催予定","button":"公式情報を見る","url":"https://www.sapporo-kokusai.jp/autumn/"},{"id":"expo-futures-tokyo","title":"EXPO2025 Futures Tour 東京","detail":"大阪・関西万博の展示や作品を紹介する巡回イベント。","region":"東京","venue":"東京会場（詳細は公式ページ）","startsOn":"2026-10-10","endsOn":"2026-10-11","period":"2026年10月10日〜10月11日","category":"event","eventType":"exhibition","badge":"開催予定","button":"公式情報を見る","url":"https://www.expo2025.or.jp/officialblog/expo2025-f-tour1010/"},{"id":"hololive-tour-tokyo","title":"hololive Grand Reception 東京・前半","detail":"全国巡回展示会の東京会場。","region":"東京","venue":"TOKYO DREAM PARK 7階","startsOn":"2026-10-10","endsOn":"2026-10-28","period":"2026年10月10日〜10月28日","category":"event","eventType":"character","badge":"開催予定","button":"公式情報を見る","url":"https://hololivepro.com/news/20260821-01-298/"},{"id":"imo-fes-nagoya","title":"芋フェス！ IN 名古屋オアシス21","detail":"さつまいもグルメが集まる催し。","region":"愛知","venue":"オアシス21","startsOn":"2026-10-10","endsOn":"2026-10-12","period":"2026年10月10日〜10月12日","category":"event","eventType":"food","badge":"開催予定","button":"公式情報を見る","url":"https://www.sakaepark.co.jp/events/8010/"},{"id":"koishiwara-pottery","title":"小石原 秋の民陶むら祭","detail":"小石原焼・高取焼の窯元を巡る陶器市。","region":"福岡","venue":"福岡県東峰村・小石原地区","startsOn":"2026-10-10","endsOn":"2026-10-12","period":"2026年10月10日〜10月12日","category":"event","eventType":"craft","badge":"開催予定","button":"公式情報を見る","url":"https://www.crossroadfukuoka.jp/event/13730"},{"id":"hetalia-exhibition","title":"ヘタリア20周年原画展 WorldFesta","detail":"原画や記念グッズを楽しめる展覧会。","region":"東京","venue":"池袋・サンシャインシティ 展示ホールA","startsOn":"2026-10-17","endsOn":"2026-10-28","period":"2026年10月17日〜10月28日","category":"event","eventType":"exhibition","badge":"開催予定","button":"公式情報を見る","url":"https://www.hetalia-20thex.com/"},{"id":"shizuoka-marche","title":"静岡ハンドメイドマルシェ2026","detail":"全国の作家による作品や手作りフードが集まる催し。","region":"静岡","venue":"ツインメッセ静岡","startsOn":"2026-10-31","endsOn":"2026-11-01","period":"2026年10月31日〜11月1日","category":"event","eventType":"craft","badge":"開催予定","button":"公式情報を見る","url":"https://szo.handmade-marche.jp/"},{"id":"izumi-machiterasu","title":"いずみマチ・テラス","detail":"竹灯籠で街を彩る秋の催し。開催概要は県公式の一覧から確認。","region":"鹿児島","venue":"出水麓武家屋敷群地区","startsOn":"2026-10-31","endsOn":"2026-11-03","period":"2026年10月31日〜11月3日","category":"event","eventType":"festival","badge":"開催予定","button":"公式情報を見る","url":"https://www.kagoshima-kankou.com/event"},{"id":"creema","title":"Creema","detail":"作家によるハンドメイド作品を探せる販売サイト。","region":"オンライン","badge":"販売サイト","button":"Creemaで探す","url":"https://www.creema.jp/","category":"goods"},{"id":"minne","title":"minne","detail":"雑貨やクラフト作品を探せる販売サイト。","region":"オンライン","badge":"販売サイト","button":"minneで探す","url":"https://minne.com/","category":"goods"},{"id":"hololive-tour-tokyo-late","title":"hololive Grand Reception 東京・後半","detail":"全国巡回展示会の東京会場。前半と内容の一部が異なります。","region":"東京","venue":"TOKYO DREAM PARK 7階","startsOn":"2026-10-31","endsOn":"2026-11-23","period":"2026年10月31日〜11月23日","category":"event","eventType":"character","badge":"開催予定","button":"公式情報を見る","url":"https://hololivepro.com/news/20260821-01-298/"},{"id":"hetalia-exhibition-osaka","title":"ヘタリア20周年原画展 WorldFesta 大阪","detail":"原画や記念グッズを楽しめる展覧会。","region":"大阪","venue":"なんばパークスミュージアム","startsOn":"2026-11-07","endsOn":"2026-11-23","period":"2026年11月7日〜11月23日","category":"event","eventType":"exhibition","badge":"開催予定","button":"公式情報を見る","url":"https://www.hetalia-20thex.com/"},{"id":"rose-akirudai","title":"ローズフェスタ2026秋","detail":"秋留台公園のバラと、工作・雑貨販売などを楽しめます。","region":"東京","venue":"秋留台公園","startsOn":"2026-10-05","endsOn":"2026-10-12","period":"2026年10月5日〜12日","category":"event","eventType":"nature","badge":"開催予定","button":"公式情報を見る","url":"https://www.tokyo-park.or.jp/park/akirudai/news/2026/2026_3.html","keywords":"花 バラ 公園 体験 手作り"},{"id":"rikugien-autumn","title":"秋の六義園","detail":"庭園で秋の景色と日本文化に触れる催しです。","region":"東京","venue":"六義園","startsOn":"2026-10-17","endsOn":"2026-12-06","period":"2026年10月17日〜12月6日","category":"event","eventType":"nature","badge":"開催予定","button":"公式情報を見る","url":"https://www.tokyo-park.or.jp/event_search/rikugien_autumn.html","keywords":"紅葉 庭園 和文化 散歩"},{"id":"bay-walk-market-2026","title":"BAY WALK MARKET 2026","detail":"横浜の海辺を歩きながら、マーケットやグルメを楽しめます。","region":"神奈川","venue":"横浜みなとみらい新港地区","startsOn":"2026-10-09","endsOn":"2026-10-12","period":"2026年10月9日〜12日","category":"event","eventType":"market","badge":"開催予定","button":"公式情報を見る","url":"https://www.welcome.city.yokohama.jp/eventinfo/ev_detail.php?bid=yw12200","keywords":"ハロウィン 雑貨 ペット 海辺 マルシェ"},{"id":"enlightenment-osaka","title":"ENLIGHTENMENT JAPAN 大阪市立美術館","detail":"美術館の中央ホールを使った光と音の映像体験です。除外日があります。","region":"大阪","venue":"大阪市立美術館","startsOn":"2026-10-10","endsOn":"2026-11-29","period":"2026年10月10日〜11月29日（一部除外日）","category":"event","eventType":"exhibition","badge":"開催予定","button":"公式情報を見る","url":"https://osaka-info.jp/event/enlightenment-osaka/","keywords":"光 アート 映像 プロジェクションマッピング"},{"id":"yokohama-yorunoyo-2026","title":"ヨルノヨ2026","detail":"横浜の都心臨海部で開催する冬のイルミネーションです。","region":"神奈川","venue":"横浜都心臨海部","startsOn":"2026-12-04","endsOn":"2026-12-30","period":"2026年12月4日〜30日","category":"event","eventType":"festival","badge":"開催予定","button":"公式情報を見る","url":"https://www.welcome.city.yokohama.jp/eventinfo/ev_detail.php?bid=yw9092","keywords":"夜景 イルミネーション 冬 光"},{"id":"old-furukawa-rose","title":"旧古河庭園 秋のバラフェスティバル","detail":"秋のバラを楽しめる庭園の催しです。","region":"東京","venue":"旧古河庭園","startsOn":"2026-10-10","endsOn":"2026-11-06","period":"2026年10月10日〜11月6日","category":"event","eventType":"nature","badge":"開催予定","button":"公式情報を見る","url":"https://www.tokyo-park.or.jp/park/kyu-furukawa/news/2026/10_10_11_6.html","keywords":"花 バラ 庭園 散歩"}],"sources":[{"title":"北海道のイベント","region":"北海道","detail":"HOKKAIDO LOVE! 公式観光情報","url":"https://www.visit-hokkaido.jp/event/","types":["food","festival","nature","experience"],"keywords":"札幌 雪まつり グルメ 自然 冬"},{"title":"東北のイベント","region":"東北","detail":"旅東北のイベント検索","url":"https://www.tohokukanko.jp/festivals/","types":["festival","nature","food"],"keywords":"青森 岩手 秋田 宮城 山形 福島 祭り"},{"title":"東京の公園・庭園","region":"東京","detail":"都立公園のイベント検索","url":"https://www.tokyo-park.or.jp/event_search/","types":["nature","experience","festival"],"keywords":"花 バラ 紅葉 桜 公園"},{"title":"横浜のイベント","region":"神奈川","detail":"横浜市の観光イベント一覧","url":"https://www.welcome.city.yokohama.jp/eventinfo/","types":["market","food","exhibition","festival","character"],"keywords":"マーケット グルメ 花火 夜景"},{"title":"愛知のイベント","region":"愛知","detail":"愛知県観光協会のイベント検索","url":"https://www.aichinow.pref.aichi.jp/events","types":["festival","food","nature"],"keywords":"名古屋 祭り グルメ 花"},{"title":"京都の行事・催し","region":"京都","detail":"京都市公式のイベント情報","url":"https://ja.kyoto.travel/event/","types":["festival","exhibition","food","market"],"keywords":"伝統 工芸 紅葉 グルメ"},{"title":"大阪のイベント","region":"大阪","detail":"大阪公式観光情報のイベント一覧","url":"https://osaka-info.jp/event/","types":["festival","exhibition","food","experience"],"keywords":"展示 グルメ 体験 お祭り"},{"title":"福岡のイベント","region":"福岡","detail":"クロスロードふくおかのイベント検索","url":"https://www.crossroadfukuoka.jp/event","types":["craft","food","festival","nature"],"keywords":"陶器市 小石原 グルメ 花"},{"title":"沖縄のイベント","region":"沖縄","detail":"おきなわ物語のイベント検索","url":"https://www.okinawastory.jp/event/","types":["festival","nature","experience","food"],"keywords":"海 祭り 文化 体験"},{"title":"ハンドメイドの催し","region":"全国","detail":"Creemaのイベント・フェス情報","url":"https://www.creema.jp/event","types":["craft","market","experience"],"keywords":"雑貨 マルシェ 陶器市 ものづくり"}]}
+    static let bundled: GuideData = {
+        let json = #"""
+{"routes":[{"id":"asakusa","label":"Tokyo · Asakusa to Skytree","title":"Old Tokyo, new skyline","description":"Temples, local food and a view across the city.","area":"Asakusa & Oshiage","gap":18,"stops":[{"type":"sight","duration":65,"choices":[["Sensoji Temple","Tokyo’s best-known historic temple","https://www.senso-ji.jp/"],["Asakusa Culture Tourist Information Center","Start with a view and local travel advice","https://www.gotokyo.org/en/story/walks-and-tours/asakusa/"]]},{"type":"walk","duration":55,"choices":[["Nakamise Shopping Street","Snacks and traditional souvenirs","https://www.gotokyo.org/en/spot/73/"],["Sumida Park","Riverside views on the way east","https://www.gotokyo.org/en/destinations/eastern-tokyo/asakusa/index.html"]]},{"type":"food","duration":65,"choices":[["Ramen Yoroiya","Japanese-style ramen near Sensoji","https://yoroiya.jp/","ramen"],["Sushizanmai Asakusa Kaminarimon","Sushi near Kaminarimon Gate","https://www.kiyomura.co.jp/store/detail/33","sushi"],["Asakusa Imahan","Sukiyaki and Japanese dining","https://www.asakusaimahan.co.jp/en/kokusai","japanese"]]},{"type":"sight","duration":75,"choices":[["Tokyo Skytree","Observation decks and a panorama","https://www.tokyo-skytree.jp/en/ticket/"],["Sumida Aquarium","Aquatic life inside Skytree Town","https://www.sumida-aquarium.com/en/"],["Postal Museum Japan","Discover the postal museum in Skytree Town","https://www.gotokyo.org/en/spot/903/index.html"]]},{"type":"break","duration":55,"choices":[["Tokyo Solamachi","Shops and a relaxed finish","https://www.tokyo-solamachi.jp/en/"],["Sumida Aquarium","An indoor finale beside Skytree","https://www.sumida-aquarium.com/en/"],["Tokyo Mizumachi","Riverside shops between Asakusa and Skytree","https://www.gotokyo.org/en/spot/1795/index.html"]]}]},{"id":"ueno","label":"Tokyo · Ueno culture and food","title":"Art, park and a good lunch","description":"A compact culture day with a choice of ramen, sushi or classic dining.","area":"Ueno","gap":15,"stops":[{"type":"sight","duration":75,"choices":[["Tokyo National Museum","Japanese and Asian art and archaeology","https://www.tnm.jp/?lang=en"],["National Museum of Nature and Science","Science, nature and Japanese discoveries","https://www.kahaku.go.jp/english/"],["National Museum of Western Art","Art collections in Ueno Park","https://www.gotokyo.org/en/spot/120/"]]},{"type":"walk","duration":50,"choices":[["Ueno Park","Gardens and cultural landmarks","https://www.gotokyo.org/en/spot/482/"],["Ameyoko Shopping Street","A lively market-style street","https://www.gotokyo.org/en/spot/71/"]]},{"type":"food","duration":65,"choices":[["Inshotei","Japanese seasonal dining in Ueno Park","https://www.innsyoutei.jp/en/","japanese"],["Sushizanmai Ueno","Sushi around Ueno Station","https://www.kiyomura.co.jp/store/detail/20","sushi"],["IPPUDO Ueno-hirokoji","Ramen near the shopping streets","https://stores.ippudo.com/en/1826","ramen"]]},{"type":"sight","duration":75,"choices":[["National Museum of Nature and Science","Explore the permanent galleries","https://www.kahaku.go.jp/english/"],["Tokyo National Museum","Choose a gallery or exhibition","https://www.tnm.jp/?lang=en"],["Tokyo Metropolitan Art Museum","Explore an exhibition in Ueno Park","https://www.gotokyo.org/en/spot/1746/index.html"]]},{"type":"break","duration":55,"choices":[["Shinobazu Pond","A relaxed walk by the water","https://www.gotokyo.org/en/spot/400/index.html"],["Ueno Toshogu Shrine","A historic shrine within Ueno Park","https://www.gotokyo.org/en/spot/399/index.html"]]}]},{"id":"kyoto","label":"Kyoto · Kiyomizu to Gion","title":"Kyoto lanes and temple gates","description":"A walking day through Higashiyama, with lunch choices on the way to Gion.","area":"Higashiyama & Gion","gap":20,"stops":[{"type":"sight","duration":70,"choices":[["Kiyomizu-dera Temple","A classic hillside temple and city views","https://kyoto.travel/en/destinations/kiyomizudera-temple/"],["Kodai-ji Temple","Gardens and historic temple halls nearby","https://kyoto.travel/en/destinations/kodaiji-temple/"]]},{"type":"walk","duration":60,"choices":[["Sannenzaka and Ninenzaka","Walk historic slopes and shopfronts","https://kyoto.travel/en/itineraries/higashiyama-at-dawn/"],["Yasaka Pagoda streets","A landmark framed by old Kyoto lanes","https://kyoto.travel/en/destinations/hokanji-templeyasaka-pagoda/"]]},{"type":"food","duration":75,"choices":[["Gion Tempura Endo","Tempura near Yasaka Pagoda; reservations advised","https://www.gion-endo.com/en/","japanese"],["Gion Izuju","Traditional Kyoto-style sushi beside Yasaka Shrine","https://gion-izuju.com/english-page/","sushi"],["ICHIRAN Kyoto Kawaramachi","Tonkotsu ramen across the river from Gion","https://en.ichiran.com/shop/kinki/kyoto-kawaramachi/","ramen"]]},{"type":"sight","duration":60,"choices":[["Yasaka-jinja Shrine","A bright landmark at the edge of Gion","https://kyoto.travel/en/destinations/yasakajinja-shrine/"],["Kennin-ji Temple","Zen temple and gardens in the Gion area","https://kyoto.travel/en/destinations/kenninjitemple/"]]},{"type":"break","duration":55,"choices":[["Gion lanes","Explore public streets and traditional architecture","https://kyoto.travel/en/areas/gion-kiyomizu/"],["Kamo River promenade","Finish by the river near Gion-Shijo","https://kyoto.travel/en/getting-around/comfortable-access-to-gion-yasaka-jinja-shrine/"]]}]},{"id":"osaka","label":"Osaka · Namba and Dotonbori","title":"Osaka street food and neon","description":"Markets, cookware streets and a lively canal-side finish.","area":"Namba & Dotonbori","gap":17,"stops":[{"type":"sight","duration":65,"choices":[["Kuromon Market","Browse stalls in Osaka’s historic food market","https://osaka-info.jp/en/spot/kuromon-market/"],["Namba Yasaka Shrine","A striking lion-head shrine in Namba","https://osaka-info.jp/en/spot/nanbayasakajinja/"]]},{"type":"walk","duration":55,"choices":[["Sennichimae Doguyasuji","Cooking tools and food replicas","https://osaka-info.jp/en/spot/sennichimae-doguyasuji-shopping-street/"],["Hozenji Yokocho","Stone-paved lane and neighborhood atmosphere","https://www.osaka-info.jp/en/spot/hozenji-yokocho/"],["Namba Parks","Shopping and a rooftop garden in Namba","https://osaka-info.jp/experience/en/osaka/spot/240"]]},{"type":"food","duration":70,"choices":[["Chibo Dotonbori","Osaka-style okonomiyaki in Dotonbori","https://shop.chibo.com/detail/28/","japanese"],["Sushizanmai Ebisubashi","Sushi close to Ebisubashi","https://www.kiyomura.co.jp/store/detail/76","sushi"],["ICHIRAN Dotonbori South","Tonkotsu ramen by the canal district","https://en.ichiran.com/shop/kinki/dotonbori-south/","ramen"]]},{"type":"sight","duration":60,"choices":[["Dotonbori","Canal-side signs and busy streets","https://osaka-info.jp/en/spot/dotonbori/"],["Hozenji Yokocho","A quieter stone-paved detour nearby","https://www.osaka-info.jp/en/spot/hozenji-yokocho/"],["Ebisu Bridge","See the canal and landmark signs from the bridge","https://osaka-info.jp/experience/en/osaka/spot/551"]]},{"type":"break","duration":55,"choices":[["Shinsaibashi-suji","End with a stroll through the shopping arcade","https://osaka-info.jp/en/spot/shinsaibashi-suji-shopping-street/"],["Ebisubashi-suji","Shop and snack near Namba Station","https://osaka-info.jp/en/spot/ebisubashisuji-shopping-street/"]]}]},{"id":"nara","label":"Nara · Great Buddha and old town","title":"Nara temples and old streets","description":"The Great Buddha, a garden and a local food break on a walk toward Naramachi.","area":"Nara Park & Naramachi","gap":19,"stops":[{"type":"sight","duration":75,"choices":[["Todai-ji Temple","Visit the Great Buddha Hall","https://www.visitnara.jp/venues/A00485/"],["Nara National Museum","Explore Nara’s Buddhist art collection","https://www.narahaku.go.jp/english/"]]},{"type":"walk","duration":55,"choices":[["Isuien Garden","Stroll through a landscaped garden near Todai-ji","https://www.visitnara.jp/venues/A00493/"],["Nara Park","Walk among the park’s historic temples and deer","https://www.visitnara.jp/venues/A00489/"]]},{"type":"food","duration":65,"choices":[["Kamaiki Honten","Fresh udon near Kintetsu Nara Station","https://www.visitnara.jp/venues/D00082/","japanese"],["Kakinohazushi Tanaka","Local persimmon-leaf sushi and a light lunch","https://www.visitnara.jp/venues/D00067/","sushi"],["Genkishin","Ramen near Kintetsu Nara Station","https://www.visitnara.jp/venues/D00109/","ramen"]]},{"type":"sight","duration":60,"choices":[["Kohfukuji Temple","Temple grounds near the shopping streets","https://www.visitnara.jp/venues/A00486/"],["Sarusawa Pond","A short pause with a view toward Kohfukuji","https://www.visitnara.jp/venues/A01559/"]]},{"type":"break","duration":55,"choices":[["Naramachi","Browse old lanes and local crafts","https://www.visitnara.jp/destinations/area/naramachi/"],["Gangoji Temple","Explore a historic temple in Naramachi","https://www.visitnara.jp/venues/A00495/"]]}]},{"id":"hiroshima","label":"Hiroshima · Peace Park and gardens","title":"Hiroshima, reflection and renewal","description":"Time for the memorial sites, local lunch, castle grounds and a garden.","area":"Central Hiroshima","gap":23,"stops":[{"type":"sight","duration":85,"choices":[["Hiroshima Peace Memorial Museum","Allow unhurried time for the exhibits","https://dive-hiroshima.com/en/explore/2675/"],["National Peace Memorial Hall","Remember the victims through testimony and remembrance","https://dive-hiroshima.com/en/explore/2679/"]]},{"type":"walk","duration":55,"choices":[["Peace Memorial Park","Walk respectfully through the memorial grounds","https://dive-hiroshima.com/en/explore/2621/"],["Atomic Bomb Dome","Visit the preserved landmark on the park’s north side","https://dive-hiroshima.com/en/explore/2687/"]]},{"type":"food","duration":70,"choices":[["Nagata-ya","Hiroshima-style okonomiyaki near Peace Park","https://nagataya-okonomi.com/en/access.html","japanese"],["Sushitei Hondori","Sushi in the nearby Hondori arcade","https://www.hondori.or.jp/shop/detail?shop_id=55","sushi"],["IPPUDO Hiroshima Fukuromachi","Ramen in the central Fukuromachi area","https://stores.ippudo.com/en/1048","ramen"]]},{"type":"sight","duration":60,"choices":[["Hiroshima Castle grounds","Walk the castle site; the main keep is closed","https://dive-hiroshima.com/en/explore/3318/"],["Hiroshima Hondori","Explore the covered shopping street","https://dive-hiroshima.com/en/explore/3502/"]]},{"type":"break","duration":60,"choices":[["Shukkeien Garden","Finish among ponds and garden paths","https://dive-hiroshima.com/en/explore/306/"],["Hiroshima Prefectural Art Museum","Art beside Shukkeien Garden","https://dive-hiroshima.com/en/explore/312/"]]}]}],"notes":{"Sensoji Temple":"The temple grounds and worship areas have different rhythms. Follow signs and leave time for the approach.","Asakusa Culture Tourist Information Center":"Ask for an area map or current local advice before heading into the lanes.","Nakamise Shopping Street":"Browse before buying snacks; individual shop hours can differ from the temple grounds.","Sumida Park":"This is an outdoor riverside stop. Keep a weather alternative in mind.","Ramen Yoroiya":"A compact ramen lunch suits a quicker schedule; allow extra time if there is a queue.","Sushizanmai Asakusa Kaminarimon":"Choose sushi near Kaminarimon; check the current menu and wait at the store.","Asakusa Imahan":"Sukiyaki is a slower meal. Check reservations and allow time to sit down.","Tokyo Skytree":"Check observation deck tickets before crossing over from Asakusa.","Sumida Aquarium":"The aquarium is inside Skytree Town and requires its own admission.","Postal Museum Japan":"The museum is in Skytree Town. Check its opening day before choosing this indoor stop.","Tokyo Solamachi":"Shops and food are in the same complex as Skytree, making this an easy flexible finish.","Tokyo Mizumachi":"This riverside complex is between Asakusa and Skytree; check your walking direction after a swap.","Tokyo National Museum":"The museum has multiple galleries. Choose a collection before you arrive.","National Museum of Nature and Science":"Pick a few galleries rather than trying to see everything in one stop.","National Museum of Western Art":"This museum is in Ueno Park. Check the exhibition and ticket details for your day.","Ueno Park":"Outdoor paths connect several museums; the experience changes with the weather.","Ameyoko Shopping Street":"Expect a busy street of small shops and food stalls near Ueno Station.","Inshotei":"A sit-down seasonal meal in the park can take longer than a quick noodle stop.","Sushizanmai Ueno":"Check the store menu and any wait before committing to a timed museum visit.","IPPUDO Ueno-hirokoji":"A quicker ramen stop around the shopping streets; check the store hours.","Tokyo Metropolitan Art Museum":"Exhibitions change. Confirm what is on and whether a ticket is needed.","Shinobazu Pond":"A flexible outdoor finish; take the paths that suit your remaining time.","Ueno Toshogu Shrine":"Check access to the inner grounds if you plan to see more than the approach.","Kiyomizu-dera Temple":"The approach is uphill. Leave time for the walk as well as the temple.","Kodai-ji Temple":"A quieter temple and garden option; check admission and special opening times.","Sannenzaka and Ninenzaka":"These sloping streets have steps and crowds. Wear comfortable shoes.","Yasaka Pagoda streets":"The pagoda is best viewed from public streets; leave the roadway clear.","Gion Tempura Endo":"A longer sit-down meal. Check lunch reservations before setting out.","Gion Izuju":"Kyoto-style sushi differs from typical nigiri; browse the menu before deciding.","ICHIRAN Kyoto Kawaramachi":"This ramen choice is farther west of the Gion sights. Allow more walking time.","Yasaka-jinja Shrine":"A convenient landmark on the way into Gion; respect worshippers and signs.","Kennin-ji Temple":"Check the temple visit hours and allow time for its garden areas.","Gion lanes":"Stay on public streets, respect private property and follow local photography rules.","Kamo River promenade":"An outdoor riverside finish; the path can be a pleasant change from Gion lanes.","Kuromon Market":"Stalls vary by day and time. Browse first and eat only where the shop permits.","Namba Yasaka Shrine":"This option lies farther west than Kuromon; allow extra time to reach the next stop.","Sennichimae Doguyasuji":"Look for cookware and food replicas; many shops close earlier than nightlife venues.","Hozenji Yokocho":"A small stone-paved lane offers a quieter pause near busy Dotonbori.","Namba Parks":"The rooftop garden offers an outdoor break above the shops.","Chibo Dotonbori":"Okonomiyaki is cooked to order. Allow more time than for a quick ramen bowl.","Sushizanmai Ebisubashi":"Sushi is close to the bridge; check the store menu and queue.","ICHIRAN Dotonbori South":"This is the South Building; the former Dotonbori Main Building has closed.","Dotonbori":"A busy canal-side area. Move beyond the main photo spot to explore the streets.","Ebisu Bridge":"A short photo stop over the canal; keep space for other pedestrians.","Shinsaibashi-suji":"A long shopping arcade, so choose a turnaround point for your schedule.","Ebisubashi-suji":"A covered route back toward Namba Station with shops and snacks.","Todai-ji Temple":"Check Great Buddha Hall admission and keep time for the walk through the park.","Nara National Museum":"Exhibitions and opening days vary. Confirm the galleries you want to see.","Isuien Garden":"A garden near Todai-ji; check admission and opening days before your visit.","Nara Park":"The deer are wild. Feed them only the special deer crackers sold in the park.","Kamaiki Honten":"A fresh udon stop near Kintetsu Nara Station; allow for a lunchtime queue.","Kakinohazushi Tanaka":"A light local sushi meal and tea-room stop, rather than a long restaurant lunch.","Genkishin":"A ramen option near the station; confirm current opening times.","Kohfukuji Temple":"Near the main shopping area; decide whether to enter the paid museum hall.","Sarusawa Pond":"An easy outdoor pause with a view toward Kohfukuji.","Naramachi":"These old-town streets reward a slow walk; individual shops keep their own hours.","Gangoji Temple":"A quieter cultural stop in Naramachi; check its admission hours.","Hiroshima Peace Memorial Museum":"The exhibits can be emotionally demanding. Give yourself enough unhurried time.","National Peace Memorial Hall":"A space for remembrance and testimony; approach it respectfully.","Peace Memorial Park":"Leave time to reflect at the monuments rather than treating this as a quick crossing.","Atomic Bomb Dome":"View the preserved exterior from the public paths and respect the memorial setting.","Nagata-ya":"Hiroshima-style okonomiyaki close to Peace Park; queues can add time.","Sushitei Hondori":"Sushi in the Hondori arcade; confirm today’s opening and menu.","IPPUDO Hiroshima Fukuromachi":"A ramen choice in Fukuromachi; allow walking time from the park.","Hiroshima Castle grounds":"The main keep is closed to entry. The exterior and grounds can still be viewed.","Hiroshima Hondori":"A covered central shopping street, useful as a flexible indoor finish.","Shukkeien Garden":"Allow time to follow the paths around the ponds; check garden admission.","Hiroshima Prefectural Art Museum":"Beside Shukkeien; check current exhibitions and tickets."},"visitMinutes":{"Tokyo Skytree":80,"Sumida Aquarium":65,"Postal Museum Japan":50,"Tokyo Mizumachi":45,"Tokyo National Museum":85,"National Museum of Nature and Science":85,"Tokyo Metropolitan Art Museum":70,"National Museum of Western Art":75,"Kiyomizu-dera Temple":75,"Kodai-ji Temple":60,"Yasaka Pagoda streets":40,"Kennin-ji Temple":70,"Kamo River promenade":40,"Namba Yasaka Shrine":40,"Hozenji Yokocho":40,"Ebisu Bridge":25,"Namba Parks":50,"Nara National Museum":85,"Nara Park":45,"Sarusawa Pond":35,"Kakinohazushi Tanaka":40,"Kamaiki Honten":50,"National Peace Memorial Hall":65,"Atomic Bomb Dome":35,"Hiroshima Hondori":45,"Hiroshima Prefectural Art Museum":75,"Nagata-ya":65}}
 """#
-        guard let data = text.data(using: .utf8),
-              let feed = try? JSONDecoder().decode(GuideFeed.self, from: data),
-              isValid(feed) else { return nil }
-        return feed
+        guard let guide = try? JSONDecoder().decode(GuideData.self, from: Data(json.utf8)) else {
+            fatalError("Embedded guide data is invalid")
+        }
+        return guide
     }()
-    static var bundledItems: [GuideItem] { bundledFeed?.items ?? events + shops + goods }
-    static var bundledSources: [GuideSource] { bundledFeed?.sources ?? [] }
-    static let events: [GuideItem] = [
-        .init(id: "skytree", category: .event,
-              title: "ちいかわ☆星ふるスカイツリー®とひみつの島",
-              detail: "東京スカイツリー／10月31日まで。展示や限定メニューなど。",
-              region: "東京", badge: "開催中", button: "公式のイベント詳細",
-              url: URL(string: "https://www.tokyo-skytree.jp/event/special/chiikawa/")!,
-              period: "2026年7月10日〜10月31日", venue: "東京スカイツリー", endsOn: "2026-10-31"),
-        .init(id: "park-autumn", category: .event,
-              title: "ちいかわパーク 秋の限定企画",
-              detail: "池袋。開催内容・営業時間・チケット情報を公式のお知らせで確認。",
-              region: "東京", badge: "公式情報", button: "公式のお知らせ",
-              url: URL(string: "https://chiikawapark-tokyo.jp/news/")!),
-        .init(id: "cafe-osaka", category: .event,
-              title: "映画ちいかわ コラボレーションカフェ",
-              detail: "心斎橋PARCO／9月28日まで。予約や利用条件を会場ページで確認。",
-              region: "大阪", badge: "9月28日まで", button: "会場の詳細",
-              url: URL(string: "https://cafe.parco.jp/event/information/chiikawamovie_cafe_osaka?area=029441")!,
-              period: "2026年7月24日〜9月28日", venue: "心斎橋PARCO", endsOn: "2026-09-28"),
-        .init(id: "machida-popup", category: .event,
-              title: "ちいかわ POP UP STORE 町田モディ",
-              detail: "町田駅近くの期間限定店。入店方法は公式ページで確認。",
-              region: "東京", badge: "期間限定", button: "町田の公式ページ",
-              url: URL(string: "https://chiikawa-info.jp/p26/pus_matd/")!,
-              period: "2026年10月9日〜11月1日", venue: "町田モディ 4F イベントスペース",
-              startsOn: "2026-10-09", endsOn: "2026-11-01"),
-        .init(id: "popup", category: .event,
-              title: "POP UP STORE・催事",
-              detail: "開催地と期間を公式の催事一覧から確認。",
-              region: "全国", badge: "随時更新", button: "公式の催事一覧",
-              url: URL(string: "https://chiikawa-info.jp/pus.html")!),
-        .init(id: "tachikawa-magical", category: .event,
-              title: "まじかるちいかわ POP UP STORE 立川",
-              detail: "グランデュオ立川の期間限定店。入店方法は公式ページで確認。",
-              region: "東京", badge: "期間限定", button: "立川の公式ページ",
-              url: URL(string: "https://chiikawa-info.jp/p26/mg_tckw/index.html")!,
-              period: "2026年9月30日〜11月8日", venue: "グランデュオ立川 2F",
-              startsOn: "2026-09-30", endsOn: "2026-11-08"),
-        .init(id: "sapporo-magical", category: .event,
-              title: "まじかるちいかわ POP UP SHOP 札幌",
-              detail: "期間限定店。入店方法は公式ページで確認。",
-              region: "北海道", badge: "期間限定", button: "札幌の公式ページ",
-              url: URL(string: "https://chiikawa-info.jp/magical_store/kd_spr/index.html")!,
-              period: "2026年10月2日〜11月3日", venue: "キデイランド POP UP SHOP",
-              startsOn: "2026-10-02", endsOn: "2026-11-03"),
-        .init(id: "oita-land", category: .event,
-              title: "ちいかわらんど POP UP SHOP 大分",
-              detail: "期間限定店。入店方法は公式ページで確認。",
-              region: "大分", badge: "期間限定", button: "大分の公式ページ",
-              url: URL(string: "https://chiikawa-info.jp/chiikawaland/oita/index.html")!,
-              period: "2026年9月11日〜10月12日", venue: "アミュプラザおおいた 2F",
-              startsOn: "2026-09-11", endsOn: "2026-10-12")
-    ]
-    static let shops: [GuideItem] = [
-        .init(id: "land", category: .shop, title: "ちいかわらんど",
-              detail: "全国の常設店。営業時間・入店方法は各店舗の案内を確認。",
-              region: "全国", badge: "常設店", button: "店舗一覧を見る",
-              url: URL(string: "https://chiikawa-info.jp/ck_land.html")!),
-        .init(id: "park", category: .shop, title: "ちいかわパーク",
-              detail: "東京・池袋。チケット販売と利用案内。",
-              region: "東京", badge: "施設", button: "チケット案内",
-              url: URL(string: "https://chiikawapark-tokyo.jp/ticket")!),
-        .init(id: "bakery-tokyo", category: .shop, title: "ちいかわベーカリー 表参道",
-              detail: "オモカド3階。入店方法と営業時間を公式案内で確認。",
-              region: "東京", badge: "飲食", button: "表参道店の案内",
-              url: URL(string: "https://chiikawabakery.jp/information/")!),
-        .init(id: "bakery-osaka", category: .shop, title: "ちいかわベーカリー OSAKA",
-              detail: "KITTE大阪3階。入店方法と営業時間を公式案内で確認。",
-              region: "大阪", badge: "飲食", button: "大阪店の案内",
-              url: URL(string: "https://chiikawabakery.jp/information-osaka/")!),
-        .init(id: "ramen-ikebukuro", category: .shop, title: "ちいかわラーメン 豚 池袋",
-              detail: "池袋PARCO本館8階。予約・入店方法は公式案内で確認。",
-              region: "東京", badge: "飲食", button: "池袋店の案内",
-              url: URL(string: "https://cafe.parco.jp/event/chiikawaramenbuta_ikebukuro?area=029688")!),
-        .init(id: "ramen-shibuya", category: .shop, title: "ちいかわラーメン 豚 渋谷",
-              detail: "渋谷PARCO地下1階。予約・入店方法は公式案内で確認。",
-              region: "東京", badge: "飲食", button: "渋谷店の案内",
-              url: URL(string: "https://cafe.parco.jp/event/chiikawaramenbuta_shibuya?area=029979")!),
-        .init(id: "mogumogu-kawagoe", category: .shop, title: "ちいかわもぐもぐ本舗 川越店",
-              detail: "埼玉・川越。和をテーマにしたお菓子や雑貨のお店。",
-              region: "埼玉", badge: "常設店", button: "川越店の案内",
-              url: URL(string: "https://www.chiikawamogumogu.jp/stores/kawagoe/")!),
-        .init(id: "mogumogu-fushimi", category: .shop, title: "ちいかわもぐもぐ本舗 京都伏見店",
-              detail: "京都・伏見。和をテーマにしたお菓子や雑貨のお店。",
-              region: "京都", badge: "常設店", button: "京都伏見店の案内",
-              url: URL(string: "https://www.chiikawamogumogu.jp/stores/fushimi/")!),
-        .init(id: "cafe", category: .shop, title: "コラボカフェ",
-              detail: "開催中の会場や期間を確認。",
-              region: "全国", badge: "飲食", button: "カフェ情報を見る",
-              url: URL(string: "https://chiikawa-info.jp/cafe.html")!),
-        .init(id: "harajuku", category: .shop, title: "ちいかわらんど 原宿店",
-              detail: "東京・原宿。来店前に入店方法を確認。",
-              region: "東京", badge: "常設店", button: "原宿店の公式ページ",
-              url: URL(string: "https://chiikawa-info.jp/chiikawaland/harajuku/index.html")!),
-        .init(id: "tokyo-station", category: .shop, title: "ちいかわらんど TOKYO Station",
-              detail: "東京駅周辺の常設店。",
-              region: "東京", badge: "常設店", button: "東京駅店の公式ページ",
-              url: URL(string: "https://chiikawa-info.jp/chiikawaland/tokyo/index.html")!),
-        .init(id: "shinjuku", category: .shop, title: "ちいかわらんど 新宿店",
-              detail: "東京・新宿の常設店。",
-              region: "東京", badge: "常設店", button: "新宿店の公式ページ",
-              url: URL(string: "https://chiikawa-info.jp/chiikawaland/shinjuku/index.html")!),
-        .init(id: "osaka", category: .shop, title: "ちいかわらんど 大阪梅田店",
-              detail: "大阪・梅田の常設店。",
-              region: "大阪", badge: "常設店", button: "大阪梅田店の公式ページ",
-              url: URL(string: "https://chiikawa-info.jp/chiikawaland/osaka/index.html")!),
-        .init(id: "nagoya", category: .shop, title: "ちいかわらんど 名古屋パルコ店",
-              detail: "愛知・名古屋の常設店。",
-              region: "愛知", badge: "常設店", button: "名古屋店の公式ページ",
-              url: URL(string: "https://chiikawa-info.jp/chiikawaland/nagoya/index.html")!)
-    ]
-    static let goods: [GuideItem] = [
-        .init(id: "market", category: .goods, title: "ちいかわマーケット",
-              detail: "公式グッズショップ。価格・在庫は販売ページで確認。",
-              region: "オンライン", badge: "公式ショップ", button: "ショップを開く",
-              url: URL(string: "https://chiikawamarket.jp/")!),
-        .init(id: "plush-chiikawa", category: .goods, title: "ぬいぐるみS（ちいかわ）",
-              detail: "公式の商品ページ。売り切れの場合は入荷のお知らせを確認。",
-              region: "オンライン", badge: "商品ページ", button: "ぬいぐるみを見る",
-              url: URL(string: "https://chiikawamarket.jp/products/4589468435181")!),
-        .init(id: "pen-hachiware", category: .goods, title: "ドクターグリップ 4+1（ハチワレ）",
-              detail: "公式の商品ページ。価格・在庫は販売元で確認。",
-              region: "オンライン", badge: "商品ページ", button: "文房具を見る",
-              url: URL(string: "https://chiikawamarket.jp/products/4901770775784")!),
-        .init(id: "mug-chiikawa", category: .goods, title: "フェイスマグ（ちいかわ）",
-              detail: "公式の商品ページ。売り切れの場合は入荷のお知らせを確認。",
-              region: "オンライン", badge: "商品ページ", button: "マグカップを見る",
-              url: URL(string: "https://chiikawamarket.jp/products/4979274905471")!),
-        .init(id: "restock", category: .goods, title: "再入荷商品",
-              detail: "再入荷の一覧。個別商品の入荷通知は販売元で設定。",
-              region: "オンライン", badge: "再入荷", button: "再入荷商品を見る",
-              url: URL(string: "https://chiikawamarket.jp/collections/restock")!),
-        .init(id: "movie-goods", category: .goods, title: "映画ちいかわのグッズ",
-              detail: "取扱店と販売情報を確認。",
-              region: "全国", badge: "作品別", button: "取扱い情報を見る",
-              url: URL(string: "https://chiikawa-info.jp/p26/ck_movie/")!),
-        .init(id: "new-goods", category: .goods, title: "新着商品",
-              detail: "新しく掲載された商品を公式ショップで確認。",
-              region: "オンライン", badge: "新着", button: "新着商品を見る",
-              url: URL(string: "https://chiikawamarket.jp/collections/newitems")!),
-        .init(id: "preorder", category: .goods, title: "予約商品",
-              detail: "発送予定や注文条件は各商品ページで確認。",
-              region: "オンライン", badge: "予約", button: "予約商品を見る",
-              url: URL(string: "https://chiikawamarket.jp/collections/preorder")!),
-        .init(id: "plush", category: .goods, title: "ぬいぐるみ・マスコット",
-              detail: "公式ショップのカテゴリーから探す。",
-              region: "オンライン", badge: "カテゴリー", button: "一覧を見る",
-              url: URL(string: "https://chiikawamarket.jp/collections/nuigurumi")!),
-        .init(id: "fuji-tv", category: .goods, title: "フジテレビｅ!ショップ",
-              detail: "アニメ関連グッズを販売元の一覧で確認。",
-              region: "オンライン", badge: "販売サイト", button: "商品一覧を見る",
-              url: URL(string: "https://eshop.fujitv.co.jp/c/g_anime/B007088?sort=latest")!)
-    ]
 }
 
-private enum GuideTab: String, CaseIterable {
-    case events = "イベント"
-    case shops = "お店・施設"
-    case goods = "グッズ"
-    var symbol: String {
-        switch self {
-        case .events: return "calendar"
-        case .shops: return "mappin.and.ellipse"
-        case .goods: return "bag"
-        }
+@main
+struct JapanDayPlannerApp: App {
+    var body: some Scene {
+        WindowGroup { PlannerView() }
     }
 }
 
-private enum EventDateFilter: String, CaseIterable {
-    case upcoming = "これから", today = "今日", weekend = "今週末", chosen = "日付を選ぶ"
-}
+private struct PlannerView: View {
+    private let guide = GuideData.bundled
+    @AppStorage("japanDay.route") private var routeID = "asakusa"
+    @AppStorage("japanDay.start") private var startMinutes = 600
+    @AppStorage("japanDay.choices") private var savedChoices = "{}"
+    @State private var swapIndex: Int?
 
-private enum EventTypeFilter: String, CaseIterable {
-    case all = "すべての種類", character = "キャラクター", craft = "雑貨・ハンドメイド"
-    case exhibition = "展示・アート", food = "グルメ", festival = "季節のお祭り"
-    case nature = "花・自然", market = "マーケット", experience = "体験"
-    var dataValue: String {
-        switch self {
-        case .all: return "all"
-        case .character: return "character"
-        case .craft: return "craft"
-        case .exhibition: return "exhibition"
-        case .food: return "food"
-        case .festival: return "festival"
-        case .nature: return "nature"
-        case .market: return "market"
-        case .experience: return "experience"
-        }
+    private var route: DayRoute { guide.routes.first(where: { $0.id == routeID }) ?? guide.routes[0] }
+    private var selections: [String: [Int]] {
+        guard let data = savedChoices.data(using: .utf8) else { return [:] }
+        return (try? JSONDecoder().decode([String: [Int]].self, from: data)) ?? [:]
     }
-}
 
-struct GuideRootView: View {
-    @State private var selection: GuideTab = .events
-    @State private var region = "全国"
-    @State private var dateFilter: EventDateFilter = .upcoming
-    @State private var eventType: EventTypeFilter = .all
-    @State private var chosenDate = Date()
-    @State private var shopRegion = "全国"
-    @State private var today = GuideData.localToday()
-    @State private var savedOnly = false
-    @State private var searchText = ""
-    @State private var remoteItems: [GuideItem]? = nil
-    @State private var remoteSources: [GuideSource]? = nil
-    @State private var checkedOn = GuideData.checkedOn
-    @State private var isRefreshing = false
-    @State private var isOffline = false
-    @AppStorage("savedGuideItemIDs") private var savedItemIDs = ""
-    @Environment(\.scenePhase) private var scenePhase
+    private func selectedIndex(_ index: Int) -> Int {
+        let value = selections[route.id]?[safe: index] ?? 0
+        return route.stops[index].choices.indices.contains(value) ? value : 0
+    }
+
+    private func selectedVenue(_ index: Int) -> Venue { route.stops[index].choices[selectedIndex(index)] }
+
+    private func duration(_ stop: Stop, venue: Venue) -> Int {
+        if let specific = guide.visitMinutes[venue.name] { return specific }
+        if stop.type == "food" {
+            return ["ramen": 45, "sushi": 60, "japanese": 80][venue.cuisine ?? ""] ?? stop.duration
+        }
+        return stop.duration
+    }
+
+    private func startOfStop(_ index: Int) -> Int {
+        var clock = startMinutes
+        for previous in 0..<index {
+            clock += duration(route.stops[previous], venue: selectedVenue(previous)) + route.gap
+        }
+        return clock
+    }
+
+    private func time(_ minutes: Int) -> String {
+        let hour = (minutes / 60) % 24
+        return String(format: "%d:%02d %@", hour % 12 == 0 ? 12 : hour % 12, minutes % 60, hour < 12 ? "AM" : "PM")
+    }
+
+    private func choose(_ choice: Int, at index: Int) {
+        var all = selections
+        var current = all[route.id] ?? Array(repeating: 0, count: route.stops.count)
+        if current.count != route.stops.count { current = Array(repeating: 0, count: route.stops.count) }
+        current[index] = choice
+        all[route.id] = current
+        if let data = try? JSONEncoder().encode(all), let string = String(data: data, encoding: .utf8) {
+            savedChoices = string
+        }
+        swapIndex = nil
+    }
+
+    private var sharedPlan: String {
+        var lines = ["Japan Day Planner · \(route.label)"]
+        for index in route.stops.indices {
+            let venue = selectedVenue(index)
+            lines.append("\(time(startOfStop(index))) · \(venue.name) · \(venue.url)")
+        }
+        lines.append("Timing is an estimate. Confirm hours and travel before visiting.")
+        return lines.joined(separator: "\n")
+    }
 
     var body: some View {
-        page(for: selection)
-        .tint(GuideStyle.yellow)
-        .onChange(of: scenePhase) { phase in
-            if phase == .active {
-                today = GuideData.localToday()
-                Task { await refreshFeed() }
-            }
-        }
-        .onChange(of: selection) { _ in searchText = "" }
-        .task {
-            await loadCachedFeed()
-            await refreshFeed()
-        }
-    }
-
-    private var availableItems: [GuideItem] {
-        remoteItems ?? GuideData.bundledItems
-    }
-    private var availableSources: [GuideSource] {
-        remoteSources ?? GuideData.bundledSources
-    }
-
-    private func regions(for category: GuideItem.Category) -> [String] {
-        ["全国"] + Set(availableItems.filter { $0.category == category &&
-            $0.region != "全国" && $0.region != "オンライン"
-        }.map(\.region)).sorted()
-    }
-
-    @MainActor
-    private func loadCachedFeed() {
-        guard let data = UserDefaults.standard.data(forKey: "cachedGuideFeedV1"),
-              let feed = try? JSONDecoder().decode(GuideFeed.self, from: data),
-              GuideData.isValid(feed) else { return }
-        remoteItems = feed.items
-        remoteSources = feed.sources
-        checkedOn = feed.checkedOn
-    }
-
-    @MainActor
-    private func refreshFeed() async {
-        guard !isRefreshing else { return }
-        isRefreshing = true
-        defer { isRefreshing = false }
-        do {
-            var request = URLRequest(url: GuideData.feedURL)
-            request.cachePolicy = .reloadIgnoringLocalCacheData
-            request.timeoutInterval = 15
-            let (data, response) = try await URLSession.shared.data(for: request)
-            guard let http = response as? HTTPURLResponse, http.statusCode == 200,
-                  data.count <= 500_000 else { throw URLError(.badServerResponse) }
-            let feed = try JSONDecoder().decode(GuideFeed.self, from: data)
-            guard GuideData.isValid(feed) else { throw URLError(.cannotParseResponse) }
-            remoteItems = feed.items
-            remoteSources = feed.sources
-            checkedOn = feed.checkedOn
-            isOffline = false
-            UserDefaults.standard.set(data, forKey: "cachedGuideFeedV1")
-            if !regions(for: .event).contains(region) { region = "全国" }
-            if !regions(for: .shop).contains(shopRegion) { shopRegion = "全国" }
-        } catch {
-            isOffline = true
-        }
-    }
-
-    private var filteredEvents: [GuideItem] {
-        let selected = GuideData.dateString(chosenDate)
-        let weekend: (String, String) = {
-            let calendar = Calendar(identifier: .gregorian)
-            let weekday = calendar.component(.weekday, from: Date())
-            let saturday = calendar.date(byAdding: .day, value: weekday == 1 ? -1 : (7 - weekday + 7) % 7, to: Date()) ?? Date()
-            let sunday = calendar.date(byAdding: .day, value: 1, to: saturday) ?? saturday
-            return (GuideData.dateString(saturday), GuideData.dateString(sunday))
-        }()
-        return availableItems.filter { item in
-            guard item.category == .event, let start = item.startsOn, let end = item.endsOn,
-                  end >= today else { return false }
-            let inRegion = region == "全国" || item.region == region || item.region == "全国"
-            let inType = eventType == .all || item.eventType == eventType.dataValue
-            let inDate: Bool
-            switch dateFilter {
-            case .upcoming: inDate = true
-            case .today: inDate = start <= today && end >= today
-            case .weekend: inDate = start <= weekend.1 && end >= weekend.0
-            case .chosen: inDate = start <= selected && end >= selected
-            }
-            return inRegion && inType && inDate
-        }.sorted {
-            max($0.startsOn ?? today, today) < max($1.startsOn ?? today, today)
-        }
-    }
-
-    @ViewBuilder
-    private func page(for tab: GuideTab) -> some View {
         NavigationStack {
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 16) {
-                    header
-                    HStack(spacing: 7) {
-                        ForEach(GuideTab.allCases, id: \.self) { option in
-                            Button {
-                                selection = option
-                            } label: {
-                                Text(option.rawValue)
-                                    .font(.subheadline.bold())
-                                    .frame(maxWidth: .infinity, minHeight: 50)
-                                    .foregroundStyle(selection == option ? GuideStyle.navy : .white)
-                                    .background(selection == option ? GuideStyle.yellow : GuideStyle.panel,
-                                                in: RoundedRectangle(cornerRadius: 11))
-                                    .overlay(RoundedRectangle(cornerRadius: 11)
-                                        .stroke(selection == option ? GuideStyle.yellow : GuideStyle.border))
-                            }
-                            .buttonStyle(.plain)
+                VStack(alignment: .leading, spacing: 20) {
+                    intro
+                    controls
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(route.title).font(.title2.bold())
+                        Text(route.description).foregroundStyle(.secondary)
+                        Text("\(route.area) · \(route.stops.count) stops · around \(time(startOfStop(route.stops.count - 1) + duration(route.stops.last!, venue: selectedVenue(route.stops.count - 1)))) finish")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    ForEach(route.stops.indices, id: \.self) { index in
+                        if index > 0 {
+                            Label("Allow about \(route.gap) min to the next stop", systemImage: "figure.walk")
+                                .font(.caption).foregroundStyle(.secondary)
+                                .padding(.leading, 10)
                         }
+                        stopCard(index)
                     }
-                    if tab == .events {
-                        NavigationLink {
-                            DateCourseView()
-                        } label: {
-                            HStack(spacing: 12) {
-                                Image(systemName: "sparkles.rectangle.stack")
-                                    .font(.title2)
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text("年代別デートコースを見る").font(.headline)
-                                    Text("5つの一日コースと時刻表").font(.subheadline)
-                                }
-                                Spacer(minLength: 0)
-                                Image(systemName: "chevron.right")
-                            }
-                            .foregroundStyle(GuideStyle.navy)
-                            .padding(16)
-                            .background(GuideStyle.yellow, in: RoundedRectangle(cornerRadius: 16))
-                        }
-                    }
-                    searchPanel(for: tab)
-                    let allItems = tab == .events ? filteredEvents :
-                        (tab == .shops ? availableItems.filter {
-                            $0.category == .shop &&
-                            (shopRegion == "全国" || $0.region == shopRegion || $0.region == "全国")
-                        } : availableItems.filter { $0.category == .goods })
-                    let term = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-                    let matchingItems = term.isEmpty ? allItems : allItems.filter {
-                        let text = [$0.title, $0.detail, $0.region, $0.venue ?? "",
-                                    $0.keywords ?? "", $0.eventType ?? ""].joined(separator: " ")
-                        return term.split(whereSeparator: \.isWhitespace)
-                            .allSatisfy { text.localizedStandardContains(String($0)) }
-                    }
-                    let savedIDs = Set(savedItemIDs.split(separator: ",").map(String.init))
-                    let items = savedOnly ? matchingItems.filter { savedIDs.contains($0.id) } : matchingItems
-                    HStack {
-                        Text(tab == .events ? "これからのおでかけ" : tab.rawValue)
-                            .font(.title3.bold())
-                        Spacer()
-                        Text("\(items.count)件").foregroundStyle(GuideStyle.muted)
-                    }
-                    .padding(.top, 2)
-                    if items.isEmpty {
-                        Text("この条件に合う掲載情報はありません。条件を変えるか、下の各地の案内から探してください。")
-                            .foregroundStyle(GuideStyle.muted)
-                            .padding(18)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(GuideStyle.panel, in: RoundedRectangle(cornerRadius: 14))
-                    }
-                    if tab == .goods {
-                        let productPages = items.filter { $0.url.path.contains("/products/") }
-                        let salesPages = items.filter { !$0.url.path.contains("/products/") }
-                        if !productPages.isEmpty {
-                            Text("商品ページ").font(.headline)
-                            ForEach(productPages) { item in
-                                GuideCard(item: item, today: today, savedItemIDs: $savedItemIDs)
-                            }
-                        }
-                        if !salesPages.isEmpty {
-                            Text("販売先から探す").font(.headline)
-                            ForEach(salesPages) { item in
-                                GuideCard(item: item, today: today, savedItemIDs: $savedItemIDs)
-                            }
-                        }
-                    } else {
-                        ForEach(items.indices, id: \.self) { index in
-                            GuideCard(item: items[index], today: today, savedItemIDs: $savedItemIDs,
-                                      showAutumn: tab == .events && index == 0)
-                        }
-                    }
-                    if tab == .events { sourcePanel(term: term) }
-                    Text("掲載情報：\(checkedOn)確認。日時・在庫・予約条件はリンク先でご確認ください。")
-                        .font(.footnote).foregroundStyle(GuideStyle.muted)
-                    if isOffline {
-                        Text("通信できないため、端末内の案内を表示しています。")
-                            .font(.footnote).foregroundStyle(GuideStyle.muted)
-                    }
-                    Text("掲載先の権利者・販売元による運営ではありません。")
-                        .font(.footnote).foregroundStyle(GuideStyle.muted)
-                    Link("プライバシーについて", destination: GuideData.privacyURL)
-                        .font(.footnote)
+                    Text("Times and transfer gaps are planning estimates. Check opening hours, tickets, reservations and routes before travelling.")
+                        .font(.footnote).foregroundStyle(.secondary).padding(.bottom)
                 }
-                .padding(.horizontal, 16)
-                .padding(.bottom, 36)
+                .padding()
             }
-            .background(GuideStyle.background)
-            .toolbar(.hidden, for: .navigationBar)
-        }
-    }
-
-    private var header: some View {
-        ZStack(alignment: .topTrailing) {
-            GuideStyle.header
-            SeasonArt(name: "spring")
-                .frame(width: 158, height: 146)
-                .offset(x: 9, y: -17)
-            VStack(alignment: .leading, spacing: 12) {
-                Text("おでかけガイド")
-                    .font(.system(size: 29, weight: .bold))
-                    .foregroundStyle(.white)
-                Text("全国のイベントと個性的なお店を探そう")
-                    .font(.subheadline)
-                    .foregroundStyle(GuideStyle.muted)
-                    .frame(maxWidth: 230, alignment: .leading)
-                    .padding(.top, 20)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(17)
-        }
-        .frame(height: 145)
-        .clipShape(RoundedRectangle(cornerRadius: 15))
-    }
-
-    private func searchPanel(for tab: GuideTab) -> some View {
-        VStack(alignment: .leading, spacing: 13) {
-            VStack(alignment: .leading, spacing: 0) {
-                Text("どんなおでかけを探しますか？")
-                    .font(.headline)
-                    .foregroundStyle(.white)
-                    .fixedSize(horizontal: false, vertical: true)
-                SeasonArt(name: "summer")
-                    .frame(width: 180, height: 124)
-                    .frame(maxWidth: .infinity, alignment: .trailing)
-            }
-            if tab == .events {
-                Text("日付").font(.subheadline.bold()).foregroundStyle(GuideStyle.muted)
-                HStack(spacing: 6) {
-                    ForEach(EventDateFilter.allCases, id: \.self) { choice in
-                        Button(choice.rawValue) { dateFilter = choice }
-                            .font(.caption.bold())
-                            .frame(maxWidth: .infinity, minHeight: 44)
-                            .background(dateFilter == choice ? GuideStyle.yellow : GuideStyle.header,
-                                        in: RoundedRectangle(cornerRadius: 9))
-                            .foregroundStyle(dateFilter == choice ? GuideStyle.navy : .white)
-                            .overlay(RoundedRectangle(cornerRadius: 9).stroke(GuideStyle.border))
-                    }
-                }
-                if dateFilter == .chosen {
-                    DatePicker("探したい日", selection: $chosenDate, displayedComponents: .date)
-                        .tint(GuideStyle.yellow)
-                }
-                HStack(spacing: 10) {
-                    menuField("地域", selection: $region, values: regions(for: .event))
-                    VStack(alignment: .leading, spacing: 7) {
-                        Text("種類").font(.subheadline.bold()).foregroundStyle(GuideStyle.muted)
-                        Picker("種類", selection: $eventType) {
-                            ForEach(EventTypeFilter.allCases, id: \.self) { choice in
-                                Text(choice.rawValue).tag(choice)
-                            }
-                        }
-                        .frame(maxWidth: .infinity, minHeight: 44)
-                        .background(GuideStyle.header, in: RoundedRectangle(cornerRadius: 9))
-                        .foregroundStyle(.white)
-                        .tint(.white)
-                        .overlay(RoundedRectangle(cornerRadius: 9).stroke(GuideStyle.border))
-                    }
-                }
-            } else if tab == .shops {
-                menuField("地域", selection: $shopRegion, values: regions(for: .shop))
-            }
-            Text("キーワード").font(.subheadline.bold()).foregroundStyle(GuideStyle.muted)
-            TextField("", text: $searchText,
-                      prompt: Text("イベント名・場所・好きなもの")
-                        .foregroundColor(GuideStyle.muted))
-                .textFieldStyle(.plain)
-                .foregroundStyle(.white)
-                .tint(.white)
-                .padding(12)
-                .frame(minHeight: 48)
-                .background(GuideStyle.header, in: RoundedRectangle(cornerRadius: 9))
-                .overlay(RoundedRectangle(cornerRadius: 9).stroke(GuideStyle.border))
-                .autocorrectionDisabled()
-            HStack(spacing: 8) {
-                Button("おでかけを探す →") {
-                    searchText = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-                }
-                .frame(maxWidth: .infinity, minHeight: 48)
-                .background(GuideStyle.yellow, in: RoundedRectangle(cornerRadius: 9))
-                .foregroundStyle(GuideStyle.navy)
-                .fontWeight(.bold)
-                Button(savedOnly ? "★ 保存中" : "☆ 保存済み") { savedOnly.toggle() }
-                    .frame(minHeight: 48).padding(.horizontal, 10)
-                    .background(GuideStyle.header, in: RoundedRectangle(cornerRadius: 9))
-                    .overlay(RoundedRectangle(cornerRadius: 9).stroke(GuideStyle.border))
-            }
-            .buttonStyle(.plain)
-            if tab == .events {
-                HStack(spacing: 6) {
-                    ForEach(["紅葉", "陶器", "マーケット"], id: \.self) { topic in
-                        Button(topic) { searchText = topic; eventType = .all }
-                            .font(.caption.bold())
-                            .padding(.horizontal, 11).padding(.vertical, 8)
-                            .background(GuideStyle.header, in: Capsule())
-                            .overlay(Capsule().stroke(GuideStyle.border))
-                    }
-                }
-                .buttonStyle(.plain)
+            .background(Color(.systemGroupedBackground))
+            .navigationTitle("Japan Day Planner")
+            .toolbar { ShareLink(item: sharedPlan) { Image(systemName: "square.and.arrow.up") }.accessibilityLabel("Share this itinerary") }
+            .sheet(isPresented: Binding(get: { swapIndex != nil }, set: { if !$0 { swapIndex = nil } })) {
+                if let index = swapIndex { swapSheet(index) }
             }
         }
-        .padding(15)
-        .background(GuideStyle.panel, in: RoundedRectangle(cornerRadius: 16))
-        .overlay(RoundedRectangle(cornerRadius: 16).stroke(GuideStyle.border))
+        .tint(Color(red: 0.07, green: 0.40, blue: 0.43))
     }
 
-    private func menuField(_ title: String, selection: Binding<String>, values: [String]) -> some View {
-        VStack(alignment: .leading, spacing: 7) {
-            Text(title).font(.subheadline.bold()).foregroundStyle(GuideStyle.muted)
-            Picker(title, selection: selection) {
-                ForEach(values, id: \.self) { Text($0) }
-            }
-            .frame(maxWidth: .infinity, minHeight: 44)
-            .background(GuideStyle.header, in: RoundedRectangle(cornerRadius: 9))
-            .foregroundStyle(.white)
-            .tint(.white)
-            .overlay(RoundedRectangle(cornerRadius: 9).stroke(GuideStyle.border))
+    private var intro: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            Text("SEE JAPAN · TASTE JAPAN").font(.caption.bold()).tracking(2).foregroundStyle(.yellow)
+            Text("A day that changes with you.").font(.largeTitle.bold()).foregroundStyle(.white)
+            Text("Pick a route. Swap a sight or lunch. Your times update instantly.")
+                .foregroundStyle(.white.opacity(0.88))
         }
+        .frame(maxWidth: .infinity, alignment: .leading).padding(22)
+        .background(Color(red: 0.08, green: 0.17, blue: 0.22), in: RoundedRectangle(cornerRadius: 18))
     }
 
-    private func sourcePanel(term: String) -> some View {
-        let matching = availableSources.filter { source in
-            let regionMatches = region == "全国" || source.region == region || source.region == "全国"
-            let typeMatches = eventType == .all || source.types.contains(eventType.dataValue)
-            let text = [source.title, source.detail, source.region, source.keywords].joined(separator: " ")
-            return regionMatches && typeMatches &&
-                (term.isEmpty || text.localizedStandardContains(term))
-        }
-        let fallback = availableSources.filter {
-            (region == "全国" || $0.region == region || $0.region == "全国") &&
-            (eventType == .all || $0.types.contains(eventType.dataValue))
-        }
-        let display = matching.isEmpty ? fallback : matching
-        return VStack(alignment: .leading, spacing: 11) {
-            HStack {
-                Text("全国の開催情報をもっと探す").font(.headline)
-                Spacer(minLength: 8)
-                SeasonArt(name: "winter").frame(width: 90, height: 75)
-            }
-            Text("各地の観光・イベント案内から探せます。")
-                .font(.subheadline).foregroundStyle(GuideStyle.muted)
-            ForEach(display) { source in
-                Link(destination: source.url) {
-                    VStack(alignment: .leading, spacing: 5) {
-                        Text(source.title + " ↗").font(.subheadline.bold())
-                        Text(source.detail).font(.caption).foregroundStyle(GuideStyle.muted)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(12)
-                    .background(GuideStyle.header, in: RoundedRectangle(cornerRadius: 9))
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .padding(15)
-        .background(GuideStyle.panel, in: RoundedRectangle(cornerRadius: 16))
-        .overlay(RoundedRectangle(cornerRadius: 16).stroke(GuideStyle.border))
-    }
-}
-
-private enum DateAge: String, CaseIterable {
-    case twenties = "20・30代"
-    case middle = "40・50代"
-    case senior = "60・70代"
-
-    var times: [String] {
-        switch self {
-        case .twenties: return ["10:00", "11:15", "12:15", "13:45", "15:00"]
-        case .middle: return ["10:00", "11:30", "12:30", "14:00", "15:15"]
-        case .senior: return ["10:00", "11:30", "12:30", "14:00", "15:30"]
-        }
-    }
-
-    var description: String {
-        switch self {
-        case .twenties: return "街歩きも楽しむ標準的な時間配分"
-        case .middle: return "食事と休憩に少し余裕を持つ時間配分"
-        case .senior: return "各施設でゆっくり過ごす時間配分"
-        }
-    }
-}
-
-private struct CourseStop: Identifiable {
-    let name: String
-    let detail: String
-    let url: URL
-    var id: String { name }
-    init(_ name: String, _ detail: String, _ url: String) {
-        self.name = name
-        self.detail = detail
-        self.url = URL(string: url)!
-    }
-}
-
-private struct DateCourse: Identifiable {
-    let id: String
-    let title: String
-    let area: String
-    let theme: String
-    let note: String
-    let stops: [CourseStop]
-
-    // 2026-09-29に施設・店舗の公式案内を確認した最初のモデルコース。
-    // 時刻はモデル値。個別の営業日や区間移動は出発日の前に確認する。
-    static let examples: [DateCourse] = [
-        .init(id: "ueno", title: "上野・美術と老舗ランチ", area: "上野", theme: "文化と食事",
-              note: "博物館と公園を中心に、老舗の洋食店で昼食。",
-              stops: [
-                .init("東京国立博物館", "展示を楽しむ。特別展の入館条件を確認。", "https://www.tnm.jp/"),
-                .init("上野恩賜公園", "園内の景色を見ながら散策。", "https://www.kensetsu.metro.tokyo.lg.jp/jimusho/toubuk/ueno"),
-                .init("上野精養軒本店 グリル", "昼食。混雑時は待ち時間に注意。", "https://www.seiyoken.co.jp/restaurant/fukushima/"),
-                .init("国立科学博物館", "興味のある展示を選んで見学。", "https://www.kahaku.go.jp/riyou/nyukan-annai/"),
-                .init("スターバックス 上野恩賜公園店", "公園内でコーヒー休憩。", "https://store.starbucks.co.jp/detail-1087/")
-              ]),
-        .init(id: "asakusa", title: "浅草・下町散歩とすき焼き", area: "浅草", theme: "街歩きと和食",
-              note: "浅草から隅田川を眺め、午後は景色を楽しむ。",
-              stops: [
-                .init("浅草寺", "雷門から参拝へ。", "https://www.senso-ji.jp/"),
-                .init("仲見世商店街", "工芸品やお土産を見て歩く。", "https://www.gotokyo.org/jp/spot/73/index.html"),
-                .init("浅草今半 国際通り本店", "昼食。営業日とメニューを確認。", "https://www.asakusaimahan.co.jp/kokusai/1000"),
-                .init("隅田公園", "川沿いで休憩しながら散策。", "https://www.gotokyo.org/jp/destinations/eastern-tokyo/asakusa/index.html"),
-                .init("東京スカイツリー", "展望台から景色を見る。チケットを確認。", "https://www.tokyo-skytree.jp/ticket/")
-              ]),
-        .init(id: "tachikawa", title: "立川・緑と絵本の一日", area: "立川", theme: "自然とアート",
-              note: "公園の緑、食事、美術館を組み合わせる。",
-              stops: [
-                .init("国営昭和記念公園", "季節の景色を楽しむ。", "https://www.showakinen-koen.jp/park-information/schedule/"),
-                .init("ぎんなん茶屋", "公園内でひと休み。", "https://www.showakinen-koen.jp/facility/facility-719/"),
-                .init("ダイチノレストラン", "立川の食材を使った昼食。予約を確認。", "https://soranohotel.com/restaurant/daichino_restaurant/"),
-                .init("PLAY! MUSEUM", "絵本やアートの企画展。展示と休館日を確認。", "https://play2020.jp/museum/visit/"),
-                .init("PLAY! CAFE", "展示の余韻を楽しむ。", "https://play2020.jp/cafe/")
-              ]),
-        .init(id: "ikebukuro", title: "池袋・水族館と星空", area: "池袋", theme: "屋内と眺望",
-              note: "天候に左右されにくい施設を中心に回る。",
-              stops: [
-                .init("サンシャイン水族館", "生きものを見て回る。チケットを確認。", "https://sunshinecity.jp/aquarium/ticket/"),
-                .init("サンシャインシティ", "館内のお店を見て歩く。", "https://sunshinecity.jp/information/floor_map/"),
-                .init("池袋ぱすたかん", "サンシャインシティ内で昼食。", "https://sunshinecity.jp/restaurant/restaurant_list/entry-422.html"),
-                .init("プラネタリウム満天", "上映時刻に合わせて鑑賞。", "https://planetarium.konicaminolta.jp/schedule/manten/"),
-                .init("てんぼうパーク", "景色と館内カフェで休憩。入場条件を確認。", "https://sunshinecity.jp/observatory/")
-              ]),
-        .init(id: "oshiage", title: "押上・空と水族館と甘いもの", area: "押上", theme: "眺望とグルメ",
-              note: "東京スカイツリータウン内を中心に過ごす。",
-              stops: [
-                .init("東京スカイツリー", "展望台へ。チケットと入場時刻を確認。", "https://www.tokyo-skytree.jp/ticket/"),
-                .init("すみだ水族館", "水槽をゆっくり見て回る。", "https://www.sumida-aquarium.com/about/access/"),
-                .init("回転寿し トリトン", "東京ソラマチで昼食。予約不可、店頭発券。", "https://www.tokyo-solamachi.jp/shop/295/"),
-                .init("東京ソラマチ", "雑貨やお土産を見て歩く。", "https://www.tokyo-solamachi.jp/floor/"),
-                .init("キル フェ ボン", "タルトで午後の休憩。", "https://www.tokyo-solamachi.jp/shop/129/")
-              ])
-    ]
-}
-
-private struct DateCourseView: View {
-    @State private var age: DateAge = .middle
-
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("東京から始める")
-                        .font(.subheadline.bold()).foregroundStyle(GuideStyle.yellow)
-                    Text("年代別デートコース")
-                        .font(.title.bold()).foregroundStyle(.white)
-                    Text("行き先を5か所つないだ、一日のモデルコースです。")
-                        .foregroundStyle(GuideStyle.muted)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(18)
-                .background(GuideStyle.header, in: RoundedRectangle(cornerRadius: 16))
-
-                Picker("年代", selection: $age) {
-                    ForEach(DateAge.allCases, id: \.self) { Text($0.rawValue).tag($0) }
-                }
-                .pickerStyle(.segmented)
-                Text(age.description)
-                    .font(.subheadline).foregroundStyle(GuideStyle.muted)
-                Text("5コースから選ぶ")
-                    .font(.title3.bold()).foregroundStyle(.white)
-                ForEach(DateCourse.examples) { course in
-                    NavigationLink {
-                        DateCourseDetailView(course: course, age: age)
-                    } label: {
-                        VStack(alignment: .leading, spacing: 9) {
-                            HStack {
-                                Text(course.area).font(.caption.bold())
-                                    .foregroundStyle(GuideStyle.navy)
-                                    .padding(.horizontal, 9).padding(.vertical, 5)
-                                    .background(GuideStyle.yellow, in: Capsule())
-                                Spacer()
-                                Text(course.theme).font(.caption).foregroundStyle(GuideStyle.muted)
-                            }
-                            Text(course.title).font(.headline).foregroundStyle(.white)
-                            Text(course.note).font(.subheadline).foregroundStyle(GuideStyle.muted)
-                            Text("10:00から・立ち寄り5か所　行程を見る →")
-                                .font(.subheadline.bold()).foregroundStyle(GuideStyle.yellow)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(17)
-                        .background(GuideStyle.panel, in: RoundedRectangle(cornerRadius: 16))
-                        .overlay(RoundedRectangle(cornerRadius: 16).stroke(GuideStyle.border))
-                    }
-                    .buttonStyle(.plain)
-                }
-                Text("時刻はモデル値です。出発日に合わせた営業・予約・移動時間の計算は今後追加します。")
-                    .font(.footnote).foregroundStyle(GuideStyle.muted)
-            }
-            .padding(16)
-        }
-        .background(GuideStyle.background)
-        .navigationTitle("デートコース")
-        .toolbar(.visible, for: .navigationBar)
-    }
-}
-
-private struct DateCourseDetailView: View {
-    let course: DateCourse
-    let age: DateAge
-
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                Text(course.title).font(.title2.bold()).foregroundStyle(.white)
-                Text("\(age.rawValue)向けの時間配分・\(course.area)")
-                    .foregroundStyle(GuideStyle.muted)
-                ForEach(course.stops.indices, id: \.self) { index in
-                    let stop = course.stops[index]
-                    VStack(alignment: .leading, spacing: 9) {
-                        HStack(alignment: .firstTextBaseline, spacing: 12) {
-                            Text(age.times[index]).font(.title3.bold())
-                                .foregroundStyle(GuideStyle.yellow)
-                            Text(stop.name).font(.headline).foregroundStyle(.white)
-                        }
-                        Text(stop.detail).font(.subheadline).foregroundStyle(GuideStyle.muted)
-                        Link(destination: stop.url) {
-                            HStack {
-                                Text("公式案内を見る")
-                                Spacer()
-                                Image(systemName: "arrow.up.right")
-                            }
-                            .font(.subheadline.bold())
-                            .foregroundStyle(GuideStyle.navy)
-                            .padding(12)
-                            .background(GuideStyle.yellow, in: RoundedRectangle(cornerRadius: 10))
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(16)
-                    .background(GuideStyle.panel, in: RoundedRectangle(cornerRadius: 16))
-                }
-                Text("16:30ごろ　帰路へ")
-                    .font(.headline).foregroundStyle(.white)
-                Text("これはモデル時刻です。営業時間・休館日・チケット・移動時間・食事の席は保証されません。各公式案内で確認してからお出かけください。")
-                    .font(.footnote).foregroundStyle(GuideStyle.muted)
-            }
-            .padding(16)
-        }
-        .background(GuideStyle.background)
-        .navigationTitle(course.area)
-        .toolbar(.visible, for: .navigationBar)
-    }
-}
-
-private struct SeasonArt: View {
-    let name: String
-    var body: some View {
-        AsyncImage(url: URL(string: "https://chiikawa-odekake-guide.shu-tok39.chatgpt.site/assets/\(name).webp")) { phase in
-            if let image = phase.image { image.resizable().scaledToFit() }
-            else { Color.clear }
-        }
-        .accessibilityHidden(true)
-        .allowsHitTesting(false)
-    }
-}
-
-private struct GuideCard: View {
-    let item: GuideItem
-    let today: String
-    @Binding var savedItemIDs: String
-    var showAutumn = false
-    @Environment(\.openURL) private var openURL
-
-    private var isSaved: Bool {
-        savedItemIDs.split(separator: ",").contains(Substring(item.id))
-    }
-
-    private func toggleSaved() {
-        var ids = Set(savedItemIDs.split(separator: ",").map(String.init))
-        if ids.contains(item.id) { ids.remove(item.id) }
-        else { ids.insert(item.id) }
-        savedItemIDs = ids.sorted().joined(separator: ",")
-    }
-
-    var body: some View {
+    private var controls: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 8) {
-                Text(item.category == .event ?
-                     (item.startsOn.map { $0 > today } == true ? "開催予定" : "開催中") : item.badge)
-                    .foregroundStyle(GuideStyle.navy)
-                    .padding(.horizontal, 10).padding(.vertical, 5)
-                    .background(GuideStyle.yellow, in: Capsule())
-                Text(item.region).foregroundStyle(GuideStyle.muted)
+            Picker("City route", selection: $routeID) {
+                ForEach(guide.routes) { item in Text(item.label).tag(item.id) }
+            }
+            Picker("Start", selection: $startMinutes) {
+                Text("9:00 AM").tag(540)
+                Text("10:00 AM").tag(600)
+                Text("11:00 AM").tag(660)
+            }
+        }
+        .padding(14).background(.white, in: RoundedRectangle(cornerRadius: 15))
+    }
+
+    private func stopCard(_ index: Int) -> some View {
+        let stop = route.stops[index]
+        let venue = selectedVenue(index)
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(time(startOfStop(index))).font(.subheadline.bold()).monospacedDigit()
                 Spacer()
-                Button(action: toggleSaved) {
-                    Image(systemName: isSaved ? "bookmark.fill" : "bookmark")
-                        .font(.title3)
-                        .frame(width: 42, height: 42)
+                Text(stop.type == "food" ? "LUNCH" : stop.type == "walk" ? "EXPLORE" : "SIGHT")
+                    .font(.caption2.bold()).tracking(1).foregroundStyle(.orange)
+            }
+            Text(venue.name).font(.title3.bold())
+            Text(venue.detail).font(.subheadline).foregroundStyle(.secondary)
+            Text(guide.notes[venue.name] ?? "Check local information before visiting.")
+                .font(.footnote).padding(10).frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 9))
+            HStack {
+                Text("About \(duration(stop, venue: venue)) min").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                if let url = URL(string: venue.url) {
+                    Link("Details", destination: url).font(.subheadline.bold())
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel(isSaved ? "保存を解除" : "後で見るために保存")
-            }
-            .font(.caption.bold())
-            Text(item.title)
-                .font(.headline)
-                .foregroundStyle(.white)
-                .padding(.trailing, showAutumn ? 70 : 0)
-            if let period = item.period {
-                Label(period, systemImage: "calendar")
-                    .font(.subheadline.bold())
-                    .foregroundStyle(.white)
-            }
-            if let venue = item.venue {
-                Label(venue, systemImage: "mappin")
-                    .font(.subheadline)
-                    .foregroundStyle(GuideStyle.muted)
-            }
-            Text(item.detail).font(.subheadline).foregroundStyle(GuideStyle.muted)
-            Button {
-                openURL(item.url)
-            } label: {
-                HStack {
-                    Text(item.button)
-                    Spacer()
-                    Image(systemName: "arrow.up.right")
-                }
-                .font(.subheadline.bold())
-                .foregroundStyle(GuideStyle.navy)
-                .padding(13)
-                .background(GuideStyle.yellow, in: RoundedRectangle(cornerRadius: 12))
-            }
-            .accessibilityHint("外部の公式ページを開きます")
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(17)
-        .background {
-            ZStack(alignment: .topTrailing) {
-                RoundedRectangle(cornerRadius: 17).fill(GuideStyle.panel)
-                if showAutumn {
-                    SeasonArt(name: "autumn")
-                        .frame(width: 116, height: 112)
-                }
+                Button("Swap") { swapIndex = index }.font(.subheadline.bold())
+                    .buttonStyle(.borderedProminent)
             }
         }
-        .overlay(RoundedRectangle(cornerRadius: 20)
-            .stroke(GuideStyle.border, lineWidth: 1))
+        .padding(16).background(.white, in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    private func swapSheet(_ index: Int) -> some View {
+        let stop = route.stops[index]
+        let used = Set(route.stops.indices.filter { $0 != index }.map { selectedVenue($0).name })
+        return NavigationStack {
+            List(stop.choices.indices.filter { !used.contains(stop.choices[$0].name) }, id: \.self) { choice in
+                let venue = stop.choices[choice]
+                Button {
+                    choose(choice, at: index)
+                } label: {
+                    VStack(alignment: .leading, spacing: 5) {
+                        HStack {
+                            Text(venue.name).font(.headline)
+                            if choice == selectedIndex(index) { Image(systemName: "checkmark.circle.fill") }
+                        }
+                        Text(venue.detail).font(.subheadline).foregroundStyle(.secondary)
+                        Text("About \(duration(stop, venue: venue)) min")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }.padding(.vertical, 5)
+                }.foregroundStyle(.primary)
+            }
+            .navigationTitle(stop.type == "food" ? "Choose lunch" : "Swap this stop")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { Button("Done") { swapIndex = nil } }
+        }
+        .presentationDetents([.medium, .large])
     }
 }
 
+private extension Collection {
+    subscript(safe index: Index) -> Element? { indices.contains(index) ? self[index] : nil }
+}
