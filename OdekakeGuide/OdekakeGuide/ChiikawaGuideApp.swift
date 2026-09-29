@@ -428,6 +428,25 @@ struct GuideRootView: View {
                             .buttonStyle(.plain)
                         }
                     }
+                    if tab == .events {
+                        NavigationLink {
+                            OutingPlanView(items: availableItems, today: today)
+                        } label: {
+                            HStack(spacing: 12) {
+                                Image(systemName: "sparkles.rectangle.stack")
+                                    .font(.title2)
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("今日のプランを作る").font(.headline)
+                                    Text("日付・気分・長さから組み立てる").font(.subheadline)
+                                }
+                                Spacer(minLength: 0)
+                                Image(systemName: "chevron.right")
+                            }
+                            .foregroundStyle(GuideStyle.navy)
+                            .padding(16)
+                            .background(GuideStyle.yellow, in: RoundedRectangle(cornerRadius: 16))
+                        }
+                    }
                     searchPanel(for: tab)
                     let allItems = tab == .events ? filteredEvents :
                         (tab == .shops ? availableItems.filter {
@@ -663,6 +682,201 @@ struct GuideRootView: View {
         .padding(15)
         .background(GuideStyle.panel, in: RoundedRectangle(cornerRadius: 16))
         .overlay(RoundedRectangle(cornerRadius: 16).stroke(GuideStyle.border))
+    }
+}
+
+private enum PlanDay: String, CaseIterable {
+    case today = "今日", weekend = "今週末", chosen = "日付を選ぶ"
+}
+
+private enum PlanMood: String, CaseIterable {
+    case seasonal = "季節を感じたい"
+    case cute = "かわいいものを見たい"
+    case food = "食べ歩きたい"
+    case calm = "静かに過ごしたい"
+
+    func score(_ item: GuideItem) -> Int {
+        switch self {
+        case .seasonal:
+            return ["festival", "food", "nature", "market"].contains(item.eventType ?? "") ? 3 : 0
+        case .cute:
+            return item.eventType == "character" ? 3 : 0
+        case .food:
+            return item.eventType == "food" ? 3 : 0
+        case .calm:
+            return ["exhibition", "craft", "nature"].contains(item.eventType ?? "") ? 3 : 0
+        }
+    }
+}
+
+private enum PlanLength: String, CaseIterable {
+    case short = "2時間", half = "半日", full = "1日"
+    var shopCount: Int {
+        switch self {
+        case .short: return 0
+        case .half: return 1
+        case .full: return 2
+        }
+    }
+}
+
+private struct OutingPlanView: View {
+    let items: [GuideItem]
+    let today: String
+    @State private var day: PlanDay = .weekend
+    @State private var chosenDate = Date()
+    @State private var mood: PlanMood = .seasonal
+    @State private var length: PlanLength = .half
+    @State private var region = "全国"
+    @State private var planIndex = 0
+    @AppStorage("savedGuideItemIDs") private var savedItemIDs = ""
+
+    private var dates: [String] {
+        switch day {
+        case .today: return [today]
+        case .chosen: return [GuideData.dateString(chosenDate)]
+        case .weekend:
+            var calendar = Calendar(identifier: .gregorian)
+            calendar.timeZone = TimeZone(identifier: "Asia/Tokyo")!
+            let now = Date()
+            let weekday = calendar.component(.weekday, from: now)
+            let daysUntilSaturday = weekday == 1 ? -1 : (7 - weekday + 7) % 7
+            let saturday = calendar.date(byAdding: .day, value: daysUntilSaturday, to: now) ?? now
+            let sunday = calendar.date(byAdding: .day, value: 1, to: saturday) ?? saturday
+            return [GuideData.dateString(saturday), GuideData.dateString(sunday)]
+        }
+    }
+
+    private var regions: [String] {
+        ["全国"] + Set(items.filter { $0.category == .event && $0.region != "全国" }
+            .map(\.region)).sorted()
+    }
+
+    private var events: [GuideItem] {
+        items.filter { item in
+            guard item.category == .event, let start = item.startsOn,
+                  let end = item.endsOn, end >= today else { return false }
+            return mood.score(item) > 0 &&
+                (region == "全国" || item.region == region) &&
+                dates.contains { start <= $0 && $0 <= end && $0 >= today }
+        }.sorted { left, right in
+            if mood.score(left) != mood.score(right) {
+                return mood.score(left) > mood.score(right)
+            }
+            return (left.startsOn ?? "") < (right.startsOn ?? "")
+        }
+    }
+
+    private var selectedEvent: GuideItem? {
+        events.isEmpty ? nil : events[planIndex % events.count]
+    }
+
+    private var selectedDateLabel: String {
+        guard let event = selectedEvent, let start = event.startsOn, let end = event.endsOn,
+              let date = dates.first(where: { start <= $0 && $0 <= end }) else { return "" }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        formatter.timeZone = TimeZone(identifier: "Asia/Tokyo")
+        guard let parsed = formatter.date(from: date) else { return date }
+        formatter.dateFormat = "M月d日（E）"
+        formatter.locale = Locale(identifier: "ja_JP")
+        return formatter.string(from: parsed)
+    }
+
+    private var stops: [GuideItem] {
+        guard let event = selectedEvent else { return [] }
+        // 住所・営業時間が未収録のため、同じ都道府県の候補だけを組み合わせる。
+        let shops = items.filter { $0.category == .shop && $0.region == event.region &&
+            $0.region != "全国" && !$0.title.contains("一覧") && !$0.title.contains("コラボカフェ") }
+        let rotated = shops.isEmpty ? [] : Array(shops.dropFirst(planIndex % shops.count)) +
+            Array(shops.prefix(planIndex % shops.count))
+        return [event] + Array(rotated.prefix(length.shopCount))
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("四季から見つける、あなたの一日")
+                        .font(.subheadline.bold())
+                        .foregroundStyle(GuideStyle.yellow)
+                    Text("今日のプランを作る")
+                        .font(.largeTitle.bold())
+                        .foregroundStyle(.white)
+                    Text("気分に合うイベントと、同じ都道府県の立ち寄り候補を組み合わせます。")
+                        .foregroundStyle(.white)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(22)
+                .background(GuideStyle.header, in: RoundedRectangle(cornerRadius: 24))
+
+                VStack(alignment: .leading, spacing: 14) {
+                    Picker("いつ行きますか", selection: $day) {
+                        ForEach(PlanDay.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    if day == .chosen {
+                        DatePicker("行きたい日", selection: $chosenDate, in: Date()..., displayedComponents: .date)
+                    }
+                    Picker("地域", selection: $region) {
+                        ForEach(regions, id: \.self) { Text($0).tag($0) }
+                    }
+                    Picker("気分", selection: $mood) {
+                        ForEach(PlanMood.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                    }
+                    Picker("おでかけの長さ", selection: $length) {
+                        ForEach(PlanLength.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                }
+                .tint(GuideStyle.yellow)
+                .padding(18)
+                .background(GuideStyle.panel, in: RoundedRectangle(cornerRadius: 20))
+
+                if selectedEvent != nil {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("\(selectedDateLabel)の\(length.rawValue)プラン")
+                                .font(.title3.bold())
+                            Text("\(planIndex % events.count + 1)／\(events.count)案目")
+                                .font(.footnote)
+                        }
+                        Spacer()
+                        Button("別のプラン") { planIndex += 1 }
+                            .buttonStyle(.borderedProminent)
+                            .tint(GuideStyle.yellow)
+                    }
+                    ForEach(stops.indices, id: \.self) { index in
+                        let item = stops[index]
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("\(index + 1)　\(index == 0 ? "メインのイベント" : "同じ地域の立ち寄り候補")")
+                                .font(.subheadline.bold())
+                                .foregroundStyle(GuideStyle.yellow)
+                            GuideCard(item: item, today: today, savedItemIDs: $savedItemIDs)
+                        }
+                    }
+                    Text("同じ都道府県の候補です。移動順・所要時間・営業時間は未計算です。出発前に各公式ページで開催日、予約条件、営業時間を確認してください。")
+                        .font(.footnote)
+                        .foregroundStyle(GuideStyle.muted)
+                } else {
+                    Text("この条件で開催中のイベントはありません。日付・地域・気分を変えてみてください。")
+                        .foregroundStyle(.white)
+                        .padding(18)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(GuideStyle.panel, in: RoundedRectangle(cornerRadius: 20))
+                }
+            }
+            .padding(18)
+        }
+        .background(GuideStyle.background)
+        .navigationTitle("おでかけプラン")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar(.visible, for: .navigationBar)
+        .onChange(of: day) { _ in planIndex = 0 }
+        .onChange(of: chosenDate) { _ in planIndex = 0 }
+        .onChange(of: region) { _ in planIndex = 0 }
+        .onChange(of: mood) { _ in planIndex = 0 }
+        .onChange(of: length) { _ in planIndex = 0 }
     }
 }
 
