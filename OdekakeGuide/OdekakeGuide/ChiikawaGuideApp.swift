@@ -430,14 +430,14 @@ struct GuideRootView: View {
                     }
                     if tab == .events {
                         NavigationLink {
-                            OutingPlanView(items: availableItems, today: today)
+                            DateCourseView()
                         } label: {
                             HStack(spacing: 12) {
                                 Image(systemName: "sparkles.rectangle.stack")
                                     .font(.title2)
                                 VStack(alignment: .leading, spacing: 4) {
-                                    Text("今日のプランを作る").font(.headline)
-                                    Text("日付・気分・長さから組み立てる").font(.subheadline)
+                                    Text("年代別デートコースを見る").font(.headline)
+                                    Text("5つの一日コースと時刻表").font(.subheadline)
                                 }
                                 Spacer(minLength: 0)
                                 Image(systemName: "chevron.right")
@@ -685,198 +685,206 @@ struct GuideRootView: View {
     }
 }
 
-private enum PlanDay: String, CaseIterable {
-    case today = "今日", weekend = "今週末", chosen = "日付を選ぶ"
-}
+private enum DateAge: String, CaseIterable {
+    case twenties = "20・30代"
+    case middle = "40・50代"
+    case senior = "60・70代"
 
-private enum PlanMood: String, CaseIterable {
-    case seasonal = "季節を感じたい"
-    case cute = "かわいいものを見たい"
-    case food = "食べ歩きたい"
-    case calm = "静かに過ごしたい"
-
-    func score(_ item: GuideItem) -> Int {
+    var times: [String] {
         switch self {
-        case .seasonal:
-            return ["festival", "food", "nature", "market"].contains(item.eventType ?? "") ? 3 : 0
-        case .cute:
-            return item.eventType == "character" ? 3 : 0
-        case .food:
-            return item.eventType == "food" ? 3 : 0
-        case .calm:
-            return ["exhibition", "craft", "nature"].contains(item.eventType ?? "") ? 3 : 0
+        case .twenties: return ["10:00", "11:15", "12:15", "13:45", "15:00"]
+        case .middle: return ["10:00", "11:30", "12:30", "14:00", "15:15"]
+        case .senior: return ["10:00", "11:30", "12:30", "14:00", "15:30"]
         }
     }
-}
 
-private enum PlanLength: String, CaseIterable {
-    case short = "2時間", half = "半日", full = "1日"
-    var shopCount: Int {
+    var description: String {
         switch self {
-        case .short: return 0
-        case .half: return 1
-        case .full: return 2
+        case .twenties: return "街歩きも楽しむ標準的な時間配分"
+        case .middle: return "食事と休憩に少し余裕を持つ時間配分"
+        case .senior: return "各施設でゆっくり過ごす時間配分"
         }
     }
 }
 
-private struct OutingPlanView: View {
-    let items: [GuideItem]
-    let today: String
-    @State private var day: PlanDay = .weekend
-    @State private var chosenDate = Date()
-    @State private var mood: PlanMood = .seasonal
-    @State private var length: PlanLength = .half
-    @State private var region = "全国"
-    @State private var planIndex = 0
-    @AppStorage("savedGuideItemIDs") private var savedItemIDs = ""
-
-    private var dates: [String] {
-        switch day {
-        case .today: return [today]
-        case .chosen: return [GuideData.dateString(chosenDate)]
-        case .weekend:
-            var calendar = Calendar(identifier: .gregorian)
-            calendar.timeZone = TimeZone(identifier: "Asia/Tokyo")!
-            let now = Date()
-            let weekday = calendar.component(.weekday, from: now)
-            let daysUntilSaturday = weekday == 1 ? -1 : (7 - weekday + 7) % 7
-            let saturday = calendar.date(byAdding: .day, value: daysUntilSaturday, to: now) ?? now
-            let sunday = calendar.date(byAdding: .day, value: 1, to: saturday) ?? saturday
-            return [GuideData.dateString(saturday), GuideData.dateString(sunday)]
-        }
+private struct CourseStop: Identifiable {
+    let name: String
+    let detail: String
+    let url: URL
+    var id: String { name }
+    init(_ name: String, _ detail: String, _ url: String) {
+        self.name = name
+        self.detail = detail
+        self.url = URL(string: url)!
     }
+}
 
-    private var regions: [String] {
-        ["全国"] + Set(items.filter { $0.category == .event && $0.region != "全国" }
-            .map(\.region)).sorted()
-    }
+private struct DateCourse: Identifiable {
+    let id: String
+    let title: String
+    let area: String
+    let theme: String
+    let note: String
+    let stops: [CourseStop]
 
-    private var events: [GuideItem] {
-        items.filter { item in
-            guard item.category == .event, let start = item.startsOn,
-                  let end = item.endsOn, end >= today else { return false }
-            return mood.score(item) > 0 &&
-                (region == "全国" || item.region == region) &&
-                dates.contains { start <= $0 && $0 <= end && $0 >= today }
-        }.sorted { left, right in
-            if mood.score(left) != mood.score(right) {
-                return mood.score(left) > mood.score(right)
-            }
-            return (left.startsOn ?? "") < (right.startsOn ?? "")
-        }
-    }
+    // 2026-09-29に施設・店舗の公式案内を確認した最初のモデルコース。
+    // 時刻はモデル値。個別の営業日や区間移動は出発日の前に確認する。
+    static let examples: [DateCourse] = [
+        .init(id: "ueno", title: "上野・美術と老舗ランチ", area: "上野", theme: "文化と食事",
+              note: "博物館と公園を中心に、老舗の洋食店で昼食。",
+              stops: [
+                .init("東京国立博物館", "展示を楽しむ。特別展の入館条件を確認。", "https://www.tnm.jp/"),
+                .init("上野恩賜公園", "園内の景色を見ながら散策。", "https://www.kensetsu.metro.tokyo.lg.jp/jimusho/toubuk/ueno"),
+                .init("上野精養軒本店 グリル", "昼食。混雑時は待ち時間に注意。", "https://www.seiyoken.co.jp/restaurant/fukushima/"),
+                .init("国立科学博物館", "興味のある展示を選んで見学。", "https://www.kahaku.go.jp/riyou/nyukan-annai/"),
+                .init("スターバックス 上野恩賜公園店", "公園内でコーヒー休憩。", "https://store.starbucks.co.jp/detail-1087/")
+              ]),
+        .init(id: "asakusa", title: "浅草・下町散歩とすき焼き", area: "浅草", theme: "街歩きと和食",
+              note: "浅草から隅田川を眺め、午後は景色を楽しむ。",
+              stops: [
+                .init("浅草寺", "雷門から参拝へ。", "https://www.senso-ji.jp/"),
+                .init("仲見世商店街", "工芸品やお土産を見て歩く。", "https://www.gotokyo.org/jp/spot/73/index.html"),
+                .init("浅草今半 国際通り本店", "昼食。営業日とメニューを確認。", "https://www.asakusaimahan.co.jp/kokusai/1000"),
+                .init("隅田公園", "川沿いで休憩しながら散策。", "https://www.gotokyo.org/jp/destinations/eastern-tokyo/asakusa/index.html"),
+                .init("東京スカイツリー", "展望台から景色を見る。チケットを確認。", "https://www.tokyo-skytree.jp/ticket/")
+              ]),
+        .init(id: "tachikawa", title: "立川・緑と絵本の一日", area: "立川", theme: "自然とアート",
+              note: "公園の緑、食事、美術館を組み合わせる。",
+              stops: [
+                .init("国営昭和記念公園", "季節の景色を楽しむ。", "https://www.showakinen-koen.jp/park-information/schedule/"),
+                .init("ぎんなん茶屋", "公園内でひと休み。", "https://www.showakinen-koen.jp/facility/facility-719/"),
+                .init("ダイチノレストラン", "立川の食材を使った昼食。予約を確認。", "https://soranohotel.com/restaurant/daichino_restaurant/"),
+                .init("PLAY! MUSEUM", "絵本やアートの企画展。展示と休館日を確認。", "https://play2020.jp/museum/visit/"),
+                .init("PLAY! CAFE", "展示の余韻を楽しむ。", "https://play2020.jp/cafe/")
+              ]),
+        .init(id: "ikebukuro", title: "池袋・水族館と星空", area: "池袋", theme: "屋内と眺望",
+              note: "天候に左右されにくい施設を中心に回る。",
+              stops: [
+                .init("サンシャイン水族館", "生きものを見て回る。チケットを確認。", "https://sunshinecity.jp/aquarium/ticket/"),
+                .init("サンシャインシティ", "館内のお店を見て歩く。", "https://sunshinecity.jp/information/floor_map/"),
+                .init("池袋ぱすたかん", "サンシャインシティ内で昼食。", "https://sunshinecity.jp/restaurant/restaurant_list/entry-422.html"),
+                .init("プラネタリウム満天", "上映時刻に合わせて鑑賞。", "https://planetarium.konicaminolta.jp/schedule/manten/"),
+                .init("てんぼうパーク", "景色と館内カフェで休憩。入場条件を確認。", "https://sunshinecity.jp/observatory/")
+              ]),
+        .init(id: "oshiage", title: "押上・空と水族館と甘いもの", area: "押上", theme: "眺望とグルメ",
+              note: "東京スカイツリータウン内を中心に過ごす。",
+              stops: [
+                .init("東京スカイツリー", "展望台へ。チケットと入場時刻を確認。", "https://www.tokyo-skytree.jp/ticket/"),
+                .init("すみだ水族館", "水槽をゆっくり見て回る。", "https://www.sumida-aquarium.com/about/access/"),
+                .init("回転寿し トリトン", "東京ソラマチで昼食。予約不可、店頭発券。", "https://www.tokyo-solamachi.jp/shop/295/"),
+                .init("東京ソラマチ", "雑貨やお土産を見て歩く。", "https://www.tokyo-solamachi.jp/floor/"),
+                .init("キル フェ ボン", "タルトで午後の休憩。", "https://www.tokyo-solamachi.jp/shop/129/")
+              ])
+    ]
+}
 
-    private var selectedEvent: GuideItem? {
-        events.isEmpty ? nil : events[planIndex % events.count]
-    }
-
-    private var selectedDateLabel: String {
-        guard let event = selectedEvent, let start = event.startsOn, let end = event.endsOn,
-              let date = dates.first(where: { start <= $0 && $0 <= end }) else { return "" }
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd"
-        formatter.timeZone = TimeZone(identifier: "Asia/Tokyo")
-        guard let parsed = formatter.date(from: date) else { return date }
-        formatter.dateFormat = "M月d日（E）"
-        formatter.locale = Locale(identifier: "ja_JP")
-        return formatter.string(from: parsed)
-    }
-
-    private var stops: [GuideItem] {
-        guard let event = selectedEvent else { return [] }
-        // 住所・営業時間が未収録のため、同じ都道府県の候補だけを組み合わせる。
-        let shops = items.filter { $0.category == .shop && $0.region == event.region &&
-            $0.region != "全国" && !$0.title.contains("一覧") && !$0.title.contains("コラボカフェ") }
-        let rotated = shops.isEmpty ? [] : Array(shops.dropFirst(planIndex % shops.count)) +
-            Array(shops.prefix(planIndex % shops.count))
-        return [event] + Array(rotated.prefix(length.shopCount))
-    }
+private struct DateCourseView: View {
+    @State private var age: DateAge = .middle
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 16) {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("四季から見つける、あなたの一日")
-                        .font(.subheadline.bold())
-                        .foregroundStyle(GuideStyle.yellow)
-                    Text("今日のプランを作る")
-                        .font(.largeTitle.bold())
-                        .foregroundStyle(.white)
-                    Text("気分に合うイベントと、同じ都道府県の立ち寄り候補を組み合わせます。")
-                        .foregroundStyle(.white)
+                    Text("東京から始める")
+                        .font(.subheadline.bold()).foregroundStyle(GuideStyle.yellow)
+                    Text("年代別デートコース")
+                        .font(.title.bold()).foregroundStyle(.white)
+                    Text("行き先を5か所つないだ、一日のモデルコースです。")
+                        .foregroundStyle(GuideStyle.muted)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(22)
-                .background(GuideStyle.header, in: RoundedRectangle(cornerRadius: 24))
-
-                VStack(alignment: .leading, spacing: 14) {
-                    Picker("いつ行きますか", selection: $day) {
-                        ForEach(PlanDay.allCases, id: \.self) { Text($0.rawValue).tag($0) }
-                    }
-                    .pickerStyle(.segmented)
-                    if day == .chosen {
-                        DatePicker("行きたい日", selection: $chosenDate, in: Date()..., displayedComponents: .date)
-                    }
-                    Picker("地域", selection: $region) {
-                        ForEach(regions, id: \.self) { Text($0).tag($0) }
-                    }
-                    Picker("気分", selection: $mood) {
-                        ForEach(PlanMood.allCases, id: \.self) { Text($0.rawValue).tag($0) }
-                    }
-                    Picker("おでかけの長さ", selection: $length) {
-                        ForEach(PlanLength.allCases, id: \.self) { Text($0.rawValue).tag($0) }
-                    }
-                    .pickerStyle(.segmented)
-                }
-                .tint(GuideStyle.yellow)
                 .padding(18)
-                .background(GuideStyle.panel, in: RoundedRectangle(cornerRadius: 20))
+                .background(GuideStyle.header, in: RoundedRectangle(cornerRadius: 16))
 
-                if selectedEvent != nil {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("\(selectedDateLabel)の\(length.rawValue)プラン")
-                                .font(.title3.bold())
-                            Text("\(planIndex % events.count + 1)／\(events.count)案目")
-                                .font(.footnote)
-                        }
-                        Spacer()
-                        Button("別のプラン") { planIndex += 1 }
-                            .buttonStyle(.borderedProminent)
-                            .tint(GuideStyle.yellow)
-                    }
-                    ForEach(stops.indices, id: \.self) { index in
-                        let item = stops[index]
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("\(index + 1)　\(index == 0 ? "メインのイベント" : "同じ地域の立ち寄り候補")")
-                                .font(.subheadline.bold())
-                                .foregroundStyle(GuideStyle.yellow)
-                            GuideCard(item: item, today: today, savedItemIDs: $savedItemIDs)
-                        }
-                    }
-                    Text("同じ都道府県の候補です。移動順・所要時間・営業時間は未計算です。出発前に各公式ページで開催日、予約条件、営業時間を確認してください。")
-                        .font(.footnote)
-                        .foregroundStyle(GuideStyle.muted)
-                } else {
-                    Text("この条件で開催中のイベントはありません。日付・地域・気分を変えてみてください。")
-                        .foregroundStyle(.white)
-                        .padding(18)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(GuideStyle.panel, in: RoundedRectangle(cornerRadius: 20))
+                Picker("年代", selection: $age) {
+                    ForEach(DateAge.allCases, id: \.self) { Text($0.rawValue).tag($0) }
                 }
+                .pickerStyle(.segmented)
+                Text(age.description)
+                    .font(.subheadline).foregroundStyle(GuideStyle.muted)
+                Text("5コースから選ぶ")
+                    .font(.title3.bold()).foregroundStyle(.white)
+                ForEach(DateCourse.examples) { course in
+                    NavigationLink {
+                        DateCourseDetailView(course: course, age: age)
+                    } label: {
+                        VStack(alignment: .leading, spacing: 9) {
+                            HStack {
+                                Text(course.area).font(.caption.bold())
+                                    .foregroundStyle(GuideStyle.navy)
+                                    .padding(.horizontal, 9).padding(.vertical, 5)
+                                    .background(GuideStyle.yellow, in: Capsule())
+                                Spacer()
+                                Text(course.theme).font(.caption).foregroundStyle(GuideStyle.muted)
+                            }
+                            Text(course.title).font(.headline).foregroundStyle(.white)
+                            Text(course.note).font(.subheadline).foregroundStyle(GuideStyle.muted)
+                            Text("10:00から・立ち寄り5か所　行程を見る →")
+                                .font(.subheadline.bold()).foregroundStyle(GuideStyle.yellow)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(17)
+                        .background(GuideStyle.panel, in: RoundedRectangle(cornerRadius: 16))
+                        .overlay(RoundedRectangle(cornerRadius: 16).stroke(GuideStyle.border))
+                    }
+                    .buttonStyle(.plain)
+                }
+                Text("時刻はモデル値です。出発日に合わせた営業・予約・移動時間の計算は今後追加します。")
+                    .font(.footnote).foregroundStyle(GuideStyle.muted)
             }
-            .padding(18)
+            .padding(16)
         }
         .background(GuideStyle.background)
-        .navigationTitle("おでかけプラン")
-        .navigationBarTitleDisplayMode(.inline)
+        .navigationTitle("デートコース")
         .toolbar(.visible, for: .navigationBar)
-        .onChange(of: day) { _ in planIndex = 0 }
-        .onChange(of: chosenDate) { _ in planIndex = 0 }
-        .onChange(of: region) { _ in planIndex = 0 }
-        .onChange(of: mood) { _ in planIndex = 0 }
-        .onChange(of: length) { _ in planIndex = 0 }
+    }
+}
+
+private struct DateCourseDetailView: View {
+    let course: DateCourse
+    let age: DateAge
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                Text(course.title).font(.title2.bold()).foregroundStyle(.white)
+                Text("\(age.rawValue)向けの時間配分・\(course.area)")
+                    .foregroundStyle(GuideStyle.muted)
+                ForEach(course.stops.indices, id: \.self) { index in
+                    let stop = course.stops[index]
+                    VStack(alignment: .leading, spacing: 9) {
+                        HStack(alignment: .firstTextBaseline, spacing: 12) {
+                            Text(age.times[index]).font(.title3.bold())
+                                .foregroundStyle(GuideStyle.yellow)
+                            Text(stop.name).font(.headline).foregroundStyle(.white)
+                        }
+                        Text(stop.detail).font(.subheadline).foregroundStyle(GuideStyle.muted)
+                        Link(destination: stop.url) {
+                            HStack {
+                                Text("公式案内を見る")
+                                Spacer()
+                                Image(systemName: "arrow.up.right")
+                            }
+                            .font(.subheadline.bold())
+                            .foregroundStyle(GuideStyle.navy)
+                            .padding(12)
+                            .background(GuideStyle.yellow, in: RoundedRectangle(cornerRadius: 10))
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(16)
+                    .background(GuideStyle.panel, in: RoundedRectangle(cornerRadius: 16))
+                }
+                Text("16:30ごろ　帰路へ")
+                    .font(.headline).foregroundStyle(.white)
+                Text("これはモデル時刻です。営業時間・休館日・チケット・移動時間・食事の席は保証されません。各公式案内で確認してからお出かけください。")
+                    .font(.footnote).foregroundStyle(GuideStyle.muted)
+            }
+            .padding(16)
+        }
+        .background(GuideStyle.background)
+        .navigationTitle(course.area)
+        .toolbar(.visible, for: .navigationBar)
     }
 }
 
@@ -974,3 +982,4 @@ private struct GuideCard: View {
             .stroke(GuideStyle.border, lineWidth: 1))
     }
 }
+
