@@ -1,6 +1,6 @@
 workflows:
   ios-release:
-    name: iPhone版ビルド
+    name: Japan Day Planner iPhone build
     max_build_duration: 60
     instance_type: mac_mini_m2
     integrations:
@@ -56,6 +56,8 @@ workflows:
                  '   files = (A10000000000000000000002,);\n   runOnlyForDeploymentPostprocessing = 0;\n  };\n  A10000000000000000000032', 1)
           change('    CODE_SIGN_STYLE = Automatic;',
                  '    ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;\n    CODE_SIGN_STYLE = Automatic;', 2)
+          change('    INFOPLIST_KEY_CFBundleDisplayName = "おでかけガイド";',
+                 '    INFOPLIST_KEY_CFBundleDisplayName = "Japan Day Planner";', 2)
           build_number = os.environ['BUILD_NUMBER']
           assert build_number.isdigit()
           change('    CURRENT_PROJECT_VERSION = 1;',
