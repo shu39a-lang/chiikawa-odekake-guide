@@ -1,5 +1,7 @@
 import SwiftUI
 import Foundation
+import MapKit
+import CoreLocation
 
 private struct Venue: Decodable {
     let name: String
@@ -63,6 +65,16 @@ private struct PlannerView: View {
     @State private var swapIndex: Int?
     @AppStorage("japanDay.language") private var languageCode = "ja"
     @State private var showingGuide = false
+    @AppStorage("japanDay.hotels") private var savedHotels = "{}"
+    @AppStorage("japanDay.customHotels") private var savedCustomHotels = "{}"
+    @AppStorage("japanDay.dinnerArea") private var dinnerArea = "auto"
+    @State private var journeyIndex = 0
+    @State private var journeyCompleted = false
+    @State private var dinnerResults: [DinnerPlace] = []
+    @State private var dinnerSelection: DinnerPlace?
+    @State private var dinnerSearching = false
+    @State private var dinnerSearchError = false
+    @State private var dinnerSearchID = UUID()
 
     private var language: GuideLanguage { GuideLanguage(rawValue: languageCode) ?? .ja }
     private func text(_ key: String) -> String { GuideTranslations.ui[key]?[language.index] ?? key }
@@ -177,6 +189,14 @@ private struct PlannerView: View {
             let venue = selectedVenue(index)
             lines.append("\(time(startOfStop(index))) · \(venueText(venue, 0)) · \(venue.url)")
         }
+        if !hotelQuery.isEmpty { lines.insert("\(journeyText("chooseHotel")) · \(hotelName)", at: 1) }
+        lines.append(journeyText(dinnerNearHotel ? "earlyNote" : "lateNote"))
+        if let place = dinnerSelection {
+            lines.append("\(journeyText("selectedDinner")) · \(place.name) · \(place.address)")
+            if !hotelQuery.isEmpty, let url = mapURL(origin: place.query, destination: hotelQuery, mode: "transit") {
+                lines.append("\(journeyText("afterDinner")) · \(url.absoluteString)")
+            }
+        }
         lines.append(text("sharedNote"))
         return lines.joined(separator: "\n")
     }
@@ -184,53 +204,402 @@ private struct PlannerView: View {
     var body: some View {
         NavigationStack {
             if showingGuide {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-                    languageButtons
-                    intro
-                    controls
-                    hotelSection
-                    arrivalCard
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text(routeText(route, 1)).font(.title2.bold())
-                        Text(routeText(route, 2)).foregroundStyle(.secondary)
-                        Text(format("summary", routeText(route, 3), route.stops.count, finishTime))
-                            .font(.caption).foregroundStyle(.secondary)
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 18) {
+                            Text(routeText(route, 0)).font(.title2.bold())
+                            Text(journeyText("opening")).font(.subheadline).foregroundStyle(.secondary)
+                            controls
+                            journeyHotelPicker
+                            dinnerAreaPicker
+                            journeyOverview
+                            journeyCurrent.id("currentStage")
+                            Text(text("footer")).font(.footnote).foregroundStyle(.secondary).padding(.bottom)
+                        }.padding()
                     }
-                    ForEach(route.stops.indices, id: \.self) { index in
-                        if index > 0 {
-                            transferCard(index)
-                        }
-                        stopCard(index)
+                    .background(journeyBackground)
+                    .onChange(of: journeyIndex) { _ in
+                        withAnimation { proxy.scrollTo("currentStage", anchor: .top) }
                     }
-                    Text(text("footer"))
-                        .font(.footnote).foregroundStyle(.secondary).padding(.bottom)
                 }
-                .padding()
-            }
-            .background(Color(.systemGroupedBackground))
-            .navigationTitle("Japan Day Planner")
-            .toolbar {
-                ToolbarItem(placement: .navigationBarLeading) {
-                    Button(text("home")) { showingGuide = false }
+                .navigationTitle("Japan Day Planner")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .navigationBarLeading) {
+                        Button(text("home")) { showingGuide = false }
+                    }
+                    ToolbarItem(placement: .navigationBarTrailing) {
+                        ShareLink(item: sharedPlan) { Image(systemName: "square.and.arrow.up") }
+                            .accessibilityLabel(text("share"))
+                    }
                 }
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    ShareLink(item: sharedPlan) { Image(systemName: "square.and.arrow.up") }
-                        .accessibilityLabel(text("share"))
+                .sheet(isPresented: Binding(get: { swapIndex != nil }, set: { if !$0 { swapIndex = nil } })) {
+                    if let index = swapIndex { swapSheet(index) }
                 }
-            }
-            .sheet(isPresented: Binding(get: { swapIndex != nil }, set: { if !$0 { swapIndex = nil } })) {
-                if let index = swapIndex { swapSheet(index) }
-            }
+                .onChange(of: routeID) { _ in resetJourney() }
+                .onChange(of: startMinutes) { _ in resetJourney() }
+                .onChange(of: dinnerArea) { _ in resetJourney() }
+                .onChange(of: savedChoices) { _ in resetDinner() }
+                .onChange(of: dinnerNearHotel) { _ in resetJourney() }
             } else {
                 languageHome
             }
         }
         .environment(\.locale, language.locale)
         .preferredColorScheme(.dark)
-        .tint(Color(red: 0.25, green: 0.78, blue: 0.80))
+        .tint(journeyGold)
     }
 
+
+    // Each destination and transfer has its own visible stage.
+    private enum JourneyStage {
+        case departure, stop(Int), hotelBeforeDinner, dinner, hotelAfterDinner
+    }
+    private let journeyBackground = Color(red: 0.06, green: 0.11, blue: 0.18)
+    private let journeySurface = Color(red: 0.11, green: 0.17, blue: 0.26)
+    private let journeyGold = Color(red: 0.94, green: 0.80, blue: 0.45)
+
+    private func journeyText(_ key: String) -> String {
+        JourneyTranslations.ui[key]?[language.index] ?? key
+    }
+    private func storedValues(_ value: String) -> [String: String] {
+        guard let data = value.data(using: .utf8) else { return [:] }
+        return (try? JSONDecoder().decode([String: String].self, from: data)) ?? [:]
+    }
+    private func saveHotelValue(_ value: String, custom: Bool = false) {
+        var values = storedValues(custom ? savedCustomHotels : savedHotels)
+        values[route.id] = value
+        guard let data = try? JSONEncoder().encode(values), let string = String(data: data, encoding: .utf8) else { return }
+        if custom { savedCustomHotels = string } else { savedHotels = string }
+        resetJourney()
+    }
+    private var availableHotels: [NearbyHotel] { TravelExtras.hotels[route.id] ?? [] }
+    private var hotelChoice: String {
+        let value = storedValues(savedHotels)[route.id] ?? ""
+        if value == "custom" || availableHotels.contains(where: { $0.id == value }) { return value }
+        return availableHotels.first?.id ?? "custom"
+    }
+    private var chosenHotel: NearbyHotel? { availableHotels.first(where: { $0.id == hotelChoice }) }
+    private var customHotel: String { storedValues(savedCustomHotels)[route.id] ?? "" }
+    private var hotelName: String {
+        chosenHotel?.names[language.index] ?? (customHotel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? journeyText("enterHotel") : customHotel)
+    }
+    private var hotelQuery: String {
+        if let hotel = chosenHotel { return "\(hotel.names[0]), \(hotel.addressJP), Japan" }
+        let value = customHotel.trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? "" : "\(value), \(cityQuery), Japan"
+    }
+    private var finishMinutes: Int {
+        guard let index = route.stops.indices.last else { return startMinutes }
+        return startOfStop(index) + duration(route.stops[index], venue: selectedVenue(index))
+    }
+    private var dinnerNearHotel: Bool {
+        if dinnerArea == "hotel" { return true }
+        if dinnerArea == "last" { return false }
+        return finishMinutes < 18 * 60
+    }
+    private var lastVenue: Venue { selectedVenue(route.stops.count - 1) }
+    private var dinnerAnchorQuery: String { dinnerNearHotel ? hotelQuery : venueQuery(lastVenue) }
+    private var dinnerAnchorName: String { dinnerNearHotel ? hotelName : venueText(lastVenue, 0) }
+    private var stages: [JourneyStage] {
+        var items: [JourneyStage] = [.departure]
+        items.append(contentsOf: route.stops.indices.map { .stop($0) })
+        if dinnerNearHotel { items.append(.hotelBeforeDinner) }
+        items.append(.dinner)
+        items.append(.hotelAfterDinner)
+        return items
+    }
+    private var currentStage: JourneyStage { stages[min(max(0, journeyIndex), stages.count - 1)] }
+    private func stageTitle(_ item: JourneyStage) -> String {
+        switch item {
+        case .departure: return journeyText("depart")
+        case .stop(let index): return venueText(selectedVenue(index), 0)
+        case .hotelBeforeDinner: return journeyText("hotelFirst")
+        case .dinner: return journeyText(dinnerNearHotel ? "dinnerHotel" : "dinnerLast")
+        case .hotelAfterDinner: return journeyText("returnHotel")
+        }
+    }
+    private func stageSymbol(_ item: JourneyStage) -> String {
+        switch item {
+        case .departure, .hotelBeforeDinner, .hotelAfterDinner: return "bed.double.fill"
+        case .dinner: return "fork.knife"
+        case .stop(let index): return route.stops[index].type == "food" ? "fork.knife" : "mappin.and.ellipse"
+        }
+    }
+    private func stageTime(_ item: JourneyStage) -> String? {
+        switch item {
+        case .stop(let index): return time(startOfStop(index))
+        default: return nil
+        }
+    }
+    private func resetJourney() {
+        journeyIndex = 0
+        journeyCompleted = false
+        resetDinner()
+    }
+    private func resetDinner() {
+        dinnerSearchID = UUID()
+        dinnerResults = []
+        dinnerSelection = nil
+        dinnerSearchError = false
+        dinnerSearching = false
+    }
+    private func journeyPanel<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 14, content: content)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(16)
+            .background(journeySurface, in: RoundedRectangle(cornerRadius: 16))
+    }
+    private func journeyAction(_ title: String, systemImage: String = "arrow.right", action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack {
+                Text(title).fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 8)
+                Image(systemName: systemImage)
+            }
+            .font(.headline).padding(14).frame(maxWidth: .infinity, minHeight: 48)
+            .foregroundStyle(Color.black)
+            .background(journeyGold, in: RoundedRectangle(cornerRadius: 11))
+        }
+        .buttonStyle(.plain)
+    }
+    private func journeyLink(_ title: String, url: URL, systemImage: String = "magnifyingglass") -> some View {
+        Link(destination: url) {
+            Label(title, systemImage: systemImage)
+                .font(.subheadline.bold()).fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                .padding(.horizontal, 12)
+                .foregroundStyle(journeyGold)
+                .background(Color(red: 0.15, green: 0.22, blue: 0.33), in: RoundedRectangle(cornerRadius: 10))
+        }
+    }
+    private var journeyHotelPicker: some View {
+        journeyPanel {
+            Label(journeyText("chooseHotel"), systemImage: "bed.double.fill").font(.headline)
+            Picker(journeyText("chooseHotel"), selection: Binding(get: { hotelChoice }, set: { saveHotelValue($0) })) {
+                ForEach(availableHotels) { hotel in Text(hotel.names[language.index]).tag(hotel.id) }
+                Text(journeyText("ownHotel")).tag("custom")
+            }
+            .pickerStyle(.menu).tint(journeyGold)
+            if hotelChoice == "custom" {
+                TextField(journeyText("hotelInput"), text: Binding(get: { customHotel }, set: { saveHotelValue($0, custom: true) }))
+                    .textFieldStyle(.roundedBorder)
+                Text(journeyText("hotelInputNote")).font(.footnote).foregroundStyle(.secondary)
+            } else if let hotel = chosenHotel {
+                Text(language == .ja ? hotel.addressJP : hotel.addressEN).font(.subheadline).foregroundStyle(.secondary)
+                if let url = URL(string: hotel.rateURL) { journeyLink(extra("rate"), url: url, systemImage: "yensign.circle") }
+                if let url = locationURL(hotelQuery) { journeyLink(extra("hotelMap"), url: url, systemImage: "mappin.and.ellipse") }
+                DisclosureGroup(extra("contact")) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        if let url = URL(string: "tel:\(hotel.phone)") {
+                            journeyLink("\(extra("call")) · \(hotel.phoneDisplay)", url: url, systemImage: "phone")
+                        }
+                        if let url = URL(string: hotel.contactURL) { journeyLink(extra("contact"), url: url, systemImage: "globe") }
+                        Text(extra("rateNote")).font(.footnote).foregroundStyle(.secondary)
+                    }.padding(.top, 10)
+                }
+            }
+            Text(journeyText("hotelChoiceNote")).font(.footnote).foregroundStyle(.secondary)
+        }
+    }
+    private var journeyOverview: some View {
+        journeyPanel {
+            Text(journeyText("order")).font(.title3.bold())
+            Text("\(journeyText("finish")) · \(finishTime)").font(.subheadline)
+            Text(journeyText("timeEstimate")).font(.caption).foregroundStyle(.secondary)
+            ForEach(stages.indices, id: \.self) { index in
+                Button { journeyIndex = index; journeyCompleted = false } label: {
+                    HStack(alignment: .top, spacing: 12) {
+                        Text("\(index + 1)")
+                            .font(.subheadline.bold()).frame(width: 32, height: 32)
+                            .foregroundStyle(index == journeyIndex ? Color.black : Color.white)
+                            .background(index == journeyIndex ? journeyGold : Color(red: 0.15, green: 0.22, blue: 0.33), in: Circle())
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(stageTitle(stages[index])).font(.subheadline.bold())
+                            if let stamp = stageTime(stages[index]) { Text(stamp).font(.caption).monospacedDigit() }
+                            if index == journeyIndex { Text(journeyText("current")).font(.caption) }
+                        }
+                        Spacer(minLength: 0)
+                        Image(systemName: stageSymbol(stages[index]))
+                    }
+                    .foregroundStyle(index == journeyIndex ? journeyGold : Color.white)
+                    .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                }.buttonStyle(.plain)
+                if index < stages.count - 1 {
+                    Image(systemName: "arrow.down").font(.caption).foregroundStyle(.secondary).padding(.leading, 10)
+                }
+            }
+        }
+    }
+    private func travelPanel(origin: String?, destination: String, title: String, fromName: String, toName: String) -> some View {
+        journeyPanel {
+            Label(title, systemImage: "arrow.right.circle.fill").font(.headline).foregroundStyle(journeyGold)
+            Text("\(fromName) → \(toName)").font(.headline)
+            routeLinks(origin: origin, destination: destination)
+            Text(extra("liveNote")).font(.footnote).foregroundStyle(.secondary)
+        }
+    }
+    private var journeyNextEnabled: Bool {
+        switch currentStage {
+        case .departure, .hotelBeforeDinner: return !hotelQuery.isEmpty
+        case .dinner: return dinnerSelection != nil
+        case .hotelAfterDinner: return dinnerSelection != nil && !hotelQuery.isEmpty
+        default: return true
+        }
+    }
+    private var journeyCurrent: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("\(journeyText("current")) · \(journeyIndex + 1) / \(stages.count)")
+                .font(.headline).foregroundStyle(journeyGold)
+            switch currentStage {
+            case .departure:
+                if hotelQuery.isEmpty {
+                    journeyPanel { Text(journeyText("enterHotel")) }
+                } else {
+                    travelPanel(origin: hotelQuery, destination: venueQuery(selectedVenue(0)), title: journeyText("firstDestination"), fromName: hotelName, toName: venueText(selectedVenue(0), 0))
+                }
+                DisclosureGroup(extra("arrival")) { arrivalCard.padding(.top, 10) }
+            case .stop(let index):
+                stopCard(index)
+                if index + 1 < route.stops.count {
+                    transferCard(index + 1)
+                } else if dinnerNearHotel && !hotelQuery.isEmpty {
+                    travelPanel(origin: venueQuery(lastVenue), destination: hotelQuery, title: journeyText("nextHotel"), fromName: venueText(lastVenue, 0), toName: hotelName)
+                } else if !dinnerNearHotel {
+                    journeyPanel {
+                        Text(journeyText("nextDinner")).font(.headline).foregroundStyle(journeyGold)
+                        Text(journeyText("lateNote"))
+                        Text(venueText(lastVenue, 0)).font(.subheadline.bold())
+                    }
+                }
+            case .hotelBeforeDinner:
+                if !hotelQuery.isEmpty {
+                    travelPanel(origin: venueQuery(lastVenue), destination: hotelQuery, title: journeyText("returnHotel"), fromName: venueText(lastVenue, 0), toName: hotelName)
+                } else { journeyPanel { Text(journeyText("enterHotel")) } }
+                journeyPanel {
+                    Text(journeyText("nextDinner")).font(.headline).foregroundStyle(journeyGold)
+                    Text(journeyText("earlyNote"))
+                }
+            case .dinner:
+                dinnerCard
+            case .hotelAfterDinner:
+                if let place = dinnerSelection, !hotelQuery.isEmpty {
+                    travelPanel(origin: place.query, destination: hotelQuery, title: journeyText("afterDinner"), fromName: place.name, toName: hotelName)
+                } else {
+                    journeyPanel { Text(journeyText("selectDinnerHotel")) }
+                }
+                if journeyCompleted {
+                    Label(journeyText("completed"), systemImage: "checkmark.circle.fill").font(.headline).foregroundStyle(journeyGold)
+                }
+            }
+            if !journeyCompleted {
+                journeyAction(journeyText(journeyIndex == stages.count - 1 ? "arrived" : "next")) {
+                    if journeyIndex < stages.count - 1 { journeyIndex += 1 } else { journeyCompleted = true }
+                }.disabled(!journeyNextEnabled).opacity(journeyNextEnabled ? 1 : 0.45)
+            }
+            if journeyIndex > 0 {
+                Button(journeyText("previous")) { journeyIndex -= 1; journeyCompleted = false }
+                    .font(.subheadline.bold()).frame(maxWidth: .infinity, minHeight: 44)
+            }
+        }
+    }
+    private var dinnerAreaPicker: some View {
+        journeyPanel {
+            Label(journeyText("dinnerPlan"), systemImage: "fork.knife").font(.headline)
+            Text(journeyText("cutoffNote")).font(.footnote).foregroundStyle(.secondary)
+            Picker(journeyText("dinnerArea"), selection: $dinnerArea) {
+                Text(journeyText("automatic")).tag("auto")
+                Text(journeyText("nearHotel")).tag("hotel")
+                Text(journeyText("nearLast")).tag("last")
+            }.pickerStyle(.menu).tint(journeyGold)
+            Text(journeyText(dinnerNearHotel ? "earlyNote" : "lateNote")).font(.subheadline)
+        }
+    }
+    private var dinnerCard: some View {
+        journeyPanel {
+            Label(journeyText(dinnerNearHotel ? "dinnerHotel" : "dinnerLast"), systemImage: "fork.knife").font(.title3.bold())
+            Text(dinnerAnchorName).font(.subheadline.bold())
+            Text(journeyText(dinnerNearHotel ? "earlyNote" : "lateNote")).font(.subheadline)
+            if dinnerAnchorQuery.isEmpty {
+                Text(journeyText("enterHotel")).foregroundStyle(journeyGold)
+            } else {
+                journeyAction(journeyText("findDinner"), systemImage: "magnifyingglass") { searchDinner() }
+                    .disabled(dinnerSearching)
+                if dinnerSearching { ProgressView(journeyText("searching")) }
+                if dinnerSearchError { Text(journeyText("searchFailure")).font(.subheadline) }
+                if let url = locationURL("レストラン \(dinnerAnchorQuery)") {
+                    journeyLink(journeyText("moreDinner"), url: url)
+                }
+            }
+            ForEach(dinnerResults) { place in
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(place.name).font(.headline)
+                    Text(place.address).font(.subheadline).foregroundStyle(.secondary)
+                    Text(String(format: journeyText("distance"), locale: language.locale, arguments: [Int(place.distance.rounded())])).font(.caption).foregroundStyle(.secondary)
+                    if let url = locationURL(place.query) { journeyLink(journeyText("menuHours"), url: url) }
+                    journeyAction(journeyText(dinnerSelection?.id == place.id ? "selectedDinner" : "selectDinner"), systemImage: dinnerSelection?.id == place.id ? "checkmark.circle.fill" : "fork.knife") {
+                        dinnerSelection = place
+                    }
+                }
+                .padding(14)
+                .background(Color(red: 0.15, green: 0.22, blue: 0.33), in: RoundedRectangle(cornerRadius: 12))
+            }
+            if let place = dinnerSelection {
+                Divider()
+                Text("\(journeyText("selectedDinner")) · \(place.name)").font(.headline).foregroundStyle(journeyGold)
+                routeLinks(origin: dinnerNearHotel ? hotelQuery : venueQuery(lastVenue), destination: place.query)
+                Text(journeyText("dinnerThenHotel")).font(.subheadline)
+            }
+            Text(journeyText("dinnerCheck")).font(.footnote).foregroundStyle(.secondary)
+        }
+    }
+    @MainActor
+    private func searchDinner() {
+        guard !dinnerAnchorQuery.isEmpty, !dinnerSearching else { return }
+        let anchor = dinnerAnchorQuery
+        let token = UUID()
+        dinnerSearchID = token
+        dinnerSearching = true
+        dinnerSearchError = false
+        dinnerResults = []
+        // Keep the previous selected restaurant until a new one is explicitly chosen.
+        Task { @MainActor in
+            do {
+                let anchorRequest = MKLocalSearch.Request()
+                anchorRequest.naturalLanguageQuery = anchor
+                let anchorResponse = try await MKLocalSearch(request: anchorRequest).start()
+                guard dinnerSearchID == token else { return }
+                guard let centerItem = anchorResponse.mapItems.first else {
+                    dinnerSearchError = true; dinnerSearching = false; return
+                }
+                let coordinate = centerItem.placemark.coordinate
+                let center = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
+                let request = MKLocalSearch.Request()
+                request.naturalLanguageQuery = "レストラン"
+                request.resultTypes = .pointOfInterest
+                request.pointOfInterestFilter = MKPointOfInterestFilter(including: [.restaurant])
+                request.region = MKCoordinateRegion(center: coordinate, latitudinalMeters: 3000, longitudinalMeters: 3000)
+                let response = try await MKLocalSearch(request: request).start()
+                guard dinnerSearchID == token else { return }
+                var seen = Set<String>()
+                let places = response.mapItems.compactMap { item -> DinnerPlace? in
+                    let point = item.placemark.coordinate
+                    let distance = center.distance(from: CLLocation(latitude: point.latitude, longitude: point.longitude))
+                    guard distance <= 2000, let name = item.name, !name.isEmpty else { return nil }
+                    let id = "\(name)|\(point.latitude)|\(point.longitude)"
+                    guard seen.insert(id).inserted else { return nil }
+                    return DinnerPlace(id: id, name: name, address: item.placemark.title ?? name, latitude: point.latitude, longitude: point.longitude, distance: distance)
+                }.sorted { $0.distance < $1.distance }
+                dinnerResults = Array(places.prefix(8))
+                dinnerSearchError = dinnerResults.isEmpty
+                dinnerSearching = false
+            } catch {
+                guard dinnerSearchID == token else { return }
+                dinnerSearching = false
+                dinnerSearchError = true
+            }
+        }
+    }
 
     private func extra(_ key: String) -> String {
         TravelExtras.ui[key]?[language.index] ?? key
@@ -256,19 +625,17 @@ private struct PlannerView: View {
         return parts?.url
     }
     private func routeLinks(origin: String?, destination: String) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            if let url = mapURL(origin: origin, destination: destination, mode: "walking") {
-                Link(destination: url) { Label(extra("walkRoute"), systemImage: "figure.walk") }
-            }
+        VStack(alignment: .leading, spacing: 10) {
             if let url = mapURL(origin: origin, destination: destination, mode: "transit") {
-                Link(destination: url) { Label(extra("transitRoute"), systemImage: "tram.fill") }
+                journeyLink(extra("transitRoute"), url: url, systemImage: "tram.fill")
+            }
+            if let url = mapURL(origin: origin, destination: destination, mode: "walking") {
+                journeyLink(extra("walkRoute"), url: url, systemImage: "figure.walk")
             }
             if let url = mapURL(origin: origin, destination: destination, mode: "driving") {
-                Link(destination: url) { Label(extra("driveRoute"), systemImage: "car.fill") }
+                journeyLink(extra("driveRoute"), url: url, systemImage: "car.fill")
             }
         }
-        .font(.subheadline.bold())
-        .fixedSize(horizontal: false, vertical: true)
     }
     private var hotelSection: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -316,7 +683,7 @@ private struct PlannerView: View {
         .font(.subheadline)
         .fixedSize(horizontal: false, vertical: true)
         .padding(14)
-        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
+        .background(journeySurface, in: RoundedRectangle(cornerRadius: 12))
     }
     private var arrivalCard: some View {
         let first = selectedVenue(0)
@@ -346,7 +713,7 @@ private struct PlannerView: View {
         let west = Set(["Sensoji Temple", "Asakusa Culture Tourist Information Center", "Nakamise Shopping Street", "Ramen Yoroiya", "Sushizanmai Asakusa Kaminarimon", "Asakusa Imahan"])
         let east = Set(["Tokyo Skytree", "Sumida Aquarium", "Postal Museum Japan", "Tokyo Solamachi"])
         return VStack(alignment: .leading, spacing: 12) {
-            Label(extra("transfer"), systemImage: "arrow.down.circle.fill").font(.headline)
+            Label(journeyText("nextDestination"), systemImage: "arrow.down.circle.fill").font(.headline)
             Text("\(venueText(from, 0)) → \(venueText(to, 0))").font(.subheadline.bold())
             if isOriginalPair, let legs = TravelExtras.legs[route.id], legs.indices.contains(index - 1) {
                 Text(legs[index - 1][language.index]).font(.subheadline)
@@ -389,9 +756,12 @@ private struct PlannerView: View {
                 Text(time(540)).tag(540)
                 Text(time(600)).tag(600)
                 Text(time(660)).tag(660)
+                Text(time(720)).tag(720)
+                Text(time(780)).tag(780)
+                Text(time(840)).tag(840)
             }
         }
-        .padding(14).background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 15))
+        .padding(14).background(journeySurface, in: RoundedRectangle(cornerRadius: 15))
     }
 
     private func stopCard(_ index: Int) -> some View {
@@ -413,15 +783,15 @@ private struct PlannerView: View {
             }
             HStack {
                 Text(format("duration", duration(stop, venue: venue))).font(.caption).foregroundStyle(.secondary)
-                Spacer()
+            }
+            VStack(alignment: .leading, spacing: 10) {
                 if let url = URL(string: venue.url) {
-                    Link(text("details"), destination: url).font(.subheadline.bold())
+                    journeyLink(text("details"), url: url, systemImage: "globe")
                 }
-                Button(text("swap")) { swapIndex = index }.font(.subheadline.bold())
-                    .buttonStyle(.borderedProminent)
+                journeyAction(text("swap"), systemImage: "arrow.triangle.2.circlepath") { swapIndex = index }
             }
         }
-        .padding(16).background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
+        .padding(16).background(journeySurface, in: RoundedRectangle(cornerRadius: 16))
     }
 
     private func swapSheet(_ index: Int) -> some View {
@@ -1064,5 +1434,64 @@ private enum TravelExtras {
             ["食事後は紙屋町・県庁方面を通り、広島城跡へ徒歩で向かいます。歩く距離が長い場合は公共交通の候補を比較してください。", "식사 후 가미야초·현청 방향을 지나 히로시마성 터까지 걸으세요. 거리가 길면 대중교통을 비교하세요.", "用餐后经过纸屋町、县厅方向，步行前往广岛城址。步行距离较长时可比较公共交通。", "After lunch, walk via the Kamiyacho / prefectural office area toward Hiroshima Castle grounds. Compare transit if the walk is too long.", "หลังอาหารเดินผ่านบริเวณคามิยาโจและที่ทำการจังหวัดไปบริเวณปราสาทฮิโรชิมะ หากเดินไกลให้เปรียบเทียบขนส่งสาธารณะ"],
             ["広島城跡から東側の縮景園方面へ徒歩で向かいます。広島県立美術館が入口付近の目印です。", "히로시마성 터에서 동쪽 슈케이엔으로 걸으세요. 입구 근처 히로시마 현립미술관이 표지입니다.", "从广岛城址向东步行至缩景园，入口附近的广岛县立美术馆可作为地标。", "Walk east from the castle grounds toward Shukkeien. The Prefectural Art Museum is a landmark near the entrance.", "จากบริเวณปราสาทเดินไปทางตะวันออกสู่ชุกเคเอ็น พิพิธภัณฑ์ศิลปะจังหวัดเป็นจุดสังเกตใกล้ทางเข้า"]
         ]
+    ]
+}
+
+private struct DinnerPlace: Identifiable {
+    let id: String
+    let name: String
+    let address: String
+    let latitude: Double
+    let longitude: Double
+    let distance: Double
+    var query: String { "\(latitude),\(longitude)" }
+}
+
+private enum JourneyTranslations {
+    static let ui: [String: [String]] = [
+        "opening": ["ホテルから観光・夕食・帰り道まで、順番にご案内します。", "호텔에서 관광, 저녁 식사, 귀가까지 순서대로 안내합니다.", "从酒店出发、观光、晚餐到返回酒店，按顺序为您指引。", "From your hotel through sightseeing and dinner, then back to your hotel.", "นำทางตามลำดับตั้งแต่โรงแรม เที่ยวชม มื้อเย็น และกลับโรงแรม"],
+        "chooseHotel": ["出発・帰着するホテル", "출발·귀착 호텔", "出发与返回的酒店", "Departure and return hotel", "โรงแรมที่ออกเดินทางและกลับ"],
+        "ownHotel": ["自分のホテルを入力", "내 호텔 입력", "输入自己的酒店", "Enter your own hotel", "ระบุโรงแรมของคุณ"],
+        "hotelInput": ["ホテル名・住所", "호텔 이름·주소", "酒店名称・地址", "Hotel name and address", "ชื่อและที่อยู่โรงแรม"],
+        "hotelInputNote": ["同名のホテルがある場合は住所も入力してください。", "같은 이름의 호텔이 있으면 주소도 입력하세요.", "如有同名酒店，请同时输入地址。", "Include the address if hotels share the same name.", "หากมีโรงแรมชื่อเหมือนกัน โปรดระบุที่อยู่ด้วย"],
+        "hotelChoiceNote": ["ここでの選択は経路案内用です。宿泊予約は公式サイトで行ってください。", "이 선택은 경로 안내용입니다. 숙박 예약은 공식 사이트에서 하세요.", "此处选择仅用于路线指引。请在官网预订住宿。", "This selection sets your route. Book accommodation on the official site.", "การเลือกนี้ใช้กำหนดเส้นทาง โปรดจองที่พักในเว็บไซต์ทางการ"],
+        "enterHotel": ["先にホテル名・住所を入力してください。", "먼저 호텔 이름과 주소를 입력하세요.", "请先输入酒店名称与地址。", "Enter your hotel name and address first.", "กรุณาระบุชื่อและที่อยู่โรงแรมก่อน"],
+        "depart": ["ホテル出発", "호텔 출발", "从酒店出发", "Leave the hotel", "ออกจากโรงแรม"],
+        "hotelFirst": ["いったんホテルへ戻る", "먼저 호텔로 돌아가기", "先返回酒店", "Return to the hotel first", "กลับโรงแรมก่อน"],
+        "dinnerHotel": ["ホテル周辺で夕食", "호텔 주변에서 저녁 식사", "在酒店附近吃晚餐", "Dinner near the hotel", "มื้อเย็นใกล้โรงแรม"],
+        "dinnerLast": ["最後の観光地周辺で夕食", "마지막 관광지 주변에서 저녁 식사", "在最后一个景点附近吃晚餐", "Dinner near the final stop", "มื้อเย็นใกล้สถานที่เที่ยวสุดท้าย"],
+        "returnHotel": ["ホテルへ戻る", "호텔로 돌아가기", "返回酒店", "Return to the hotel", "กลับโรงแรม"],
+        "order": ["今日の順番", "오늘의 순서", "今天的行程顺序", "Today’s sequence", "ลำดับของวันนี้"],
+        "finish": ["観光終了予定", "관광 종료 예정", "预计观光结束", "Estimated sightseeing finish", "เวลาเที่ยวเสร็จโดยประมาณ"],
+        "current": ["いま確認する工程", "현재 확인할 단계", "当前步骤", "Current step", "ขั้นตอนปัจจุบัน"],
+        "firstDestination": ["最初はここへ", "첫 목적지", "第一站前往这里", "First destination", "จุดหมายแรก"],
+        "nextHotel": ["次はホテルへ", "다음은 호텔로", "下一步返回酒店", "Next: the hotel", "ต่อไปกลับโรงแรม"],
+        "nextDinner": ["次は夕食へ", "다음은 저녁 식사", "下一步吃晚餐", "Next: dinner", "ต่อไปมื้อเย็น"],
+        "earlyNote": ["早めの終了：ホテルへ戻り、ホテル周辺で夕食。その後ホテルへ戻ります。", "일찍 끝나면 호텔로 돌아온 뒤 주변에서 저녁을 먹고 다시 호텔로 돌아갑니다.", "结束较早：先返回酒店，在酒店附近吃晚餐，然后回酒店。", "An early finish: return to your hotel, eat nearby, then return after dinner.", "เมื่อเที่ยวเสร็จเร็ว กลับโรงแรมก่อน ทานมื้อเย็นใกล้โรงแรม แล้วกลับโรงแรม"],
+        "lateNote": ["遅めの終了：最後の観光地周辺で夕食をとり、食後にホテルへ戻ります。", "늦게 끝나면 마지막 관광지 주변에서 저녁을 먹고 호텔로 돌아갑니다.", "结束较晚：在最后一个景点附近吃晚餐，餐后返回酒店。", "A late finish: eat near the final sightseeing stop, then return to your hotel.", "เมื่อเที่ยวเสร็จช้า ทานมื้อเย็นใกล้สถานที่เที่ยวสุดท้าย แล้วกลับโรงแรม"],
+        "afterDinner": ["食後のホテルへの帰り道", "식사 후 호텔 귀가 경로", "餐后返回酒店的路线", "Route back to the hotel after dinner", "เส้นทางกลับโรงแรมหลังมื้อเย็น"],
+        "selectDinnerHotel": ["夕食のお店と、帰るホテルを先に選んでください。", "저녁 식사할 곳과 돌아갈 호텔을 먼저 선택하세요.", "请先选择晚餐餐厅和返回的酒店。", "Choose a dinner restaurant and your return hotel first.", "เลือกสถานที่ทานมื้อเย็นและโรงแรมที่จะกลับก่อน"],
+        "completed": ["今日の行程が完了しました。", "오늘 일정이 완료되었습니다.", "今天的行程已完成。", "Today’s itinerary is complete.", "แผนการเดินทางวันนี้เสร็จสิ้นแล้ว"],
+        "arrived": ["ホテル到着・今日の行程を完了", "호텔 도착·오늘 일정 완료", "已到酒店・完成今天的行程", "Arrived at hotel · finish the day", "ถึงโรงแรมแล้ว · จบแผนวันนี้"],
+        "next": ["次の工程へ進む", "다음 단계로", "进入下一步", "Continue to the next step", "ไปขั้นตอนถัดไป"],
+        "previous": ["ひとつ前へ戻る", "이전 단계로", "返回上一步", "Go back one step", "กลับขั้นตอนก่อนหน้า"],
+        "dinnerPlan": ["夕食の場所", "저녁 식사 위치", "晚餐区域", "Dinner area", "บริเวณมื้อเย็น"],
+        "cutoffNote": ["自動：観光終了が18時より前ならホテル周辺、18時以降なら最後の観光地周辺。予定に合わせて手動で変更できます。", "자동: 관광 종료가 18시 전이면 호텔 주변, 18시 이후면 마지막 관광지 주변입니다. 직접 변경할 수 있습니다.", "自动：观光在18点前结束，选酒店附近；18点及之后，选最后景点附近。可手动调整。", "Auto: before 18:00, dine near the hotel; from 18:00, near the final stop. You can change this manually.", "อัตโนมัติ: เสร็จก่อน 18:00 ทานใกล้โรงแรม ตั้งแต่ 18:00 ทานใกล้จุดสุดท้าย เปลี่ยนเองได้"],
+        "dinnerArea": ["夕食のエリアを選ぶ", "저녁 식사 지역 선택", "选择晚餐区域", "Choose dinner area", "เลือกบริเวณมื้อเย็น"],
+        "automatic": ["終了時刻に合わせて自動", "종료 시간에 따라 자동", "根据结束时间自动选择", "Automatic by finish time", "อัตโนมัติตามเวลาเที่ยวเสร็จ"],
+        "nearHotel": ["ホテル周辺", "호텔 주변", "酒店附近", "Near the hotel", "ใกล้โรงแรม"],
+        "nearLast": ["最後の観光地周辺", "마지막 관광지 주변", "最后景点附近", "Near the final stop", "ใกล้จุดเที่ยวสุดท้าย"],
+        "findDinner": ["近くの夕食のお店を探す", "주변 저녁 식사 식당 찾기", "查找附近的晚餐餐厅", "Find nearby dinner restaurants", "ค้นหาร้านอาหารเย็นใกล้เคียง"],
+        "searching": ["近くのお店を検索中…", "주변 식당 검색 중…", "正在搜索附近餐厅…", "Searching nearby restaurants…", "กำลังค้นหาร้านอาหารใกล้เคียง…"],
+        "searchFailure": ["お店が見つからない、または通信できませんでした。再検索するか、地図で周辺のお店を確認してください。", "식당을 찾지 못했거나 연결할 수 없습니다. 다시 검색하거나 지도를 확인하세요.", "未找到餐厅或连接失败。请重试，或在地图查看附近餐厅。", "No restaurants were found or the connection failed. Retry or check nearby places on the map.", "ไม่พบร้านอาหารหรือเชื่อมต่อไม่ได้ ลองอีกครั้งหรือดูร้านใกล้เคียงบนแผนที่"],
+        "moreDinner": ["地図で周辺のお店も見る", "지도에서 주변 식당 보기", "在地图查看周边餐厅", "Also browse nearby restaurants on the map", "ดูร้านอาหารใกล้เคียงบนแผนที่"],
+        "distance": ["検索地点から直線で約%d m", "검색 지점에서 직선 약 %d m", "距搜索地点直线约%d米", "About %d m in a straight line from the search location", "ห่างจากจุดค้นหาประมาณ %d เมตรในแนวตรง"],
+        "menuHours": ["メニュー・営業時間・料金を確認", "메뉴·영업시간·요금 확인", "查看菜单・营业时间・价格", "Check menu, hours and prices", "ดูเมนู เวลาเปิด และราคา"],
+        "selectedDinner": ["選んだ夕食のお店", "선택한 저녁 식당", "已选晚餐餐厅", "Selected dinner restaurant", "ร้านมื้อเย็นที่เลือก"],
+        "selectDinner": ["このお店で夕食にする", "이 식당에서 저녁 먹기", "选择这家餐厅吃晚餐", "Choose this restaurant for dinner", "เลือกร้านนี้สำหรับมื้อเย็น"],
+        "dinnerThenHotel": ["食事後は「次の工程へ進む」でホテルへの帰り道を表示します。", "식사 후 다음 단계에서 호텔로 돌아가는 경로를 확인하세요.", "餐后点击进入下一步，查看返回酒店的路线。", "After dinner, continue to the next step for your route back to the hotel.", "หลังทานอาหาร ไปขั้นตอนถัดไปเพื่อดูเส้นทางกลับโรงแรม"],
+        "dinnerCheck": ["営業時間・ラストオーダー・料金・予約の必要性は、お店の最新情報で確認してください。検索結果は営業中を保証するものではありません。", "영업시간, 주문 마감, 요금과 예약 필요 여부를 최신 정보로 확인하세요. 검색 결과가 영업 중임을 보장하지는 않습니다.", "请确认餐厅最新的营业时间、最后点餐时间、价格和预约要求。搜索结果不保证当前营业。", "Check current opening and last-order times, prices and booking requirements. Search results do not guarantee the restaurant is open.", "ตรวจสอบเวลาเปิด รับออเดอร์สุดท้าย ราคา และการจอง ข้อมูลค้นหาไม่ได้รับรองว่าร้านเปิดอยู่"],
+        "nextDestination": ["次はここ・行き方を検索", "다음 목적지·경로 검색", "下一站・搜索路线", "Next destination · search directions", "จุดหมายถัดไป · ค้นหาเส้นทาง"],
+        "timeEstimate": ["時刻は観光の計画用の目安です。ホテル移動・夕食の時間は含みません。", "시간은 관광 계획용 예상치입니다. 호텔 이동과 저녁 식사 시간은 포함되지 않습니다.", "时间为观光计划的估算，不含酒店往返和晚餐时间。", "Times estimate the sightseeing plan; hotel travel and dinner are additional.", "เวลาเป็นค่าประมาณสำหรับเที่ยวชม ไม่รวมเดินทางไปโรงแรมและมื้อเย็น"]
     ]
 }
