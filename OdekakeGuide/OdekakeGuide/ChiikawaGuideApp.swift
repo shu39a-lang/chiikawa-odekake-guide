@@ -189,6 +189,8 @@ private struct PlannerView: View {
                     languageButtons
                     intro
                     controls
+                    hotelSection
+                    arrivalCard
                     VStack(alignment: .leading, spacing: 6) {
                         Text(routeText(route, 1)).font(.title2.bold())
                         Text(routeText(route, 2)).foregroundStyle(.secondary)
@@ -197,9 +199,7 @@ private struct PlannerView: View {
                     }
                     ForEach(route.stops.indices, id: \.self) { index in
                         if index > 0 {
-                            Label(format("gap", route.gap), systemImage: "figure.walk")
-                                .font(.caption).foregroundStyle(.secondary)
-                                .padding(.leading, 10)
+                            transferCard(index)
                         }
                         stopCard(index)
                     }
@@ -229,6 +229,144 @@ private struct PlannerView: View {
         .environment(\.locale, language.locale)
         .preferredColorScheme(.dark)
         .tint(Color(red: 0.25, green: 0.78, blue: 0.80))
+    }
+
+
+    private func extra(_ key: String) -> String {
+        TravelExtras.ui[key]?[language.index] ?? key
+    }
+    private var cityQuery: String {
+        ["asakusa": "Tokyo", "ueno": "Tokyo", "kyoto": "Kyoto", "osaka": "Osaka", "nara": "Nara", "hiroshima": "Hiroshima"][route.id] ?? "Japan"
+    }
+    private func venueQuery(_ venue: Venue) -> String {
+        // Japanese names avoid ambiguous translated or romanized businesses.
+        let localName = GuideTranslations.venues[venue.name]?[0][0] ?? venue.name
+        return "\(localName), \(cityQuery), Japan"
+    }
+    private func mapURL(origin: String? = nil, destination: String, mode: String) -> URL? {
+        var parts = URLComponents(string: "https://www.google.com/maps/dir/")
+        var items = [URLQueryItem(name: "api", value: "1"), URLQueryItem(name: "destination", value: destination), URLQueryItem(name: "travelmode", value: mode)]
+        if let origin = origin { items.append(URLQueryItem(name: "origin", value: origin)) }
+        parts?.queryItems = items
+        return parts?.url
+    }
+    private func locationURL(_ query: String) -> URL? {
+        var parts = URLComponents(string: "https://www.google.com/maps/search/")
+        parts?.queryItems = [URLQueryItem(name: "api", value: "1"), URLQueryItem(name: "query", value: query)]
+        return parts?.url
+    }
+    private func routeLinks(origin: String?, destination: String) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if let url = mapURL(origin: origin, destination: destination, mode: "walking") {
+                Link(destination: url) { Label(extra("walkRoute"), systemImage: "figure.walk") }
+            }
+            if let url = mapURL(origin: origin, destination: destination, mode: "transit") {
+                Link(destination: url) { Label(extra("transitRoute"), systemImage: "tram.fill") }
+            }
+            if let url = mapURL(origin: origin, destination: destination, mode: "driving") {
+                Link(destination: url) { Label(extra("driveRoute"), systemImage: "car.fill") }
+            }
+        }
+        .font(.subheadline.bold())
+        .fixedSize(horizontal: false, vertical: true)
+    }
+    private var hotelSection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Label(extra("hotels"), systemImage: "bed.double.fill").font(.title3.bold())
+            Text(extra("hotelNote")).font(.footnote).foregroundStyle(.secondary)
+            Text(extra("rateNote")).font(.footnote).foregroundStyle(.secondary)
+            ForEach(TravelExtras.hotels[route.id] ?? []) { hotel in
+                hotelCard(hotel)
+            }
+            Text(extra("checked")).font(.caption2).foregroundStyle(.secondary)
+        }
+        .padding(16)
+        .background(Color(red: 0.08, green: 0.17, blue: 0.22), in: RoundedRectangle(cornerRadius: 16))
+    }
+    private func hotelCard(_ hotel: NearbyHotel) -> some View {
+        let first = selectedVenue(0)
+        let name = hotel.names[language.index]
+        let address = language == .ja ? hotel.addressJP : hotel.addressEN
+        let query = "\(hotel.names[0]), \(hotel.addressJP), Japan"
+        return VStack(alignment: .leading, spacing: 12) {
+            Text(name).font(.headline)
+            Text(address).font(.subheadline).foregroundStyle(.secondary)
+            if let url = locationURL(query) {
+                Link(destination: url) { Label(extra("hotelMap"), systemImage: "mappin.and.ellipse") }
+            }
+            if let url = URL(string: hotel.rateURL) {
+                Link(destination: url) { Label(extra("rate"), systemImage: "yensign.circle.fill") }
+                    .font(.subheadline.bold())
+                    .padding(12).frame(maxWidth: .infinity, alignment: .leading)
+                    .foregroundStyle(.black)
+                    .background(.yellow, in: RoundedRectangle(cornerRadius: 10))
+            }
+            if let url = URL(string: "tel:\(hotel.phone)") {
+                Link(destination: url) {
+                    Label("\(extra("call")) · \(hotel.phoneDisplay)", systemImage: "phone.fill")
+                }
+            }
+            if let url = URL(string: hotel.contactURL) {
+                Link(destination: url) { Label(extra("contact"), systemImage: "globe") }
+            }
+            Divider()
+            Text("\(extra("toFirst")) · \(venueText(first, 0))").font(.caption.bold())
+            routeLinks(origin: query, destination: venueQuery(first))
+        }
+        .font(.subheadline)
+        .fixedSize(horizontal: false, vertical: true)
+        .padding(14)
+        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
+    }
+    private var arrivalCard: some View {
+        let first = selectedVenue(0)
+        return VStack(alignment: .leading, spacing: 12) {
+            Label(extra("arrival"), systemImage: "location.fill").font(.headline)
+            Text(venueText(first, 0)).font(.subheadline.bold())
+            if selectedIndex(0) == 0 {
+                Text(TravelExtras.arrivalText[route.id]?[language.index] ?? extra("customArrival"))
+                    .font(.subheadline)
+                if let value = TravelExtras.arrivalSources[route.id], let url = URL(string: value) {
+                    Link(extra("officialAccess"), destination: url).font(.subheadline.bold())
+                }
+            } else {
+                Text(extra("customArrival")).font(.subheadline)
+            }
+            routeLinks(origin: TravelExtras.arrivalOrigins[route.id], destination: venueQuery(first))
+            Text(extra("liveNote")).font(.footnote).foregroundStyle(.secondary)
+        }
+        .fixedSize(horizontal: false, vertical: true)
+        .padding(16)
+        .background(Color(red: 0.07, green: 0.20, blue: 0.20), in: RoundedRectangle(cornerRadius: 16))
+    }
+    private func transferCard(_ index: Int) -> some View {
+        let from = selectedVenue(index - 1)
+        let to = selectedVenue(index)
+        let isOriginalPair = selectedIndex(index - 1) == 0 && selectedIndex(index) == 0
+        let west = Set(["Sensoji Temple", "Asakusa Culture Tourist Information Center", "Nakamise Shopping Street", "Ramen Yoroiya", "Sushizanmai Asakusa Kaminarimon", "Asakusa Imahan"])
+        let east = Set(["Tokyo Skytree", "Sumida Aquarium", "Postal Museum Japan", "Tokyo Solamachi"])
+        return VStack(alignment: .leading, spacing: 12) {
+            Label(extra("transfer"), systemImage: "arrow.down.circle.fill").font(.headline)
+            Text("\(venueText(from, 0)) → \(venueText(to, 0))").font(.subheadline.bold())
+            if isOriginalPair, let legs = TravelExtras.legs[route.id], legs.indices.contains(index - 1) {
+                Text(legs[index - 1][language.index]).font(.subheadline)
+            } else {
+                Text(extra("walkFallback")).font(.subheadline)
+            }
+            if route.id == "asakusa" && west.contains(from.name) && east.contains(to.name) {
+                Text(extra("asakusaRail")).font(.subheadline)
+                if let url = URL(string: "https://www.tobu.co.jp/railway/guide/station/info/1103/") {
+                    Link(extra("officialAccess"), destination: url).font(.subheadline.bold())
+                }
+            }
+            Text(String(format: extra("planningGap"), locale: language.locale, arguments: [route.gap]))
+                .font(.caption).foregroundStyle(.secondary)
+            routeLinks(origin: venueQuery(from), destination: venueQuery(to))
+            Text(extra("liveNote")).font(.footnote).foregroundStyle(.secondary)
+        }
+        .fixedSize(horizontal: false, vertical: true)
+        .padding(16)
+        .background(Color(red: 0.07, green: 0.20, blue: 0.20), in: RoundedRectangle(cornerRadius: 16))
     }
 
     private var intro: some View {
@@ -815,6 +953,116 @@ private enum GuideTranslations {
             ["히로시마 현립미술관", "슈케이엔 옆 미술관입니다. 현재 전시와 입장권을 확인하세요."],
             ["广岛县立美术馆", "紧邻缩景园。请确认当前展览和门票。"],
             ["พิพิธภัณฑ์ศิลปะจังหวัดฮิโรชิมะ", "อยู่ข้างสวนชุกเคเอ็น ตรวจสอบนิทรรศการปัจจุบันและตั๋ว"]
+        ]
+    ]
+}
+
+
+private struct NearbyHotel: Decodable, Identifiable {
+    let id: String
+    let names: [String]
+    let addressJP: String
+    let addressEN: String
+    let phone: String
+    let phoneDisplay: String
+    let officialURL: String
+    let rateURL: String
+    let contactURL: String
+    let sourceURL: String
+}
+
+private enum TravelExtras {
+    static let hotels: [String: [NearbyHotel]] = {
+        let json = #"""
+{"asakusa":[{"id":"gate-asakusa","names":["ザ・ゲートホテル雷門 by HULIC","더 게이트 호텔 가미나리몬","雷门盖特酒店","THE GATE HOTEL KAMINARIMON by HULIC","เดอะเกตโฮเทล คามินาริมง"],"addressJP":"東京都台東区雷門2-16-11","addressEN":"2-16-11 Kaminarimon, Taito-ku, Tokyo, Japan","phone":"+81358263877","phoneDisplay":"+81 3-5826-3877","officialURL":"https://www.gate-hotel.jp/asakusa-kaminarimon/","rateURL":"https://www.gate-hotel.jp/asakusa-kaminarimon/","contactURL":"https://www.gate-hotel.jp/asakusa-kaminarimon/contact/","sourceURL":"https://www.gate-hotel.jp/asakusa-kaminarimon/access.html"},{"id":"richmond-asakusa","names":["リッチモンドホテルプレミア浅草","리치몬드 호텔 프리미어 아사쿠사","浅草里士满高级酒店","Richmond Hotel Premier Asakusa","ริชมอนด์โฮเทล พรีเมียร์อาซากุสะ"],"addressJP":"東京都台東区浅草2-6-7","addressEN":"2-6-7 Asakusa, Taito-ku, Tokyo, Japan","phone":"+81358063155","phoneDisplay":"+81 3-5806-3155","officialURL":"https://richmondhotel.jp/asakusa-international/","rateURL":"https://richmondhotel.jp/asakusa-international/","contactURL":"https://richmondhotel.jp/asakusa-international/","sourceURL":"https://tokyotouristinfo.com/en/detail/M0609"}],"ueno":[{"id":"resol-ueno","names":["ホテルリソル上野","호텔 리솔 우에노","上野利索尔酒店","HOTEL RESOL UENO","โฮเทลรีโซล อุเอโนะ"],"addressJP":"東京都台東区上野7-2-9","addressEN":"7-2-9 Ueno, Taito-ku, Tokyo, Japan","phone":"+81338449269","phoneDisplay":"+81 3-3844-9269","officialURL":"https://www.resol-hotel.jp/ueno/","rateURL":"https://www.resol-hotel.jp/ueno/","contactURL":"https://www.resol-hotel.jp/ueno/","sourceURL":"https://www.resol-hotel.jp/ueno/access/"},{"id":"nohga-ueno","names":["ノーガホテル 上野 東京","노가 호텔 우에노 도쿄","上野东京诺加酒店","NOHGA HOTEL UENO TOKYO","โนกะโฮเทล อุเอโนะโตเกียว"],"addressJP":"東京都台東区東上野2-21-10","addressEN":"2-21-10 Higashiueno, Taito-ku, Tokyo, Japan","phone":"+81358160211","phoneDisplay":"+81 3-5816-0211","officialURL":"https://www.nohgahotel.com/ueno/","rateURL":"https://www.nohgahotel.com/ueno/en/rooms/","contactURL":"https://www.nohgahotel.com/ueno/","sourceURL":"https://www.nohgahotel.com/ueno/access/"}],"kyoto":[{"id":"nohga-kyoto","names":["ノーガホテル 清水 京都","노가 호텔 기요미즈 교토","京都清水诺加酒店","NOHGA HOTEL KIYOMIZU KYOTO","โนกะโฮเทล คิโยมิซุเกียวโต"],"addressJP":"京都市東山区五条橋東4-450-1","addressEN":"4-450-1 Gojobashi-Higashi, Higashiyama-ku, Kyoto, Japan","phone":"+81753237120","phoneDisplay":"+81 75-323-7120","officialURL":"https://www.nohgahotel.com/kiyomizu/","rateURL":"https://www.nohgahotel.com/kiyomizu/en/rooms/","contactURL":"https://www.nohgahotel.com/kiyomizu/","sourceURL":"https://www.nohgahotel.com/kiyomizu/en/access/"},{"id":"parkhyatt-kyoto","names":["パーク ハイアット 京都","파크 하얏트 교토","京都柏悦酒店","Park Hyatt Kyoto","พาร์คไฮแอท เกียวโต"],"addressJP":"京都市東山区高台寺桝屋町360","addressEN":"360 Kodaiji Masuyacho, Higashiyama-ku, Kyoto, Japan","phone":"+81755311234","phoneDisplay":"+81 75-531-1234","officialURL":"https://www.hyatt.com/park-hyatt/en-US/itmph-park-hyatt-kyoto","rateURL":"https://www.hyatt.com/park-hyatt/en-US/itmph-park-hyatt-kyoto","contactURL":"https://www.hyatt.com/park-hyatt/en-US/itmph-park-hyatt-kyoto/hotel-info","sourceURL":"https://www.hyatt.com/park-hyatt/en-US/itmph-park-hyatt-kyoto/hotel-info"}],"osaka":[{"id":"onefive-kuromon","names":["ザ・ワンファイブ大阪なんば黒門","더 원파이브 오사카 난바 구로몬","大阪难波黑门OneFive酒店","The OneFive Osaka Namba Kuromon","เดอะวันไฟว์ โอซาก้านัมบะคุโรมง"],"addressJP":"大阪市中央区日本橋1-20-6","addressEN":"1-20-6 Nipponbashi, Chuo-ku, Osaka, Japan","phone":"0570014215","phoneDisplay":"0570-014-215","officialURL":"https://onefivehotels.co.jp/hotels/theonefiveosakanambakuromon","rateURL":"https://onefivehotels.co.jp/hotels/theonefiveosakanambakuromon","contactURL":"https://onefivehotels.co.jp/hotels/theonefiveosakanambakuromon","sourceURL":"https://onefivehotels.co.jp/hotels/theonefiveosakanambakuromon"},{"id":"citadines-namba","names":["シタディーンなんば大阪","시타딘 난바 오사카","大阪难波馨乐庭公寓酒店","Citadines Namba Osaka","ซิทาดีนส์ นัมบะโอซาก้า"],"addressJP":"大阪市浪速区日本橋3-5-25","addressEN":"3-5-25 Nippombashi, Naniwa-ku, Osaka, Japan","phone":"+81666957150","phoneDisplay":"+81 6-6695-7150","officialURL":"https://www.discoverasr.com/en/citadines/japan/citadines-namba-osaka","rateURL":"https://www.discoverasr.com/en/citadines/japan/citadines-namba-osaka/offers","contactURL":"https://www.discoverasr.com/en/citadines/japan/citadines-namba-osaka/location","sourceURL":"https://www.discoverasr.com/en/citadines/japan/citadines-namba-osaka/location"}],"nara":[{"id":"newwakasa","names":["ホテルニューわかさ","호텔 뉴 와카사","新若草酒店","Hotel New Wakasa","โฮเทลนิววาคาซะ"],"addressJP":"奈良市北半田東町1","addressEN":"1 Kitahandahigashi-machi, Nara, Japan","phone":"+81742235858","phoneDisplay":"+81 742-23-5858","officialURL":"https://www.n-wakasa.com/","rateURL":"https://www.n-wakasa.com/","contactURL":"https://www.n-wakasa.com/lg_en/access/","sourceURL":"https://www.n-wakasa.com/lg_en/access/"},{"id":"narahotel","names":["奈良ホテル","나라 호텔","奈良酒店","Nara Hotel","นาราโฮเทล"],"addressJP":"奈良市高畑町1096","addressEN":"1096 Takabatake-cho, Nara, Japan","phone":"+81742243011","phoneDisplay":"+81 742-24-3011","officialURL":"https://jrwest-hotels.jp/narahotel/","rateURL":"https://jrwest-hotels.jp/narahotel/","contactURL":"https://jrwest-hotels.jp/narahotel/","sourceURL":"https://jrwest-hotels.jp/narahotel/access/"}],"hiroshima":[{"id":"mitsui-hiroshima","names":["三井ガーデンホテル広島","미쓰이 가든 호텔 히로시마","广岛三井花园酒店","Mitsui Garden Hotel Hiroshima","มิตซุยการ์เดนโฮเทล ฮิโรชิมะ"],"addressJP":"広島市中区中町9-12","addressEN":"9-12 Naka-machi, Naka-ku, Hiroshima, Japan","phone":"+81822401131","phoneDisplay":"+81 82-240-1131","officialURL":"https://www.gardenhotels.co.jp/hiroshima/","rateURL":"https://www.gardenhotels.co.jp/hiroshima/","contactURL":"https://www.gardenhotels.co.jp/hiroshima/","sourceURL":"https://www.gardenhotels.co.jp/hiroshima/eng/access/"},{"id":"rihga-hiroshima","names":["リーガロイヤルホテル広島","리가 로얄 호텔 히로시마","广岛丽嘉皇家酒店","RIHGA Royal Hotel Hiroshima","รีกาโรยัลโฮเทล ฮิโรชิมะ"],"addressJP":"広島市中区基町6-78","addressEN":"6-78 Motomachi, Naka-ku, Hiroshima, Japan","phone":"+81825021121","phoneDisplay":"+81 82-502-1121","officialURL":"https://www.rihga.co.jp/hiroshima/","rateURL":"https://www.rihga.co.jp/hiroshima/stay","contactURL":"https://www.rihga.co.jp/hiroshima/contact","sourceURL":"https://www.rihga.co.jp/hiroshima/contact"}]}
+"""#
+        guard let hotels = try? JSONDecoder().decode([String: [NearbyHotel]].self, from: Data(json.utf8)) else {
+            preconditionFailure("Invalid bundled hotel data")
+        }
+        return hotels
+    }()
+    static let ui: [String: [String]] = [
+        "hotels": ["出発地点近くのホテル", "출발 지점 주변 호텔", "出发地点附近的酒店", "Hotels near the starting area", "โรงแรมใกล้จุดเริ่มต้น"],
+        "hotelNote": ["各コースの出発エリアにあるホテル候補です。下のリンクで、選択中の最初の場所への経路を確認できます。", "각 코스의 출발 지역에 있는 호텔 후보입니다. 아래 링크에서 현재 선택한 첫 장소까지의 경로를 확인할 수 있습니다.", "这些酒店位于路线的出发区域。下方链接可查看前往当前第一站的路线。", "Hotels in this route’s starting area. Links show directions to your currently selected first stop.", "โรงแรมในบริเวณเริ่มต้นของเส้นทาง ลิงก์ด้านล่างแสดงทางไปยังจุดแรกที่เลือกอยู่"],
+        "rateNote": ["宿泊料金は日付・人数・部屋・食事条件で変わります。公式サイトで条件を入力すると金額を確認できます。", "숙박 요금은 날짜, 인원, 객실과 식사 조건에 따라 달라집니다. 공식 사이트에 조건을 입력해 금액을 확인하세요.", "住宿价格随日期、人数、房型及餐食条件变化。在官网输入条件即可查看金额。", "Rates depend on dates, guests, room type and meals. Enter your stay details on the official site to see the price.", "ค่าที่พักขึ้นอยู่กับวัน จำนวนผู้เข้าพัก ประเภทห้อง และอาหาร ระบุเงื่อนไขในเว็บไซต์ทางการเพื่อดูราคา"],
+        "rate": ["宿泊料金・空室を確認", "숙박 요금·빈 객실 확인", "查看房价与空房", "Check rates & availability", "ตรวจสอบราคาและห้องว่าง"],
+        "hotelMap": ["場所を地図で見る", "위치 지도 보기", "在地图查看位置", "View hotel location", "ดูที่ตั้งบนแผนที่"],
+        "contact": ["公式情報・お問い合わせ", "공식 정보·문의", "官网信息与联系", "Official information & contact", "ข้อมูลทางการและติดต่อ"],
+        "call": ["電話する", "전화하기", "拨打电话", "Call hotel", "โทรหาโรงแรม"],
+        "toFirst": ["ホテル→最初の場所", "호텔→첫 장소", "酒店→第一站", "Hotel → first stop", "โรงแรม → จุดแรก"],
+        "arrival": ["コースの出発地点への行き方", "코스 출발 지점으로 가는 방법", "如何到达路线起点", "Getting to the first stop", "วิธีไปยังจุดเริ่มต้น"],
+        "customArrival": ["最初の場所を変更しています。選択中の目的地までの徒歩・公共交通の経路を下の地図で確認してください。", "첫 장소가 변경되었습니다. 아래 지도에서 현재 목적지까지의 도보 또는 대중교통 경로를 확인하세요.", "第一站已更换。请在下方地图查看前往当前目的地的步行或公共交通路线。", "The first stop has changed. Use the links below for walking or transit directions to the selected destination.", "จุดแรกเปลี่ยนแล้ว ใช้ลิงก์ด้านล่างดูเส้นทางเดินหรือขนส่งสาธารณะไปยังสถานที่ที่เลือก"],
+        "officialAccess": ["公式の交通案内", "공식 교통 안내", "官方交通指南", "Official access guide", "ข้อมูลการเดินทางทางการ"],
+        "transfer": ["次の場所への移動", "다음 장소로 이동", "前往下一站", "Travel to the next stop", "เดินทางไปจุดถัดไป"],
+        "walkRoute": ["徒歩の道順", "도보 경로", "步行路线", "Walking directions", "เส้นทางเดิน"],
+        "transitRoute": ["電車・地下鉄・バスの乗換", "전철·지하철·버스 환승", "电车・地铁・公交换乘", "Train / subway / bus routes", "เส้นทางรถไฟ รถไฟใต้ดิน และรถบัส"],
+        "driveRoute": ["車・タクシーの経路", "차량·택시 경로", "汽车・出租车路线", "Car / taxi route", "เส้นทางรถยนต์หรือแท็กซี่"],
+        "liveNote": ["乗車駅・降車駅・乗換・発車時刻・運賃は「電車・地下鉄・バスの乗換」で確認できます。目的地を入れ替えるとリンクも更新されます。", "승차역, 하차역, 환승, 출발 시간과 요금은 대중교통 링크에서 확인할 수 있습니다. 장소를 바꾸면 링크도 업데이트됩니다.", "点击公共交通链接查看上车站、下车站、换乘、发车时间和票价。更换目的地后链接也会更新。", "Open transit routes for boarding and exit stops, transfers, departures and fares. Links update when you swap a destination.", "เปิดเส้นทางขนส่งสาธารณะเพื่อดูจุดขึ้นลง การต่อรถ เวลาออก และค่าโดยสาร ลิงก์จะเปลี่ยนตามสถานที่ที่เลือก"],
+        "walkFallback": ["徒歩でこの2か所を移動できます。細かな曲がり角や横断場所は「徒歩の道順」で確認してください。歩く距離が長い場合は公共交通の候補も比較できます。", "두 장소 사이를 걸어서 이동할 수 있습니다. 자세한 회전 지점과 횡단 위치는 도보 경로에서 확인하세요. 거리가 길면 대중교통도 비교할 수 있습니다.", "这两处可步行前往。转弯与过街位置请查看步行路线；距离较长时也可比较公共交通方案。", "You can walk between these stops. Open walking directions for turns and crossings; compare transit if the walk is long.", "เดินระหว่างสองจุดนี้ได้ ดูทางเลี้ยวและจุดข้ามถนนในเส้นทางเดิน หากระยะไกลสามารถเปรียบเทียบขนส่งสาธารณะได้"],
+        "planningGap": ["計画上の移動枠：約%d分（実際の所要時間は経路図で確認）", "계획상 이동 시간: 약 %d분 (실제 시간은 지도에서 확인)", "规划交通时间：约%d分钟（实际时间请查看地图）", "Planning allowance: about %d min (check the map for actual travel time)", "เวลาเผื่อเดินทางในแผนประมาณ %d นาที (ดูเวลาจริงจากแผนที่)"],
+        "asakusaRail": ["電車なら、東武浅草駅→東武スカイツリーライン→とうきょうスカイツリー駅→徒歩で目的地へ。地下鉄を使う候補や駅までの徒歩も、乗換リンクで比較できます。", "전철 이용 시 도부 아사쿠사역→도부 스카이트리선→도쿄스카이트리역→목적지까지 도보입니다. 지하철과 역까지의 도보도 환승 링크에서 비교하세요.", "乘电车可从东武浅草站→东武晴空塔线→东京晴空塔站→步行至目的地。地铁及前往车站的步行路线也可在换乘链接比较。", "By train: Tobu Asakusa Station → Tobu Skytree Line → Tokyo Skytree Station → walk to the venue. Compare subway options and station walks through the transit link.", "หากใช้รถไฟ: สถานีโทบุอาซากุสะ → สายโทบุสกายทรี → สถานีโตเกียวสกายทรี → เดินไปสถานที่ เปรียบเทียบรถไฟใต้ดินและทางเดินถึงสถานีได้จากลิงก์"],
+        "checked": ["公式情報確認：2026年10月2日", "공식 정보 확인: 2026년 10월 2일", "官方信息核对：2026年10月2日", "Official details checked: 2 Oct 2026", "ตรวจสอบข้อมูลทางการ: 2 ต.ค. 2026"]
+    ]
+    static let arrivalOrigins: [String: String] = [
+        "asakusa": "浅草駅 東京 台東区 日本",
+        "ueno": "JR上野駅 公園口 東京 日本",
+        "kyoto": "京都駅 京都 日本",
+        "osaka": "日本橋駅 大阪 日本",
+        "nara": "近鉄奈良駅 奈良 日本",
+        "hiroshima": "広島駅 広島 日本"
+    ]
+    static let arrivalSources: [String: String] = [
+        "asakusa": "https://www.senso-ji.jp/access/",
+        "ueno": "https://www.tnm.jp/modules/r_free_page/index.php?id=113",
+        "kyoto": "https://www.kiyomizudera.or.jp/access.php",
+        "osaka": "https://kuromon.com/jp/access/",
+        "nara": "https://www.todaiji.or.jp/access/",
+        "hiroshima": "https://www.pcf.city.hiroshima.jp/hpcf/access/index.html"
+    ]
+    static let arrivalText: [String: [String]] = [
+        "asakusa": ["東京メトロ銀座線または都営浅草線で浅草駅へ。地上に出て雷門へ進み、仲見世通りを通って浅草寺へ徒歩で向かいます。", "도쿄메트로 긴자선 또는 도에이 아사쿠사선으로 아사쿠사역에 내리세요. 지상에서 가미나리몬으로 가서 나카미세 거리를 지나 센소지까지 걸으세요.", "乘东京地铁银座线或都营浅草线至浅草站。出站到地面，前往雷门，沿仲见世街步行至浅草寺。", "Take the Tokyo Metro Ginza Line or Toei Asakusa Line to Asakusa Station. Walk to Kaminarimon, then through Nakamise to Sensoji Temple.", "นั่งโตเกียวเมโทรสายกินซ่าหรือสายโทเออาซากุสะลงสถานีอาซากุสะ ขึ้นสู่ถนนแล้วเดินไปประตูคามินาริมง ผ่านถนนนากามิเสะไปวัดเซ็นโซจิ"],
+        "ueno": ["JRで上野駅へ。公園口から出て上野公園内を通り、東京国立博物館の正門へ徒歩約10分。地下鉄銀座線・日比谷線の上野駅からは徒歩約15分です。", "JR 우에노역 공원 출구에서 우에노 공원을 지나 도쿄 국립박물관 정문까지 도보 약 10분입니다. 지하철 긴자선·히비야선 우에노역에서는 약 15분 걸립니다.", "乘JR至上野站，从公园口穿过上野公园，步行约10分钟到东京国立博物馆正门。地铁银座线或日比谷线上野站步行约15分钟。", "Arrive at JR Ueno Station. From the Park Exit, walk through Ueno Park to the Tokyo National Museum main gate, about 10 minutes. From Ginza or Hibiya Line Ueno Station, allow about 15 minutes on foot.", "ลง JR สถานีอุเอโนะ ออกทางประตูสวน เดินผ่านสวนอุเอโนะถึงประตูหลักพิพิธภัณฑ์แห่งชาติโตเกียวประมาณ 10 นาที จากสถานีอุเอโนะสายกินซ่าหรือฮิบิยะเดินประมาณ 15 นาที"],
+        "kyoto": ["JR京都駅→市バス206系統（東山通・北大路バスターミナル方面）→五条坂で下車→坂道を徒歩約10分で清水寺へ。京阪清水五条駅からなら徒歩約25分です。", "JR 교토역→시내버스 206번(히가시오지도리·기타오지 버스터미널 방향)→고조자카 하차→언덕길 도보 약 10분으로 기요미즈데라에 도착합니다. 게이한 기요미즈고조역에서는 도보 약 25분입니다.", "JR京都站→市营公交206路（东山通・北大路巴士总站方向）→五条坂下车→沿坡道步行约10分钟到清水寺。从京阪清水五条站步行约25分钟。", "JR Kyoto Station → city bus 206 toward Higashiyama-dori / Kitaoji Bus Terminal → alight at Gojozaka → walk uphill about 10 minutes to Kiyomizu-dera. From Keihan Kiyomizu-Gojo Station, the walk is about 25 minutes.", "JR สถานีเกียวโต → รถบัสเมืองสาย 206 ไปทางฮิกาชิยามะโดริ/สถานีรถบัสคิตาโอจิ → ลงโกโจซากะ → เดินขึ้นเนินประมาณ 10 นาทีถึงวัดคิโยมิซุเดระ จากสถานีเคฮันคิโยมิซุโกโจเดินประมาณ 25 นาที"],
+        "osaka": ["Osaka Metroの千日前線・堺筋線で日本橋駅へ。地上に出て黒門市場へ徒歩で向かいます。近鉄日本橋駅も利用できます。出口と細かな道順は徒歩リンクで確認できます。", "오사카메트로 센니치마에선·사카이스지선으로 닛폰바시역에 내린 뒤 지상에서 구로몬 시장까지 걸으세요. 긴테쓰 닛폰바시역도 이용할 수 있습니다. 출구와 길은 도보 링크에서 확인하세요.", "乘Osaka Metro千日前线或堺筋线至日本桥站，出站到地面步行至黑门市场。也可利用近铁日本桥站。出口和详细路线请查看步行链接。", "Take the Osaka Metro Sennichimae or Sakaisuji Line to Nippombashi Station, then walk to Kuromon Market. Kintetsu-Nippombashi is another option. Check the walking link for exits and turns.", "นั่ง Osaka Metro สายเซ็นนิจิมาเอะหรือซาไกซุจิลงสถานีนิปปงบาชิ แล้วเดินไปตลาดคุโรมง ใช้สถานีคินเท็ตสึนิปปงบาชิได้เช่นกัน ดูทางออกและทางเลี้ยวจากลิงก์เดิน"],
+        "nara": ["JR奈良駅または近鉄奈良駅→奈良交通の市内循環バス→「東大寺大仏殿・春日大社前」で下車→徒歩約5分で東大寺へ。近鉄奈良駅から全区間を歩く場合は約20分です。", "JR 나라역 또는 긴테쓰 나라역→나라교통 시내순환버스→도다이지 다이부쓰덴·가스가타이샤마에 하차→도보 약 5분으로 도다이지에 도착합니다. 긴테쓰 나라역에서 모두 걸으면 약 20분입니다.", "JR奈良站或近铁奈良站→奈良交通市内循环公交→东大寺大佛殿・春日大社前下车→步行约5分钟到东大寺。从近铁奈良站全程步行约20分钟。", "JR Nara or Kintetsu Nara Station → Nara Kotsu city-loop bus → Todai-ji Daibutsuden / Kasuga Taisha-mae stop → walk about 5 minutes to Todai-ji. Walking all the way from Kintetsu Nara takes about 20 minutes.", "JR สถานีนาราหรือสถานีคินเท็ตสึนารา → รถบัสวนเมืองนาราโคสึ → ลงป้ายโทไดจิไดบุตสึเด็น/คาสึกะไทฉะมาเอะ → เดินประมาณ 5 นาทีถึงวัดโทไดจิ หากเดินทั้งหมดจากคินเท็ตสึนาราใช้ประมาณ 20 นาที"],
+        "hiroshima": ["JR広島駅→広島電鉄1号線・広島港方面→袋町で下車→徒歩約10分で平和記念資料館へ。路線バスや観光周遊バスも候補です。最新の乗り場・運行時刻は乗換リンクで確認してください。", "JR 히로시마역→히로덴 1번 히로시마항 방향→후쿠로마치 하차→도보 약 10분으로 평화기념자료관에 도착합니다. 시내버스·관광순환버스도 가능합니다. 최신 정류장과 시간표는 환승 링크에서 확인하세요.", "JR广岛站→广岛电铁1号线广岛港方向→袋町下车→步行约10分钟到和平纪念资料馆。也可选择公交或观光循环巴士。最新乘车位置与时刻请查看换乘链接。", "JR Hiroshima Station → Hiroden tram line 1 toward Hiroshima Port → alight at Fukuromachi → walk about 10 minutes to the Peace Memorial Museum. City and sightseeing buses are alternatives; check the transit link for current stops and departures.", "JR สถานีฮิโรชิมะ → รถรางฮิโรเด็นสาย 1 ไปท่าเรือฮิโรชิมะ → ลงฟุคุโรมาจิ → เดินประมาณ 10 นาทีถึงพิพิธภัณฑ์สันติภาพ รถบัสเมืองและรถบัสท่องเที่ยวเป็นทางเลือก ดูจุดขึ้นและเวลาออกปัจจุบันจากลิงก์"]
+    ]
+    static let legs: [String: [[String]]] = [
+        "asakusa": [
+            ["浅草寺の境内から南側の仲見世通りへ出て、商店街を歩きます。", "센소지 경내에서 남쪽 나카미세 거리로 나와 상점가를 걸으세요.", "从浅草寺寺院区域向南进入仲见世街，沿商店街步行。", "Leave the Sensoji grounds to the south and walk into Nakamise Shopping Street.", "ออกจากบริเวณวัดเซ็นโซจิทางใต้แล้วเดินเข้าถนนร้านค้านากามิเสะ"],
+            ["仲見世通りから横道へ入り、浅草寺近くの与ろゐ屋へ徒歩で向かいます。店舗の入口は経路図で確認できます。", "나카미세 거리에서 옆길로 들어가 센소지 근처 요로이야까지 걸으세요. 지도에서 입구를 확인하세요.", "从仲见世街进入侧街，步行前往浅草寺附近的与ろゐ屋。入口请查看地图。", "Turn off Nakamise into the side streets and walk to Yoroiya near Sensoji. Check the map for its entrance.", "จากนากามิเสะเข้าถนนด้านข้างแล้วเดินไปโยโรอิยะใกล้วัดเซ็นโซจิ ดูทางเข้าร้านจากแผนที่"],
+            ["徒歩なら隅田川を渡り、スカイツリー方面へ。電車を使う場合は下の東武線の案内を確認してください。", "도보라면 스미다강을 건너 스카이트리 방향으로 가세요. 전철 이용 시 아래 도부선 안내를 확인하세요.", "步行可跨越隅田川前往晴空塔方向。乘电车请参考下方东武线说明。", "On foot, cross the Sumida River toward Skytree. For the train option, see the Tobu Line guidance below.", "หากเดินให้ข้ามแม่น้ำสุมิดะไปทางสกายทรี หากใช้รถไฟดูคำแนะนำสายโทบุด้านล่าง"],
+            ["スカイツリーとソラマチは同じ施設内です。館内の案内表示に沿って徒歩で移動します。", "스카이트리와 소라마치는 같은 단지에 있습니다. 안내 표지에 따라 걸으세요.", "晴空塔与晴空街道在同一园区内，按现场指示步行。", "Skytree and Solamachi share the same complex. Follow the signs and walk between them.", "สกายทรีและโซลามาจิอยู่ในพื้นที่เดียวกัน เดินตามป้ายแนะนำภายใน"]
+        ],
+        "ueno": [
+            ["博物館の正門から上野公園内へ戻り、公園の歩道を散策します。", "박물관 정문에서 우에노 공원으로 돌아가 공원 산책로를 걸으세요.", "从博物馆正门返回上野公园，沿园内步道散步。", "Exit the museum main gate into Ueno Park and follow the park paths.", "ออกจากประตูหลักพิพิธภัณฑ์เข้าสวนอุเอโนะแล้วเดินตามทางในสวน"],
+            ["上野公園内の歩道を使い、韻松亭へ徒歩で移動します。", "우에노 공원 산책로를 따라 인쇼테이까지 걸으세요.", "沿上野公园步道步行至韵松亭。", "Follow the paths within Ueno Park to Inshotei.", "เดินตามทางภายในสวนอุเอโนะไปอินโชเท"],
+            ["食事後は公園内を国立科学博物館方面へ歩きます。", "식사 후 공원 안을 걸어 국립과학박물관으로 가세요.", "用餐后沿公园步道前往国立科学博物馆。", "After lunch, walk through the park toward the National Museum of Nature and Science.", "หลังอาหารเดินผ่านสวนไปพิพิธภัณฑ์ธรรมชาติและวิทยาศาสตร์แห่งชาติ"],
+            ["博物館から公園内を南西の不忍池方面へ歩きます。道路の横断位置は徒歩の道順で確認できます。", "박물관에서 공원을 지나 남서쪽 시노바즈 연못으로 걸으세요. 횡단 위치는 도보 경로에서 확인하세요.", "从博物馆穿过公园，向西南方向步行至不忍池。过街位置请查看步行路线。", "Walk southwest through the park toward Shinobazu Pond. Check walking directions for road crossings.", "เดินจากพิพิธภัณฑ์ผ่านสวนไปทางตะวันตกเฉียงใต้สู่บึงชิโนบาซุ ดูจุดข้ามถนนจากเส้นทางเดิน"]
+        ],
+        "kyoto": [
+            ["清水寺から参道を下り、産寧坂・二寧坂へ歩きます。坂道と階段があります。", "기요미즈데라 참배길을 내려가 산넨자카·니넨자카로 걸으세요. 경사와 계단이 있습니다.", "从清水寺沿参道下坡，步行至三年坂、二年坂。途中有坡道和台阶。", "Walk downhill from Kiyomizu-dera along the approach toward Sannenzaka and Ninenzaka. Expect slopes and steps.", "เดินลงทางเข้าวัดคิโยมิซุเดระไปซันเน็นซากะและนิเน็นซากะ มีเนินและบันได"],
+            ["二寧坂・産寧坂の周辺から八坂の塔方面へ歩き、八坂圓堂へ向かいます。", "니넨자카·산넨자카에서 야사카의 탑 방향으로 걸어 덴푸라 엔도로 가세요.", "从二年坂、三年坂附近向八坂之塔方向步行至八坂圆堂。", "Walk toward Yasaka Pagoda from the historic slopes and continue to Gion Tempura Endo.", "จากบริเวณนิเน็นซากะและซันเน็นซากะเดินไปทางเจดีย์ยาซากะแล้วไปกิองเท็มปุระเอ็นโด"],
+            ["食事後は八坂神社方面へ徒歩で移動します。入口は徒歩の道順で確認してください。", "식사 후 야사카 신사 방향으로 걸으세요. 입구는 도보 경로에서 확인하세요.", "用餐后步行前往八坂神社，入口请查看步行路线。", "After lunch, walk toward Yasaka Shrine. Check walking directions for the entrance.", "หลังอาหารเดินไปทางศาลเจ้ายาซากะ ดูทางเข้าจากเส้นทางเดิน"],
+            ["八坂神社から祇園の公道へ出て、四条通や花見小路周辺を散策します。", "야사카 신사에서 기온의 공공 도로로 나와 시조도리와 하나미코지 주변을 걸으세요.", "从八坂神社进入祇园公共街道，漫步四条通或花见小路周边。", "Leave Yasaka Shrine for Gion’s public streets around Shijo-dori and Hanamikoji.", "จากศาลเจ้ายาซากะออกสู่ถนนสาธารณะในกิอง เดินชมรอบชิโจโดริและฮานามิโคจิ"]
+        ],
+        "osaka": [
+            ["黒門市場から難波方面へ歩き、千日前道具屋筋の商店街へ向かいます。", "구로몬 시장에서 난바 방향으로 걸어 센니치마에 도구야스지로 가세요.", "从黑门市场向难波方向步行至千日前道具屋筋商店街。", "Walk from Kuromon Market toward Namba and Sennichimae Doguyasuji.", "จากตลาดคุโรมงเดินไปทางนัมบะและถนนเซ็นนิจิมาเอะโดกุยาสุจิ"],
+            ["道具屋筋から道頓堀方面へ徒歩で向かい、千房の店舗へ進みます。", "도구야스지에서 도톤보리 방향으로 걸어 치보로 가세요.", "从道具屋筋向道顿堀方向步行至千房店铺。", "Walk from Doguyasuji toward Dotonbori and Chibo.", "จากโดกุยาสุจิเดินไปทางโดทงโบริและร้านชิโบ"],
+            ["食事後は道頓堀の川沿いへ出て、周辺の歩道を散策します。", "식사 후 도톤보리 강변으로 나와 산책로를 걸으세요.", "用餐后前往道顿堀河岸，沿周边步道散步。", "After lunch, walk out to Dotonbori’s canal-side paths.", "หลังอาหารเดินออกสู่ทางเดินริมคลองโดทงโบริ"],
+            ["道頓堀から戎橋周辺を通り、北側の心斎橋筋商店街へ歩きます。", "도톤보리에서 에비스바시 주변을 지나 북쪽 신사이바시스지로 걸으세요.", "从道顿堀经过戎桥周边，向北步行至心斋桥筋商店街。", "Walk through the Ebisubashi area and head north into Shinsaibashi-suji.", "จากโดทงโบริผ่านบริเวณสะพานเอบิสึบาชิแล้วเดินขึ้นเหนือเข้าสู่ชินไซบาชิสุจิ"]
+        ],
+        "nara": [
+            ["東大寺の参道から南側へ戻り、依水園の入口へ徒歩で向かいます。", "도다이지 참배길에서 남쪽으로 돌아가 이스이엔 입구까지 걸으세요.", "从东大寺参道向南返回，步行前往依水园入口。", "Return south from the Todai-ji approach and walk to Isuien Garden’s entrance.", "กลับลงใต้จากทางเข้าวัดโทไดจิแล้วเดินไปทางเข้าสวนอิซุยเอ็น"],
+            ["依水園から近鉄奈良駅方面へ歩き、釜粋本店へ向かいます。", "이스이엔에서 긴테쓰 나라역 방향으로 걸어 가마이키 본점으로 가세요.", "从依水园向近铁奈良站方向步行至釜粋本店。", "Walk from Isuien toward Kintetsu Nara Station and Kamaiki Honten.", "จากอิซุยเอ็นเดินไปทางสถานีคินเท็ตสึนาราและคามาอิกิสาขาหลัก"],
+            ["食事後は興福寺の境内方面へ徒歩で移動します。", "식사 후 고후쿠지 경내 방향으로 걸으세요.", "用餐后步行前往兴福寺寺院区域。", "After lunch, walk toward the Kohfukuji temple grounds.", "หลังอาหารเดินไปทางบริเวณวัดโคฟุกุจิ"],
+            ["興福寺から猿沢池方面へ下り、ならまちの公道へ徒歩で向かいます。", "고후쿠지에서 사루사와 연못 방향으로 내려가 나라마치 공공 거리로 걸으세요.", "从兴福寺向猿泽池方向下行，步行进入奈良町公共街道。", "Walk down toward Sarusawa Pond, then continue into Naramachi’s public streets.", "เดินจากโคฟุกุจิลงไปทางบึงซารุซาวะแล้วต่อไปถนนสาธารณะในนารามาจิ"]
+        ],
+        "hiroshima": [
+            ["資料館から平和記念公園内の歩道へ出て、慰霊碑などを巡ります。", "자료관에서 평화기념공원 산책로로 나와 위령비 등을 둘러보세요.", "从资料馆进入和平纪念公园步道，参观慰灵碑等纪念设施。", "Leave the museum for the park paths and memorial monuments.", "ออกจากพิพิธภัณฑ์สู่ทางเดินในสวนสันติภาพและอนุสรณ์ต่าง ๆ"],
+            ["平和公園から原爆ドーム・元安橋周辺を通り、長田屋へ徒歩で向かいます。", "평화공원에서 원폭돔·모토야스바시 주변을 지나 나가타야까지 걸으세요.", "从和平公园经过原爆圆顶馆、元安桥周边，步行至长田屋。", "Walk through the Atomic Bomb Dome / Motoyasu Bridge area toward Nagata-ya.", "จากสวนสันติภาพเดินผ่านบริเวณโดมระเบิดปรมาณูและสะพานโมโตยาสุไปนากาตะยะ"],
+            ["食事後は紙屋町・県庁方面を通り、広島城跡へ徒歩で向かいます。歩く距離が長い場合は公共交通の候補を比較してください。", "식사 후 가미야초·현청 방향을 지나 히로시마성 터까지 걸으세요. 거리가 길면 대중교통을 비교하세요.", "用餐后经过纸屋町、县厅方向，步行前往广岛城址。步行距离较长时可比较公共交通。", "After lunch, walk via the Kamiyacho / prefectural office area toward Hiroshima Castle grounds. Compare transit if the walk is too long.", "หลังอาหารเดินผ่านบริเวณคามิยาโจและที่ทำการจังหวัดไปบริเวณปราสาทฮิโรชิมะ หากเดินไกลให้เปรียบเทียบขนส่งสาธารณะ"],
+            ["広島城跡から東側の縮景園方面へ徒歩で向かいます。広島県立美術館が入口付近の目印です。", "히로시마성 터에서 동쪽 슈케이엔으로 걸으세요. 입구 근처 히로시마 현립미술관이 표지입니다.", "从广岛城址向东步行至缩景园，入口附近的广岛县立美术馆可作为地标。", "Walk east from the castle grounds toward Shukkeien. The Prefectural Art Museum is a landmark near the entrance.", "จากบริเวณปราสาทเดินไปทางตะวันออกสู่ชุกเคเอ็น พิพิธภัณฑ์ศิลปะจังหวัดเป็นจุดสังเกตใกล้ทางเข้า"]
         ]
     ]
 }
