@@ -26,6 +26,7 @@ private struct Stop: Decodable {
 
 private struct DayRoute: Decodable, Identifiable {
     let id: String
+    let prefecture: String?
     let label: String
     let title: String
     let description: String
@@ -46,7 +47,7 @@ private struct GuideData: Decodable {
         guard let guide = try? JSONDecoder().decode(GuideData.self, from: Data(json.utf8)) else {
             fatalError("Embedded guide data is invalid")
         }
-        return guide
+        return GuideData(routes: guide.routes + NationwideRoutes.routes, notes: guide.notes, visitMinutes: guide.visitMinutes)
     }()
 }
 
@@ -60,6 +61,8 @@ struct JapanDayPlannerApp: App {
 private struct PlannerView: View {
     private let guide = GuideData.bundled
     @AppStorage("japanDay.route") private var routeID = "asakusa"
+    @AppStorage("japanDay.region") private var regionID = "kanto"
+    @AppStorage("japanDay.prefecture") private var prefectureID = "tokyo"
     @AppStorage("japanDay.start") private var startMinutes = 600
     @AppStorage("japanDay.choices") private var savedChoices = "{}"
     @State private var swapIndex: Int?
@@ -75,6 +78,16 @@ private struct PlannerView: View {
     @State private var dinnerSearching = false
     @State private var dinnerSearchError = false
     @State private var dinnerSearchID = UUID()
+    @State private var lunchResults: [DinnerPlace] = []
+    @State private var lunchSelection: DinnerPlace?
+    @State private var lunchSearching = false
+    @State private var lunchSearchError = false
+    @State private var lunchSearchID = UUID()
+    @State private var hotelResults: [HotelSuggestion] = []
+    @State private var hotelSearching = false
+    @State private var hotelSearchError = false
+    @State private var hotelSearchID = UUID()
+    @AppStorage("japanDay.suggestedHotels") private var savedSuggestedHotels = "{}"
 
     private var language: GuideLanguage { GuideLanguage(rawValue: languageCode) ?? .ja }
     private func text(_ key: String) -> String { GuideTranslations.ui[key]?[language.index] ?? key }
@@ -82,9 +95,21 @@ private struct PlannerView: View {
         String(format: text(key), locale: language.locale, arguments: arguments)
     }
     private func routeText(_ item: DayRoute, _ field: Int) -> String {
-        GuideTranslations.routes[item.id]?[language.index][field] ?? [item.label, item.title, item.description, item.area][field]
+        if let standard = GuideTranslations.routes[item.id]?[language.index] { return standard[field] }
+        if field == 2 { return NationwideRoutes.summary[language.index] }
+        if language == .ja {
+            if field == 3 { return NationwideRoutes.japaneseAreas[item.id] ?? item.area }
+            return NationwideRoutes.japaneseLabels[item.id] ?? item.label
+        }
+        return [item.label, item.title, item.description, item.area][field]
     }
     private func venueText(_ venue: Venue, _ field: Int) -> String {
+        if venue.name.hasPrefix("Lunch near ") {
+            return field == 0 ? journeyText("lunchSearch") : journeyText("lunchNote")
+        }
+        if NationwideRoutes.japanesePlaces[venue.name] != nil {
+            return field == 0 ? (language == .ja ? NationwideRoutes.japanesePlaces[venue.name]! : venue.name) : NationwideRoutes.venueDetails[language.index]
+        }
         if language == .en { return field == 0 ? venue.name : venue.detail }
         let index = language == .th ? 3 : language.index
         return GuideTranslations.venues[venue.name]?[index][field] ?? (field == 0 ? venue.name : venue.detail)
@@ -134,6 +159,32 @@ private struct PlannerView: View {
     }
 
     private var route: DayRoute { guide.routes.first(where: { $0.id == routeID }) ?? guide.routes[0] }
+    private var routePrefecture: String {
+        route.prefecture ?? NationwideRoutes.existingPrefectures[route.id] ?? "tokyo"
+    }
+    private var prefecturesInRegion: [PrefectureOption] {
+        NationwideRoutes.prefectures.filter { $0.region == regionID }
+    }
+    private var routesInPrefecture: [DayRoute] {
+        guide.routes.filter { ($0.prefecture ?? NationwideRoutes.existingPrefectures[$0.id]) == prefectureID }
+    }
+    private func selectRegion(_ value: String) {
+        regionID = value
+        if let first = NationwideRoutes.prefectures.first(where: { $0.region == value }) {
+            selectPrefecture(first.id)
+        }
+    }
+    private func selectPrefecture(_ value: String) {
+        prefectureID = value
+        if let first = guide.routes.first(where: { ($0.prefecture ?? NationwideRoutes.existingPrefectures[$0.id]) == value }) {
+            routeID = first.id
+        }
+        clearHotelSearch()
+        resetJourney()
+    }
+    private func label(_ japanese: String, _ english: String) -> String {
+        language == .ja ? japanese : english
+    }
     private var selections: [String: [Int]] {
         guard let data = savedChoices.data(using: .utf8) else { return [:] }
         return (try? JSONDecoder().decode([String: [Int]].self, from: data)) ?? [:]
@@ -187,7 +238,11 @@ private struct PlannerView: View {
         var lines = ["Japan Day Planner · \(routeText(route, 0))"]
         for index in route.stops.indices {
             let venue = selectedVenue(index)
-            lines.append("\(time(startOfStop(index))) · \(venueText(venue, 0)) · \(venue.url)")
+            if venue.name.hasPrefix("Lunch near "), let place = lunchSelection {
+                lines.append("\(time(startOfStop(index))) · \(place.name) · \(place.address)")
+            } else {
+                lines.append("\(time(startOfStop(index))) · \(venueText(venue, 0)) · \(venue.url)")
+            }
         }
         if !hotelQuery.isEmpty { lines.insert("\(journeyText("chooseHotel")) · \(hotelName)", at: 1) }
         lines.append(journeyText(dinnerNearHotel ? "earlyNote" : "lateNote"))
@@ -236,10 +291,17 @@ private struct PlannerView: View {
                 .sheet(isPresented: Binding(get: { swapIndex != nil }, set: { if !$0 { swapIndex = nil } })) {
                     if let index = swapIndex { swapSheet(index) }
                 }
-                .onChange(of: routeID) { _ in resetJourney() }
+                .onChange(of: routeID) { _ in clearHotelSearch(); resetJourney() }
+                .onAppear {
+                    let oldPrefecture = routePrefecture
+                    if prefectureID != oldPrefecture {
+                        prefectureID = oldPrefecture
+                        regionID = NationwideRoutes.prefectures.first(where: { $0.id == oldPrefecture })?.region ?? "kanto"
+                    }
+                }
                 .onChange(of: startMinutes) { _ in resetJourney() }
                 .onChange(of: dinnerArea) { _ in resetJourney() }
-                .onChange(of: savedChoices) { _ in resetDinner() }
+                .onChange(of: savedChoices) { _ in resetDinner(); resetLunch() }
                 .onChange(of: dinnerNearHotel) { _ in resetJourney() }
             } else {
                 languageHome
@@ -274,20 +336,36 @@ private struct PlannerView: View {
         resetJourney()
     }
     private var availableHotels: [NearbyHotel] { TravelExtras.hotels[route.id] ?? [] }
+    private var selectedSuggestedHotel: HotelSuggestion? {
+        guard let data = savedSuggestedHotels.data(using: .utf8),
+              let values = try? JSONDecoder().decode([String: HotelSuggestion].self, from: data) else { return nil }
+        return values[route.id]
+    }
+    private func chooseSuggestedHotel(_ hotel: HotelSuggestion) {
+        var values = (try? JSONDecoder().decode([String: HotelSuggestion].self, from: Data(savedSuggestedHotels.utf8))) ?? [:]
+        values[route.id] = hotel
+        if let data = try? JSONEncoder().encode(values), let string = String(data: data, encoding: .utf8) {
+            savedSuggestedHotels = string
+            saveHotelValue("suggested")
+        }
+    }
     private var hotelChoice: String {
         let value = storedValues(savedHotels)[route.id] ?? ""
         if value == "custom" || availableHotels.contains(where: { $0.id == value }) { return value }
+        if value == "suggested" && selectedSuggestedHotel != nil { return value }
         return availableHotels.first?.id ?? "custom"
     }
     private var chosenHotel: NearbyHotel? { availableHotels.first(where: { $0.id == hotelChoice }) }
     private var customHotel: String { storedValues(savedCustomHotels)[route.id] ?? "" }
     private var hotelName: String {
-        chosenHotel?.names[language.index] ?? (customHotel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? journeyText("enterHotel") : customHotel)
+        chosenHotel?.names[language.index] ?? (hotelChoice == "suggested" ? selectedSuggestedHotel?.name : nil) ?? (customHotel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? journeyText("enterHotel") : customHotel)
     }
     private var hotelQuery: String {
         if let hotel = chosenHotel { return "\(hotel.names[0]), \(hotel.addressJP), Japan" }
+        if hotelChoice == "suggested", let hotel = selectedSuggestedHotel { return hotel.query }
         let value = customHotel.trimmingCharacters(in: .whitespacesAndNewlines)
-        return value.isEmpty ? "" : "\(value), \(cityQuery), Japan"
+        let prefecture = NationwideRoutes.prefectures.first(where: { $0.id == routePrefecture })?.ja ?? cityQuery
+        return value.isEmpty ? "" : "\(value), \(prefecture), Japan"
     }
     private var finishMinutes: Int {
         guard let index = route.stops.indices.last else { return startMinutes }
@@ -313,7 +391,9 @@ private struct PlannerView: View {
     private func stageTitle(_ item: JourneyStage) -> String {
         switch item {
         case .departure: return journeyText("depart")
-        case .stop(let index): return venueText(selectedVenue(index), 0)
+        case .stop(let index):
+            if selectedVenue(index).name.hasPrefix("Lunch near "), let place = lunchSelection { return place.name }
+            return venueText(selectedVenue(index), 0)
         case .hotelBeforeDinner: return journeyText("hotelFirst")
         case .dinner: return journeyText(dinnerNearHotel ? "dinnerHotel" : "dinnerLast")
         case .hotelAfterDinner: return journeyText("returnHotel")
@@ -336,6 +416,14 @@ private struct PlannerView: View {
         journeyIndex = 0
         journeyCompleted = false
         resetDinner()
+        resetLunch()
+    }
+    private func resetLunch() {
+        lunchSearchID = UUID()
+        lunchResults = []
+        lunchSelection = nil
+        lunchSearching = false
+        lunchSearchError = false
     }
     private func resetDinner() {
         dinnerSearchID = UUID()
@@ -378,10 +466,21 @@ private struct PlannerView: View {
             Label(journeyText("chooseHotel"), systemImage: "bed.double.fill").font(.headline)
             Picker(journeyText("chooseHotel"), selection: Binding(get: { hotelChoice }, set: { saveHotelValue($0) })) {
                 ForEach(availableHotels) { hotel in Text(hotel.names[language.index]).tag(hotel.id) }
+                if let hotel = selectedSuggestedHotel { Text(hotel.name).tag("suggested") }
                 Text(journeyText("ownHotel")).tag("custom")
             }
             .pickerStyle(.menu).tint(journeyGold)
-            if hotelChoice == "custom" {
+            if hotelChoice == "suggested", let hotel = selectedSuggestedHotel {
+                Text(hotel.address).font(.subheadline).foregroundStyle(.secondary)
+                if let url = hotel.website.flatMap(URL.init(string:)) {
+                    journeyLink(extra("rate"), url: url, systemImage: "yensign.circle")
+                }
+                if let url = locationURL(hotel.query) { journeyLink(extra("hotelMap"), url: url, systemImage: "mappin.and.ellipse") }
+                if let phone = hotel.phone, let url = URL(string: "tel:\(phone)") {
+                    journeyLink("\(extra("call")) · \(phone)", url: url, systemImage: "phone")
+                }
+                Text(extra("rateNote")).font(.footnote).foregroundStyle(.secondary)
+            } else if hotelChoice == "custom" {
                 TextField(journeyText("hotelInput"), text: Binding(get: { customHotel }, set: { saveHotelValue($0, custom: true) }))
                     .textFieldStyle(.roundedBorder)
                 Text(journeyText("hotelInputNote")).font(.footnote).foregroundStyle(.secondary)
@@ -399,7 +498,80 @@ private struct PlannerView: View {
                     }.padding(.top, 10)
                 }
             }
+            if !hotelSearching {
+                journeyAction(journeyText("findHotels"), systemImage: "magnifyingglass") { searchHotels() }
+            } else {
+                ProgressView(journeyText("searchingHotels"))
+            }
+            if hotelSearchError { Text(journeyText("hotelsUnavailable")).font(.footnote) }
+            ForEach(hotelResults) { hotel in
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(hotel.name).font(.headline)
+                    Text(hotel.address).font(.subheadline).foregroundStyle(.secondary)
+                    Text(String(format: journeyText("distance"), locale: language.locale, arguments: [Int(hotel.distance.rounded())]))
+                        .font(.caption).foregroundStyle(.secondary)
+                    if let url = locationURL(hotel.query) { journeyLink(extra("hotelMap"), url: url, systemImage: "mappin.and.ellipse") }
+                    if let url = hotel.website.flatMap(URL.init(string:)) { journeyLink(extra("rate"), url: url, systemImage: "yensign.circle") }
+                    if let phone = hotel.phone, let url = URL(string: "tel:\(phone)") { journeyLink("\(extra("call")) · \(phone)", url: url, systemImage: "phone") }
+                    journeyAction(journeyText("chooseThisHotel"), systemImage: "checkmark.circle") { chooseSuggestedHotel(hotel) }
+                }
+                .padding(12)
+                .background(Color(red: 0.15, green: 0.22, blue: 0.33), in: RoundedRectangle(cornerRadius: 10))
+            }
             Text(journeyText("hotelChoiceNote")).font(.footnote).foregroundStyle(.secondary)
+        }
+    }
+    private func clearHotelSearch() {
+        hotelSearchID = UUID()
+        hotelResults = []
+        hotelSearching = false
+        hotelSearchError = false
+    }
+    @MainActor
+    private func searchHotels() {
+        guard !hotelSearching else { return }
+        let start = venueQuery(selectedVenue(0))
+        let token = UUID()
+        hotelSearchID = token
+        hotelSearching = true
+        hotelSearchError = false
+        hotelResults = []
+        Task { @MainActor in
+            do {
+                let anchorRequest = MKLocalSearch.Request()
+                anchorRequest.naturalLanguageQuery = start
+                let anchor = try await MKLocalSearch(request: anchorRequest).start()
+                guard hotelSearchID == token else { return }
+                guard let first = anchor.mapItems.first else {
+                    hotelSearching = false; hotelSearchError = true; return
+                }
+                let coordinate = first.placemark.coordinate
+                let center = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
+                let request = MKLocalSearch.Request()
+                request.naturalLanguageQuery = "ホテル"
+                request.resultTypes = .pointOfInterest
+                request.pointOfInterestFilter = MKPointOfInterestFilter(including: [.hotel])
+                request.region = MKCoordinateRegion(center: coordinate, latitudinalMeters: 5000, longitudinalMeters: 5000)
+                let response = try await MKLocalSearch(request: request).start()
+                guard hotelSearchID == token else { return }
+                var seen = Set<String>()
+                hotelResults = Array(response.mapItems.compactMap { item -> HotelSuggestion? in
+                    let point = item.placemark.coordinate
+                    let distance = center.distance(from: CLLocation(latitude: point.latitude, longitude: point.longitude))
+                    guard distance <= 3500, let name = item.name, !name.isEmpty else { return nil }
+                    let id = "\(name)|\(point.latitude)|\(point.longitude)"
+                    guard seen.insert(id).inserted else { return nil }
+                    return HotelSuggestion(id: id, name: name, address: item.placemark.title ?? name,
+                                           latitude: point.latitude, longitude: point.longitude,
+                                           phone: item.phoneNumber, website: item.url?.absoluteString, distance: distance)
+                }.sorted { $0.distance < $1.distance }.prefix(8))
+                hotelSearching = false
+                hotelSearchError = hotelResults.isEmpty
+            } catch {
+                guard hotelSearchID == token else { return }
+                hotelSearching = false
+                hotelSearchError = true
+            }
         }
     }
     private var journeyOverview: some View {
@@ -444,6 +616,8 @@ private struct PlannerView: View {
         case .departure, .hotelBeforeDinner: return !hotelQuery.isEmpty
         case .dinner: return dinnerSelection != nil
         case .hotelAfterDinner: return dinnerSelection != nil && !hotelQuery.isEmpty
+        case .stop(let index):
+            return !selectedVenue(index).name.hasPrefix("Lunch near ") || lunchSelection != nil
         default: return true
         }
     }
@@ -460,9 +634,17 @@ private struct PlannerView: View {
                 }
                 DisclosureGroup(extra("arrival")) { arrivalCard.padding(.top, 10) }
             case .stop(let index):
-                stopCard(index)
-                if index + 1 < route.stops.count {
+                if selectedVenue(index).name.hasPrefix("Lunch near ") {
+                    lunchCard(index)
+                } else {
+                    stopCard(index)
+                }
+                if index + 1 < route.stops.count &&
+                    !selectedVenue(index + 1).name.hasPrefix("Lunch near ") &&
+                    (!selectedVenue(index).name.hasPrefix("Lunch near ") || lunchSelection != nil) {
                     transferCard(index + 1)
+                } else if index + 1 < route.stops.count && selectedVenue(index + 1).name.hasPrefix("Lunch near ") {
+                    journeyPanel { Text(journeyText("lunchNext")).font(.headline).foregroundStyle(journeyGold) }
                 } else if dinnerNearHotel && !hotelQuery.isEmpty {
                     travelPanel(origin: venueQuery(lastVenue), destination: hotelQuery, title: journeyText("nextHotel"), fromName: venueText(lastVenue, 0), toName: hotelName)
                 } else if !dinnerNearHotel {
@@ -513,6 +695,85 @@ private struct PlannerView: View {
                 Text(journeyText("nearLast")).tag("last")
             }.pickerStyle(.menu).tint(journeyGold)
             Text(journeyText(dinnerNearHotel ? "earlyNote" : "lateNote")).font(.subheadline)
+        }
+    }
+    private func lunchCard(_ index: Int) -> some View {
+        let previous = selectedVenue(index - 1)
+        let anchor = venueQuery(previous)
+        return journeyPanel {
+            Label(journeyText("lunchSearch"), systemImage: "fork.knife").font(.title3.bold())
+            Text("\(venueText(previous, 0)) · \(journeyText("nearby"))")
+                .font(.subheadline).foregroundStyle(.secondary)
+            Text(journeyText("lunchNote")).font(.subheadline)
+            journeyAction(journeyText("findLunch"), systemImage: "magnifyingglass") { searchLunch(near: anchor) }
+                .disabled(lunchSearching)
+            if lunchSearching { ProgressView(journeyText("searching")) }
+            if lunchSearchError { Text(journeyText("searchFailure")).font(.subheadline) }
+            if let url = locationURL("レストラン \(anchor)") {
+                journeyLink(journeyText("moreDinner"), url: url)
+            }
+            ForEach(lunchResults) { place in
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(place.name).font(.headline)
+                    Text(place.address).font(.subheadline).foregroundStyle(.secondary)
+                    if let url = locationURL(place.query) { journeyLink(journeyText("menuHours"), url: url) }
+                    journeyAction(journeyText(lunchSelection?.id == place.id ? "selectedLunch" : "selectLunch"), systemImage: "checkmark.circle") {
+                        lunchSelection = place
+                    }
+                }
+                .padding(12)
+                .background(Color(red: 0.15, green: 0.22, blue: 0.33), in: RoundedRectangle(cornerRadius: 12))
+            }
+            if let place = lunchSelection {
+                Text("\(journeyText("selectedLunch")) · \(place.name)").font(.headline).foregroundStyle(journeyGold)
+                routeLinks(origin: anchor, destination: place.query)
+            }
+            Text(journeyText("dinnerCheck")).font(.footnote).foregroundStyle(.secondary)
+        }
+    }
+    @MainActor
+    private func searchLunch(near anchor: String) {
+        guard !lunchSearching else { return }
+        let token = UUID()
+        lunchSearchID = token
+        lunchSearching = true
+        lunchSearchError = false
+        lunchResults = []
+        Task { @MainActor in
+            do {
+                let anchorRequest = MKLocalSearch.Request()
+                anchorRequest.naturalLanguageQuery = anchor
+                let anchorResponse = try await MKLocalSearch(request: anchorRequest).start()
+                guard lunchSearchID == token else { return }
+                guard let first = anchorResponse.mapItems.first else {
+                    lunchSearching = false; lunchSearchError = true; return
+                }
+                let coordinate = first.placemark.coordinate
+                let center = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
+                let request = MKLocalSearch.Request()
+                request.naturalLanguageQuery = "レストラン"
+                request.resultTypes = .pointOfInterest
+                request.pointOfInterestFilter = MKPointOfInterestFilter(including: [.restaurant])
+                request.region = MKCoordinateRegion(center: coordinate, latitudinalMeters: 3000, longitudinalMeters: 3000)
+                let response = try await MKLocalSearch(request: request).start()
+                guard lunchSearchID == token else { return }
+                var seen = Set<String>()
+                lunchResults = Array(response.mapItems.compactMap { item -> DinnerPlace? in
+                    let point = item.placemark.coordinate
+                    let distance = center.distance(from: CLLocation(latitude: point.latitude, longitude: point.longitude))
+                    guard distance <= 2000, let name = item.name, !name.isEmpty else { return nil }
+                    let id = "\(name)|\(point.latitude)|\(point.longitude)"
+                    guard seen.insert(id).inserted else { return nil }
+                    return DinnerPlace(id: id, name: name, address: item.placemark.title ?? name,
+                                       latitude: point.latitude, longitude: point.longitude, distance: distance)
+                }.sorted { $0.distance < $1.distance }.prefix(8))
+                lunchSearching = false
+                lunchSearchError = lunchResults.isEmpty
+            } catch {
+                guard lunchSearchID == token else { return }
+                lunchSearching = false
+                lunchSearchError = true
+            }
         }
     }
     private var dinnerCard: some View {
@@ -608,9 +869,11 @@ private struct PlannerView: View {
         ["asakusa": "Tokyo", "ueno": "Tokyo", "kyoto": "Kyoto", "osaka": "Osaka", "nara": "Nara", "hiroshima": "Hiroshima"][route.id] ?? "Japan"
     }
     private func venueQuery(_ venue: Venue) -> String {
+        if venue.name.hasPrefix("Lunch near "), let place = lunchSelection { return place.query }
         // Japanese names avoid ambiguous translated or romanized businesses.
-        let localName = GuideTranslations.venues[venue.name]?[0][0] ?? venue.name
-        return "\(localName), \(cityQuery), Japan"
+        let localName = GuideTranslations.venues[venue.name]?[0][0] ?? NationwideRoutes.japanesePlaces[venue.name] ?? venue.name
+        let prefecture = NationwideRoutes.prefectures.first(where: { $0.id == routePrefecture })?.ja ?? "日本"
+        return "\(localName), \(prefecture), Japan"
     }
     private func mapURL(origin: String? = nil, destination: String, mode: String) -> URL? {
         var parts = URLComponents(string: "https://www.google.com/maps/dir/")
@@ -691,7 +954,7 @@ private struct PlannerView: View {
             Label(extra("arrival"), systemImage: "location.fill").font(.headline)
             Text(venueText(first, 0)).font(.subheadline.bold())
             if selectedIndex(0) == 0 {
-                Text(TravelExtras.arrivalText[route.id]?[language.index] ?? extra("customArrival"))
+                Text(TravelExtras.arrivalText[route.id]?[language.index] ?? journeyText("newArrival"))
                     .font(.subheadline)
                 if let value = TravelExtras.arrivalSources[route.id], let url = URL(string: value) {
                     Link(extra("officialAccess"), destination: url).font(.subheadline.bold())
@@ -749,17 +1012,22 @@ private struct PlannerView: View {
 
     private var controls: some View {
         VStack(alignment: .leading, spacing: 12) {
+            Picker(journeyText("region"), selection: Binding(get: { regionID }, set: { selectRegion($0) })) {
+                ForEach(NationwideRoutes.regions) { item in Text(label(item.japanese, item.english)).tag(item.id) }
+            }
+            Picker(journeyText("prefecture"), selection: Binding(get: { prefectureID }, set: { selectPrefecture($0) })) {
+                ForEach(prefecturesInRegion) { item in Text(label(item.ja, item.en)).tag(item.id) }
+            }
             Picker(text("route"), selection: $routeID) {
-                ForEach(guide.routes) { item in Text(routeText(item, 0)).tag(item.id) }
+                ForEach(routesInPrefecture) { item in Text(routeText(item, 0)).tag(item.id) }
             }
             Picker(text("start"), selection: $startMinutes) {
-                Text(time(540)).tag(540)
-                Text(time(600)).tag(600)
-                Text(time(660)).tag(660)
-                Text(time(720)).tag(720)
-                Text(time(780)).tag(780)
-                Text(time(840)).tag(840)
+                ForEach(Array(stride(from: 540, through: 840, by: 60)), id: \.self) { value in
+                    Text(time(value)).tag(value)
+                }
             }
+            Text(String(format: journeyText("courseCount"), locale: language.locale, arguments: [routesInPrefecture.count]))
+                .font(.footnote).foregroundStyle(.secondary)
         }
         .padding(14).background(journeySurface, in: RoundedRectangle(cornerRadius: 15))
     }
@@ -786,9 +1054,11 @@ private struct PlannerView: View {
             }
             VStack(alignment: .leading, spacing: 10) {
                 if let url = URL(string: venue.url) {
-                    journeyLink(text("details"), url: url, systemImage: "globe")
+                    journeyLink(NationwideRoutes.japanesePlaces[venue.name] == nil ? text("details") : journeyText("placeMap"), url: url, systemImage: "globe")
                 }
-                journeyAction(text("swap"), systemImage: "arrow.triangle.2.circlepath") { swapIndex = index }
+                if stop.choices.count > 1 {
+                    journeyAction(text("swap"), systemImage: "arrow.triangle.2.circlepath") { swapIndex = index }
+                }
             }
         }
         .padding(16).background(journeySurface, in: RoundedRectangle(cornerRadius: 16))
@@ -1449,6 +1719,22 @@ private struct DinnerPlace: Identifiable {
 
 private enum JourneyTranslations {
     static let ui: [String: [String]] = [
+        "lunchSearch": ["昼食のお店を選ぶ", "점심 식당 선택", "选择午餐餐厅", "Choose a lunch restaurant", "เลือกร้านมื้อกลางวัน"],
+        "lunchNote": ["近くのお店を検索し、実際に行くお店を選んでください。", "주변 식당을 검색해 방문할 곳을 선택하세요.", "搜索附近餐厅并选择实际要去的餐厅。", "Search nearby restaurants and choose the one you will visit.", "ค้นหาร้านอาหารใกล้เคียงแล้วเลือกร้านที่จะไป"],
+        "lunchNext": ["次は近くで昼食です。お店を選ぶと行き方を表示します。", "다음은 주변에서 점심입니다. 식당을 선택하면 경로가 표시됩니다.", "下一站在附近吃午餐。选好餐厅后显示路线。", "Lunch is next. Choose a restaurant to show its directions.", "ต่อไปทานมื้อกลางวันใกล้เคียง เลือกร้านเพื่อดูเส้นทาง"],
+        "nearby": ["この近く", "이 근처", "附近", "nearby", "บริเวณใกล้เคียง"],
+        "findLunch": ["近くの昼食のお店を探す", "주변 점심 식당 찾기", "搜索附近午餐餐厅", "Find nearby lunch restaurants", "ค้นหาร้านมื้อกลางวันใกล้เคียง"],
+        "selectedLunch": ["選んだ昼食のお店", "선택한 점심 식당", "已选午餐餐厅", "Selected lunch restaurant", "ร้านมื้อกลางวันที่เลือก"],
+        "selectLunch": ["このお店で昼食にする", "이 식당에서 점심 먹기", "选择这家餐厅吃午餐", "Choose this restaurant for lunch", "เลือกร้านนี้สำหรับมื้อกลางวัน"],
+        "newArrival": ["ホテルから最初の観光地までの徒歩・公共交通の経路を確認してください。", "호텔에서 첫 관광지까지 도보·대중교통 경로를 확인하세요.", "请查看从酒店到第一站的步行及公共交通路线。", "Check walking or transit directions from your hotel to the first stop.", "ตรวจสอบเส้นทางเดินหรือขนส่งสาธารณะจากโรงแรมไปยังจุดแรก"],
+        "region": ["地域", "지역", "地区", "Region", "ภูมิภาค"],
+        "prefecture": ["都道府県", "도도부현", "都道府县", "Prefecture", "จังหวัด"],
+        "courseCount": ["この都道府県：%dコース", "이 지역: %d개 코스", "该地区：%d条路线", "%d routes in this prefecture", "%d เส้นทางในจังหวัดนี้"],
+        "placeMap": ["地図・現地情報", "지도·현지 정보", "地图・当地信息", "Map and local details", "แผนที่และข้อมูลสถานที่"],
+        "findHotels": ["出発地近くのホテルを探す", "출발지 주변 호텔 찾기", "查找起点附近的酒店", "Find hotels near the first stop", "ค้นหาโรงแรมใกล้จุดแรก"],
+        "searchingHotels": ["近くのホテルを検索中…", "주변 호텔 검색 중…", "正在搜索附近酒店…", "Searching nearby hotels…", "กำลังค้นหาโรงแรมใกล้เคียง…"],
+        "hotelsUnavailable": ["ホテルを取得できませんでした。再検索するか、ホテル名・住所を入力してください。", "호텔을 찾지 못했습니다. 다시 검색하거나 호텔 이름과 주소를 입력하세요.", "无法获取酒店。请重试或输入酒店名称与地址。", "No hotels were found. Retry or enter a hotel name and address.", "ไม่พบโรงแรม ลองอีกครั้งหรือระบุชื่อและที่อยู่โรงแรม"],
+        "chooseThisHotel": ["このホテルを選ぶ", "이 호텔 선택", "选择这家酒店", "Choose this hotel", "เลือกโรงแรมนี้"],
         "opening": ["ホテルから観光・夕食・帰り道まで、順番にご案内します。", "호텔에서 관광, 저녁 식사, 귀가까지 순서대로 안내합니다.", "从酒店出发、观光、晚餐到返回酒店，按顺序为您指引。", "From your hotel through sightseeing and dinner, then back to your hotel.", "นำทางตามลำดับตั้งแต่โรงแรม เที่ยวชม มื้อเย็น และกลับโรงแรม"],
         "chooseHotel": ["出発・帰着するホテル", "출발·귀착 호텔", "出发与返回的酒店", "Departure and return hotel", "โรงแรมที่ออกเดินทางและกลับ"],
         "ownHotel": ["自分のホテルを入力", "내 호텔 입력", "输入自己的酒店", "Enter your own hotel", "ระบุโรงแรมของคุณ"],
@@ -1494,4 +1780,400 @@ private enum JourneyTranslations {
         "nextDestination": ["次はここ・行き方を検索", "다음 목적지·경로 검색", "下一站・搜索路线", "Next destination · search directions", "จุดหมายถัดไป · ค้นหาเส้นทาง"],
         "timeEstimate": ["時刻は観光の計画用の目安です。ホテル移動・夕食の時間は含みません。", "시간은 관광 계획용 예상치입니다. 호텔 이동과 저녁 식사 시간은 포함되지 않습니다.", "时间为观光计划的估算，不含酒店往返和晚餐时间。", "Times estimate the sightseeing plan; hotel travel and dinner are additional.", "เวลาเป็นค่าประมาณสำหรับเที่ยวชม ไม่รวมเดินทางไปโรงแรมและมื้อเย็น"]
     ]
+}
+
+private struct RegionOption: Identifiable {
+    let id: String
+    let japanese: String
+    let english: String
+    var name: String { japanese }
+}
+
+private struct PrefectureOption: Identifiable, Decodable {
+    let id: String
+    let ja: String
+    let en: String
+    let region: String
+}
+
+private enum NationwideRoutes {
+    static let routes: [DayRoute] = {
+        let json = #"""
+[{"id":"sapporo","prefecture":"hokkaido","label":"Sapporo · Odori","title":"Sapporo · Odori","description":"Four selected places in one area; follow the directions for each transfer.","area":"Sapporo central","gap":25,"stops":[{"type":"sight","duration":65,"choices":[["Odori Park","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%A4%A7%E9%80%9A%E5%85%AC%E5%9C%92%20%E5%8C%97%E6%B5%B7%E9%81%93"]]},{"type":"walk","duration":55,"choices":[["Sapporo TV Tower","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E3%81%95%E3%81%A3%E3%81%BD%E3%82%8D%E3%83%86%E3%83%AC%E3%83%93%E5%A1%94%20%E5%8C%97%E6%B5%B7%E9%81%93"]]},{"type":"food","duration":60,"choices":[["Lunch near Sapporo TV Tower","Choose a nearby restaurant for lunch.","https://www.google.com/maps/search/?api=1&query=%E3%83%AC%E3%82%B9%E3%83%88%E3%83%A9%E3%83%B3%20Sapporo%20TV%20Tower%20Sapporo%20central"]]},{"type":"sight","duration":75,"choices":[["Sapporo Clock Tower","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E6%9C%AD%E5%B9%8C%E5%B8%82%E6%99%82%E8%A8%88%E5%8F%B0%20%E5%8C%97%E6%B5%B7%E9%81%93"]]},{"type":"break","duration":55,"choices":[["Tanukikoji Shopping Street","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E7%8B%B8%E5%B0%8F%E8%B7%AF%E5%95%86%E5%BA%97%E8%A1%97%20%E5%8C%97%E6%B5%B7%E9%81%93"]]}]},{"id":"hakodate","prefecture":"hokkaido","label":"Hakodate · Harbor and Hills","title":"Hakodate · Harbor and Hills","description":"Four selected places in one area; follow the directions for each transfer.","area":"Hakodate Motomachi","gap":25,"stops":[{"type":"sight","duration":65,"choices":[["Hakodate Morning Market","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%87%BD%E9%A4%A8%E6%9C%9D%E5%B8%82%20%E5%8C%97%E6%B5%B7%E9%81%93"]]},{"type":"walk","duration":55,"choices":[["Kanemori Red Brick Warehouses","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E9%87%91%E6%A3%AE%E8%B5%A4%E3%83%AC%E3%83%B3%E3%82%AC%E5%80%89%E5%BA%AB%20%E5%8C%97%E6%B5%B7%E9%81%93"]]},{"type":"food","duration":60,"choices":[["Lunch near Kanemori Red Brick Warehouses","Choose a nearby restaurant for lunch.","https://www.google.com/maps/search/?api=1&query=%E3%83%AC%E3%82%B9%E3%83%88%E3%83%A9%E3%83%B3%20Kanemori%20Red%20Brick%20Warehouses%20Hakodate%20Motomachi"]]},{"type":"sight","duration":75,"choices":[["Hachimanzaka Slope","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%85%AB%E5%B9%A1%E5%9D%82%20%E5%8C%97%E6%B5%B7%E9%81%93"]]},{"type":"break","duration":55,"choices":[["Old Public Hall of Hakodate Ward","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E6%97%A7%E5%87%BD%E9%A4%A8%E5%8C%BA%E5%85%AC%E4%BC%9A%E5%A0%82%20%E5%8C%97%E6%B5%B7%E9%81%93"]]}]},{"id":"aomori-city","prefecture":"aomori","label":"Aomori · Bay and Nebuta","title":"Aomori · Bay and Nebuta","description":"Four selected places in one area; follow the directions for each transfer.","area":"Aomori Station","gap":25,"stops":[{"type":"sight","duration":65,"choices":[["Aomori Station","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E9%9D%92%E6%A3%AE%E9%A7%85%20%E9%9D%92%E6%A3%AE%E7%9C%8C"]]},{"type":"walk","duration":55,"choices":[["Nebuta Museum WA RASSE","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E3%81%AD%E3%81%B6%E3%81%9F%E3%81%AE%E5%AE%B6%20%E3%83%AF%E3%83%BB%E3%83%A9%E3%83%83%E3%82%BB%20%E9%9D%92%E6%A3%AE%E7%9C%8C"]]},{"type":"food","duration":60,"choices":[["Lunch near Nebuta Museum WA RASSE","Choose a nearby restaurant for lunch.","https://www.google.com/maps/search/?api=1&query=%E3%83%AC%E3%82%B9%E3%83%88%E3%83%A9%E3%83%B3%20Nebuta%20Museum%20WA%20RASSE%20Aomori%20Station"]]},{"type":"sight","duration":75,"choices":[["A-FACTORY Aomori","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=A-FACTORY%20%E9%9D%92%E6%A3%AE%E7%9C%8C"]]},{"type":"break","duration":55,"choices":[["Aomori ASPAM","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E9%9D%92%E6%A3%AE%E7%9C%8C%E8%A6%B3%E5%85%89%E7%89%A9%E7%94%A3%E9%A4%A8%E3%82%A2%E3%82%B9%E3%83%91%E3%83%A0%20%E9%9D%92%E6%A3%AE%E7%9C%8C"]]}]},{"id":"morioka","prefecture":"iwate","label":"Morioka · Castle Park","title":"Morioka · Castle Park","description":"Four selected places in one area; follow the directions for each transfer.","area":"Central Morioka","gap":25,"stops":[{"type":"sight","duration":65,"choices":[["Morioka Castle Ruins Park","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E7%9B%9B%E5%B2%A1%E5%9F%8E%E8%B7%A1%E5%85%AC%E5%9C%92%20%E5%B2%A9%E6%89%8B%E7%9C%8C"]]},{"type":"walk","duration":55,"choices":[["Morioka History and Culture Museum","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E3%82%82%E3%82%8A%E3%81%8A%E3%81%8B%E6%AD%B4%E5%8F%B2%E6%96%87%E5%8C%96%E9%A4%A8%20%E5%B2%A9%E6%89%8B%E7%9C%8C"]]},{"type":"food","duration":60,"choices":[["Lunch near Morioka History and Culture Museum","Choose a nearby restaurant for lunch.","https://www.google.com/maps/search/?api=1&query=%E3%83%AC%E3%82%B9%E3%83%88%E3%83%A9%E3%83%B3%20Morioka%20History%20and%20Culture%20Museum%20Central%20Morioka"]]},{"type":"sight","duration":75,"choices":[["Sakurayama Shrine Morioka","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E6%A1%9C%E5%B1%B1%E7%A5%9E%E7%A4%BE%20%E5%B2%A9%E6%89%8B%E7%9C%8C"]]},{"type":"break","duration":55,"choices":[["Iwate Bank Red Brick Building","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%B2%A9%E6%89%8B%E9%8A%80%E8%A1%8C%E8%B5%A4%E3%83%AC%E3%83%B3%E3%82%AC%E9%A4%A8%20%E5%B2%A9%E6%89%8B%E7%9C%8C"]]}]},{"id":"sendai","prefecture":"miyagi","label":"Sendai · Aoba and City","title":"Sendai · Aoba and City","description":"Four selected places in one area; follow the directions for each transfer.","area":"Central Sendai","gap":25,"stops":[{"type":"sight","duration":65,"choices":[["Sendai Station","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E4%BB%99%E5%8F%B0%E9%A7%85%20%E5%AE%AE%E5%9F%8E%E7%9C%8C"]]},{"type":"walk","duration":55,"choices":[["Zuihoden Sendai","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E7%91%9E%E9%B3%B3%E6%AE%BF%20%E5%AE%AE%E5%9F%8E%E7%9C%8C"]]},{"type":"food","duration":60,"choices":[["Lunch near Zuihoden Sendai","Choose a nearby restaurant for lunch.","https://www.google.com/maps/search/?api=1&query=%E3%83%AC%E3%82%B9%E3%83%88%E3%83%A9%E3%83%B3%20Zuihoden%20Sendai%20Central%20Sendai"]]},{"type":"sight","duration":75,"choices":[["Sendai Castle Ruins","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E4%BB%99%E5%8F%B0%E5%9F%8E%E8%B7%A1%20%E5%AE%AE%E5%9F%8E%E7%9C%8C"]]},{"type":"break","duration":55,"choices":[["Jozenji-dori Avenue","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%AE%9A%E7%A6%85%E5%AF%BA%E9%80%9A%20%E5%AE%AE%E5%9F%8E%E7%9C%8C"]]}]},{"id":"akita-city","prefecture":"akita","label":"Akita · Castle Park","title":"Akita · Castle Park","description":"Four selected places in one area; follow the directions for each transfer.","area":"Akita Station","gap":25,"stops":[{"type":"sight","duration":65,"choices":[["Akita Station","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E7%A7%8B%E7%94%B0%E9%A7%85%20%E7%A7%8B%E7%94%B0%E7%9C%8C"]]},{"type":"walk","duration":55,"choices":[["Senshu Park","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%8D%83%E7%A7%8B%E5%85%AC%E5%9C%92%20%E7%A7%8B%E7%94%B0%E7%9C%8C"]]},{"type":"food","duration":60,"choices":[["Lunch near Senshu Park","Choose a nearby restaurant for lunch.","https://www.google.com/maps/search/?api=1&query=%E3%83%AC%E3%82%B9%E3%83%88%E3%83%A9%E3%83%B3%20Senshu%20Park%20Akita%20Station"]]},{"type":"sight","duration":75,"choices":[["Akita Museum of Art","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E7%A7%8B%E7%94%B0%E7%9C%8C%E7%AB%8B%E7%BE%8E%E8%A1%93%E9%A4%A8%20%E7%A7%8B%E7%94%B0%E7%9C%8C"]]},{"type":"break","duration":55,"choices":[["Akita Citizen Market","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E7%A7%8B%E7%94%B0%E5%B8%82%E6%B0%91%E5%B8%82%E5%A0%B4%20%E7%A7%8B%E7%94%B0%E7%9C%8C"]]}]},{"id":"yamagata-city","prefecture":"yamagata","label":"Yamagata · Castle and Bunshokan","title":"Yamagata · Castle and Bunshokan","description":"Four selected places in one area; follow the directions for each transfer.","area":"Central Yamagata","gap":25,"stops":[{"type":"sight","duration":65,"choices":[["Yamagata Station","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%B1%B1%E5%BD%A2%E9%A7%85%20%E5%B1%B1%E5%BD%A2%E7%9C%8C"]]},{"type":"walk","duration":55,"choices":[["Kajo Park Yamagata","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E9%9C%9E%E5%9F%8E%E5%85%AC%E5%9C%92%20%E5%B1%B1%E5%BD%A2%E7%9C%8C"]]},{"type":"food","duration":60,"choices":[["Lunch near Kajo Park Yamagata","Choose a nearby restaurant for lunch.","https://www.google.com/maps/search/?api=1&query=%E3%83%AC%E3%82%B9%E3%83%88%E3%83%A9%E3%83%B3%20Kajo%20Park%20Yamagata%20Central%20Yamagata"]]},{"type":"sight","duration":75,"choices":[["Yamagata Museum of Art","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%B1%B1%E5%BD%A2%E7%BE%8E%E8%A1%93%E9%A4%A8%20%E5%B1%B1%E5%BD%A2%E7%9C%8C"]]},{"type":"break","duration":55,"choices":[["Bunshokan Yamagata","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E6%96%87%E7%BF%94%E9%A4%A8%20%E5%B1%B1%E5%BD%A2%E7%9C%8C"]]}]},{"id":"aizu","prefecture":"fukushima","label":"Aizu · Castle and Streets","title":"Aizu · Castle and Streets","description":"Four selected places in one area; follow the directions for each transfer.","area":"Aizuwakamatsu","gap":25,"stops":[{"type":"sight","duration":65,"choices":[["Aizuwakamatsu Station","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E4%BC%9A%E6%B4%A5%E8%8B%A5%E6%9D%BE%E9%A7%85%20%E7%A6%8F%E5%B3%B6%E7%9C%8C"]]},{"type":"walk","duration":55,"choices":[["Tsuruga Castle Aizu","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E9%B6%B4%E3%83%B6%E5%9F%8E%20%E7%A6%8F%E5%B3%B6%E7%9C%8C"]]},{"type":"food","duration":60,"choices":[["Lunch near Tsuruga Castle Aizu","Choose a nearby restaurant for lunch.","https://www.google.com/maps/search/?api=1&query=%E3%83%AC%E3%82%B9%E3%83%88%E3%83%A9%E3%83%B3%20Tsuruga%20Castle%20Aizu%20Aizuwakamatsu"]]},{"type":"sight","duration":75,"choices":[["Oyakuen Garden Aizu","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%BE%A1%E8%96%AC%E5%9C%92%20%E7%A6%8F%E5%B3%B6%E7%9C%8C"]]},{"type":"break","duration":55,"choices":[["Nanokamachi Street Aizu","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E4%B8%83%E6%97%A5%E7%94%BA%E9%80%9A%E3%82%8A%20%E7%A6%8F%E5%B3%B6%E7%9C%8C"]]}]},{"id":"mito","prefecture":"ibaraki","label":"Mito · Kairakuen","title":"Mito · Kairakuen","description":"Four selected places in one area; follow the directions for each transfer.","area":"Central Mito","gap":25,"stops":[{"type":"sight","duration":65,"choices":[["Mito Station","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E6%B0%B4%E6%88%B8%E9%A7%85%20%E8%8C%A8%E5%9F%8E%E7%9C%8C"]]},{"type":"walk","duration":55,"choices":[["Kodokan Mito","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%BC%98%E9%81%93%E9%A4%A8%20%E8%8C%A8%E5%9F%8E%E7%9C%8C"]]},{"type":"food","duration":60,"choices":[["Lunch near Kodokan Mito","Choose a nearby restaurant for lunch.","https://www.google.com/maps/search/?api=1&query=%E3%83%AC%E3%82%B9%E3%83%88%E3%83%A9%E3%83%B3%20Kodokan%20Mito%20Central%20Mito"]]},{"type":"sight","duration":75,"choices":[["Kairakuen Garden","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%81%95%E6%A5%BD%E5%9C%92%20%E8%8C%A8%E5%9F%8E%E7%9C%8C"]]},{"type":"break","duration":55,"choices":[["Lake Senba","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%8D%83%E6%B3%A2%E6%B9%96%20%E8%8C%A8%E5%9F%8E%E7%9C%8C"]]}]},{"id":"nikko","prefecture":"tochigi","label":"Nikko · Shrines and Temples","title":"Nikko · Shrines and Temples","description":"Four selected places in one area; follow the directions for each transfer.","area":"Nikko shrines","gap":25,"stops":[{"type":"sight","duration":65,"choices":[["Shinkyo Bridge Nikko","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E7%A5%9E%E6%A9%8B%20%E6%A0%83%E6%9C%A8%E7%9C%8C"]]},{"type":"walk","duration":55,"choices":[["Rinnoji Temple Nikko","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E8%BC%AA%E7%8E%8B%E5%AF%BA%20%E6%A0%83%E6%9C%A8%E7%9C%8C"]]},{"type":"food","duration":60,"choices":[["Lunch near Rinnoji Temple Nikko","Choose a nearby restaurant for lunch.","https://www.google.com/maps/search/?api=1&query=%E3%83%AC%E3%82%B9%E3%83%88%E3%83%A9%E3%83%B3%20Rinnoji%20Temple%20Nikko%20Nikko%20shrines"]]},{"type":"sight","duration":75,"choices":[["Nikko Toshogu Shrine","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E6%97%A5%E5%85%89%E6%9D%B1%E7%85%A7%E5%AE%AE%20%E6%A0%83%E6%9C%A8%E7%9C%8C"]]},{"type":"break","duration":55,"choices":[["Nikko Futarasan Shrine","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E6%97%A5%E5%85%89%E4%BA%8C%E8%8D%92%E5%B1%B1%E7%A5%9E%E7%A4%BE%20%E6%A0%83%E6%9C%A8%E7%9C%8C"]]}]},{"id":"kusatsu","prefecture":"gunma","label":"Kusatsu · Onsen Town","title":"Kusatsu · Onsen Town","description":"Four selected places in one area; follow the directions for each transfer.","area":"Kusatsu Onsen","gap":25,"stops":[{"type":"sight","duration":65,"choices":[["Kusatsu Onsen Bus Terminal","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E8%8D%89%E6%B4%A5%E6%B8%A9%E6%B3%89%E3%83%90%E3%82%B9%E3%82%BF%E3%83%BC%E3%83%9F%E3%83%8A%E3%83%AB%20%E7%BE%A4%E9%A6%AC%E7%9C%8C"]]},{"type":"walk","duration":55,"choices":[["Yubatake Kusatsu","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E6%B9%AF%E7%95%91%20%E7%BE%A4%E9%A6%AC%E7%9C%8C"]]},{"type":"food","duration":60,"choices":[["Lunch near Yubatake Kusatsu","Choose a nearby restaurant for lunch.","https://www.google.com/maps/search/?api=1&query=%E3%83%AC%E3%82%B9%E3%83%88%E3%83%A9%E3%83%B3%20Yubatake%20Kusatsu%20Kusatsu%20Onsen"]]},{"type":"sight","duration":75,"choices":[["Netsunoyu Kusatsu","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E7%86%B1%E4%B9%83%E6%B9%AF%20%E7%BE%A4%E9%A6%AC%E7%9C%8C"]]},{"type":"break","duration":55,"choices":[["Sainokawara Park Kusatsu","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E8%A5%BF%E3%81%AE%E6%B2%B3%E5%8E%9F%E5%85%AC%E5%9C%92%20%E7%BE%A4%E9%A6%AC%E7%9C%8C"]]}]},{"id":"kawagoe","prefecture":"saitama","label":"Kawagoe · Little Edo","title":"Kawagoe · Little Edo","description":"Four selected places in one area; follow the directions for each transfer.","area":"Central Kawagoe","gap":25,"stops":[{"type":"sight","duration":65,"choices":[["Kawagoe Ichibangai","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%B7%9D%E8%B6%8A%E4%B8%80%E7%95%AA%E8%A1%97%20%E5%9F%BC%E7%8E%89%E7%9C%8C"]]},{"type":"walk","duration":55,"choices":[["Toki no Kane Kawagoe","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E6%99%82%E3%81%AE%E9%90%98%20%E5%9F%BC%E7%8E%89%E7%9C%8C"]]},{"type":"food","duration":60,"choices":[["Lunch near Toki no Kane Kawagoe","Choose a nearby restaurant for lunch.","https://www.google.com/maps/search/?api=1&query=%E3%83%AC%E3%82%B9%E3%83%88%E3%83%A9%E3%83%B3%20Toki%20no%20Kane%20Kawagoe%20Central%20Kawagoe"]]},{"type":"sight","duration":75,"choices":[["Kashiya Yokocho","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E8%8F%93%E5%AD%90%E5%B1%8B%E6%A8%AA%E4%B8%81%20%E5%9F%BC%E7%8E%89%E7%9C%8C"]]},{"type":"break","duration":55,"choices":[["Kawagoe Hikawa Shrine","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%B7%9D%E8%B6%8A%E6%B0%B7%E5%B7%9D%E7%A5%9E%E7%A4%BE%20%E5%9F%BC%E7%8E%89%E7%9C%8C"]]}]},{"id":"narita","prefecture":"chiba","label":"Narita · Temple Town","title":"Narita · Temple Town","description":"Four selected places in one area; follow the directions for each transfer.","area":"Naritasan","gap":25,"stops":[{"type":"sight","duration":65,"choices":[["Narita Station","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E6%88%90%E7%94%B0%E9%A7%85%20%E5%8D%83%E8%91%89%E7%9C%8C"]]},{"type":"walk","duration":55,"choices":[["Naritasan Omotesando","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E6%88%90%E7%94%B0%E5%B1%B1%E8%A1%A8%E5%8F%82%E9%81%93%20%E5%8D%83%E8%91%89%E7%9C%8C"]]},{"type":"food","duration":60,"choices":[["Lunch near Naritasan Omotesando","Choose a nearby restaurant for lunch.","https://www.google.com/maps/search/?api=1&query=%E3%83%AC%E3%82%B9%E3%83%88%E3%83%A9%E3%83%B3%20Naritasan%20Omotesando%20Naritasan"]]},{"type":"sight","duration":75,"choices":[["Naritasan Shinshoji Temple","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E6%88%90%E7%94%B0%E5%B1%B1%E6%96%B0%E5%8B%9D%E5%AF%BA%20%E5%8D%83%E8%91%89%E7%9C%8C"]]},{"type":"break","duration":55,"choices":[["Naritasan Park","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E6%88%90%E7%94%B0%E5%B1%B1%E5%85%AC%E5%9C%92%20%E5%8D%83%E8%91%89%E7%9C%8C"]]}]},{"id":"shibuya","prefecture":"tokyo","label":"Shibuya · Harajuku","title":"Shibuya · Harajuku","description":"Four selected places in one area; follow the directions for each transfer.","area":"Harajuku and Shibuya","gap":25,"stops":[{"type":"sight","duration":65,"choices":[["Meiji Jingu Shrine","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E6%98%8E%E6%B2%BB%E7%A5%9E%E5%AE%AE%20%E6%9D%B1%E4%BA%AC%E9%83%BD"]]},{"type":"walk","duration":55,"choices":[["Takeshita Street","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E7%AB%B9%E4%B8%8B%E9%80%9A%E3%82%8A%20%E6%9D%B1%E4%BA%AC%E9%83%BD"]]},{"type":"food","duration":60,"choices":[["Lunch near Takeshita Street","Choose a nearby restaurant for lunch.","https://www.google.com/maps/search/?api=1&query=%E3%83%AC%E3%82%B9%E3%83%88%E3%83%A9%E3%83%B3%20Takeshita%20Street%20Harajuku%20and%20Shibuya"]]},{"type":"sight","duration":75,"choices":[["Omotesando Tokyo","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E8%A1%A8%E5%8F%82%E9%81%93%20%E6%9D%B1%E4%BA%AC%E9%83%BD"]]},{"type":"break","duration":55,"choices":[["Hachiko Square Shibuya","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E3%83%8F%E3%83%81%E5%85%AC%E5%89%8D%E5%BA%83%E5%A0%B4%20%E6%9D%B1%E4%BA%AC%E9%83%BD"]]}]},{"id":"yokohama","prefecture":"kanagawa","label":"Yokohama · Waterfront","title":"Yokohama · Waterfront","description":"Four selected places in one area; follow the directions for each transfer.","area":"Minato Mirai","gap":25,"stops":[{"type":"sight","duration":65,"choices":[["Yokohama Red Brick Warehouse","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E6%A8%AA%E6%B5%9C%E8%B5%A4%E3%83%AC%E3%83%B3%E3%82%AC%E5%80%89%E5%BA%AB%20%E7%A5%9E%E5%A5%88%E5%B7%9D%E7%9C%8C"]]},{"type":"walk","duration":55,"choices":[["Osanbashi Pier Yokohama","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%A4%A7%E3%81%95%E3%82%93%E6%A9%8B%20%E7%A5%9E%E5%A5%88%E5%B7%9D%E7%9C%8C"]]},{"type":"food","duration":60,"choices":[["Lunch near Osanbashi Pier Yokohama","Choose a nearby restaurant for lunch.","https://www.google.com/maps/search/?api=1&query=%E3%83%AC%E3%82%B9%E3%83%88%E3%83%A9%E3%83%B3%20Osanbashi%20Pier%20Yokohama%20Minato%20Mirai"]]},{"type":"sight","duration":75,"choices":[["Yamashita Park","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%B1%B1%E4%B8%8B%E5%85%AC%E5%9C%92%20%E7%A5%9E%E5%A5%88%E5%B7%9D%E7%9C%8C"]]},{"type":"break","duration":55,"choices":[["Yokohama Chinatown","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E6%A8%AA%E6%B5%9C%E4%B8%AD%E8%8F%AF%E8%A1%97%20%E7%A5%9E%E5%A5%88%E5%B7%9D%E7%9C%8C"]]}]},{"id":"niigata-city","prefecture":"niigata","label":"Niigata · River and Bay","title":"Niigata · River and Bay","description":"Four selected places in one area; follow the directions for each transfer.","area":"Central Niigata","gap":25,"stops":[{"type":"sight","duration":65,"choices":[["Niigata Station","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E6%96%B0%E6%BD%9F%E9%A7%85%20%E6%96%B0%E6%BD%9F%E7%9C%8C"]]},{"type":"walk","duration":55,"choices":[["Bandai Bridge Niigata","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E8%90%AC%E4%BB%A3%E6%A9%8B%20%E6%96%B0%E6%BD%9F%E7%9C%8C"]]},{"type":"food","duration":60,"choices":[["Lunch near Bandai Bridge Niigata","Choose a nearby restaurant for lunch.","https://www.google.com/maps/search/?api=1&query=%E3%83%AC%E3%82%B9%E3%83%88%E3%83%A9%E3%83%B3%20Bandai%20Bridge%20Niigata%20Central%20Niigata"]]},{"type":"sight","duration":75,"choices":[["Pier Bandai","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E3%83%94%E3%82%A2Bandai%20%E6%96%B0%E6%BD%9F%E7%9C%8C"]]},{"type":"break","duration":55,"choices":[["Toki Messe Niigata","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E6%9C%B1%E9%B7%BA%E3%83%A1%E3%83%83%E3%82%BB%20%E6%96%B0%E6%BD%9F%E7%9C%8C"]]}]},{"id":"toyama-city","prefecture":"toyama","label":"Toyama · Canal and Glass","title":"Toyama · Canal and Glass","description":"Four selected places in one area; follow the directions for each transfer.","area":"Central Toyama","gap":25,"stops":[{"type":"sight","duration":65,"choices":[["Toyama Station","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%AF%8C%E5%B1%B1%E9%A7%85%20%E5%AF%8C%E5%B1%B1%E7%9C%8C"]]},{"type":"walk","duration":55,"choices":[["Kansui Park Toyama","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%AF%8C%E5%B2%A9%E9%81%8B%E6%B2%B3%E7%92%B0%E6%B0%B4%E5%85%AC%E5%9C%92%20%E5%AF%8C%E5%B1%B1%E7%9C%8C"]]},{"type":"food","duration":60,"choices":[["Lunch near Kansui Park Toyama","Choose a nearby restaurant for lunch.","https://www.google.com/maps/search/?api=1&query=%E3%83%AC%E3%82%B9%E3%83%88%E3%83%A9%E3%83%B3%20Kansui%20Park%20Toyama%20Central%20Toyama"]]},{"type":"sight","duration":75,"choices":[["Toyama Glass Art Museum","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%AF%8C%E5%B1%B1%E5%B8%82%E3%82%AC%E3%83%A9%E3%82%B9%E7%BE%8E%E8%A1%93%E9%A4%A8%20%E5%AF%8C%E5%B1%B1%E7%9C%8C"]]},{"type":"break","duration":55,"choices":[["Toyama Castle Park","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%AF%8C%E5%B1%B1%E5%9F%8E%E5%9D%80%E5%85%AC%E5%9C%92%20%E5%AF%8C%E5%B1%B1%E7%9C%8C"]]}]},{"id":"kanazawa","prefecture":"ishikawa","label":"Kanazawa · Gardens","title":"Kanazawa · Gardens","description":"Four selected places in one area; follow the directions for each transfer.","area":"Central Kanazawa","gap":25,"stops":[{"type":"sight","duration":65,"choices":[["Omicho Market Kanazawa","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E8%BF%91%E6%B1%9F%E7%94%BA%E5%B8%82%E5%A0%B4%20%E7%9F%B3%E5%B7%9D%E7%9C%8C"]]},{"type":"walk","duration":55,"choices":[["Kanazawa Castle Park","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E9%87%91%E6%B2%A2%E5%9F%8E%E5%85%AC%E5%9C%92%20%E7%9F%B3%E5%B7%9D%E7%9C%8C"]]},{"type":"food","duration":60,"choices":[["Lunch near Kanazawa Castle Park","Choose a nearby restaurant for lunch.","https://www.google.com/maps/search/?api=1&query=%E3%83%AC%E3%82%B9%E3%83%88%E3%83%A9%E3%83%B3%20Kanazawa%20Castle%20Park%20Central%20Kanazawa"]]},{"type":"sight","duration":75,"choices":[["Kenrokuen Garden","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%85%BC%E5%85%AD%E5%9C%92%20%E7%9F%B3%E5%B7%9D%E7%9C%8C"]]},{"type":"break","duration":55,"choices":[["Higashi Chaya District","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E3%81%B2%E3%81%8C%E3%81%97%E8%8C%B6%E5%B1%8B%E8%A1%97%20%E7%9F%B3%E5%B7%9D%E7%9C%8C"]]}]},{"id":"fukui-city","prefecture":"fukui","label":"Fukui · Castle and Garden","title":"Fukui · Castle and Garden","description":"Four selected places in one area; follow the directions for each transfer.","area":"Central Fukui","gap":25,"stops":[{"type":"sight","duration":65,"choices":[["Fukui Station","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E7%A6%8F%E4%BA%95%E9%A7%85%20%E7%A6%8F%E4%BA%95%E7%9C%8C"]]},{"type":"walk","duration":55,"choices":[["Fukui Castle Ruins","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E7%A6%8F%E4%BA%95%E5%9F%8E%E5%9D%80%20%E7%A6%8F%E4%BA%95%E7%9C%8C"]]},{"type":"food","duration":60,"choices":[["Lunch near Fukui Castle Ruins","Choose a nearby restaurant for lunch.","https://www.google.com/maps/search/?api=1&query=%E3%83%AC%E3%82%B9%E3%83%88%E3%83%A9%E3%83%B3%20Fukui%20Castle%20Ruins%20Central%20Fukui"]]},{"type":"sight","duration":75,"choices":[["Fukui City History Museum","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E7%A6%8F%E4%BA%95%E5%B8%82%E7%AB%8B%E9%83%B7%E5%9C%9F%E6%AD%B4%E5%8F%B2%E5%8D%9A%E7%89%A9%E9%A4%A8%20%E7%A6%8F%E4%BA%95%E7%9C%8C"]]},{"type":"break","duration":55,"choices":[["Yokokan Garden Fukui","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E9%A4%8A%E6%B5%A9%E9%A4%A8%E5%BA%AD%E5%9C%92%20%E7%A6%8F%E4%BA%95%E7%9C%8C"]]}]},{"id":"kofu","prefecture":"yamanashi","label":"Kofu · Castle and Shrine","title":"Kofu · Castle and Shrine","description":"Four selected places in one area; follow the directions for each transfer.","area":"Central Kofu","gap":25,"stops":[{"type":"sight","duration":65,"choices":[["Kofu Station","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E7%94%B2%E5%BA%9C%E9%A7%85%20%E5%B1%B1%E6%A2%A8%E7%9C%8C"]]},{"type":"walk","duration":55,"choices":[["Maizuru Castle Park Kofu","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E8%88%9E%E9%B6%B4%E5%9F%8E%E5%85%AC%E5%9C%92%20%E5%B1%B1%E6%A2%A8%E7%9C%8C"]]},{"type":"food","duration":60,"choices":[["Lunch near Maizuru Castle Park Kofu","Choose a nearby restaurant for lunch.","https://www.google.com/maps/search/?api=1&query=%E3%83%AC%E3%82%B9%E3%83%88%E3%83%A9%E3%83%B3%20Maizuru%20Castle%20Park%20Kofu%20Central%20Kofu"]]},{"type":"sight","duration":75,"choices":[["Fujimura Memorial Hall Kofu","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E7%94%B2%E5%BA%9C%E5%B8%82%E8%97%A4%E6%9D%91%E8%A8%98%E5%BF%B5%E9%A4%A8%20%E5%B1%B1%E6%A2%A8%E7%9C%8C"]]},{"type":"break","duration":55,"choices":[["Takeda Shrine Kofu","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E6%AD%A6%E7%94%B0%E7%A5%9E%E7%A4%BE%20%E5%B1%B1%E6%A2%A8%E7%9C%8C"]]}]},{"id":"nagano-city","prefecture":"nagano","label":"Nagano · Zenkoji","title":"Nagano · Zenkoji","description":"Four selected places in one area; follow the directions for each transfer.","area":"Central Nagano","gap":25,"stops":[{"type":"sight","duration":65,"choices":[["Nagano Station","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E9%95%B7%E9%87%8E%E9%A7%85%20%E9%95%B7%E9%87%8E%E7%9C%8C"]]},{"type":"walk","duration":55,"choices":[["Zenkoji Approach","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%96%84%E5%85%89%E5%AF%BA%E8%A1%A8%E5%8F%82%E9%81%93%20%E9%95%B7%E9%87%8E%E7%9C%8C"]]},{"type":"food","duration":60,"choices":[["Lunch near Zenkoji Approach","Choose a nearby restaurant for lunch.","https://www.google.com/maps/search/?api=1&query=%E3%83%AC%E3%82%B9%E3%83%88%E3%83%A9%E3%83%B3%20Zenkoji%20Approach%20Central%20Nagano"]]},{"type":"sight","duration":75,"choices":[["Zenkoji Temple Nagano","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%96%84%E5%85%89%E5%AF%BA%20%E9%95%B7%E9%87%8E%E7%9C%8C"]]},{"type":"break","duration":55,"choices":[["Nagano Prefectural Art Museum","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E9%95%B7%E9%87%8E%E7%9C%8C%E7%AB%8B%E7%BE%8E%E8%A1%93%E9%A4%A8%20%E9%95%B7%E9%87%8E%E7%9C%8C"]]}]},{"id":"takayama","prefecture":"gifu","label":"Takayama · Old Town","title":"Takayama · Old Town","description":"Four selected places in one area; follow the directions for each transfer.","area":"Takayama","gap":25,"stops":[{"type":"sight","duration":65,"choices":[["Takayama Station","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E9%AB%98%E5%B1%B1%E9%A7%85%20%E5%B2%90%E9%98%9C%E7%9C%8C"]]},{"type":"walk","duration":55,"choices":[["Miyagawa Morning Market","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%AE%AE%E5%B7%9D%E6%9C%9D%E5%B8%82%20%E5%B2%90%E9%98%9C%E7%9C%8C"]]},{"type":"food","duration":60,"choices":[["Lunch near Miyagawa Morning Market","Choose a nearby restaurant for lunch.","https://www.google.com/maps/search/?api=1&query=%E3%83%AC%E3%82%B9%E3%83%88%E3%83%A9%E3%83%B3%20Miyagawa%20Morning%20Market%20Takayama"]]},{"type":"sight","duration":75,"choices":[["Takayama Jinya","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E9%AB%98%E5%B1%B1%E9%99%A3%E5%B1%8B%20%E5%B2%90%E9%98%9C%E7%9C%8C"]]},{"type":"break","duration":55,"choices":[["Takayama Old Town","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%8F%A4%E3%81%84%E7%94%BA%E4%B8%A6%20%E5%B2%90%E9%98%9C%E7%9C%8C"]]}]},{"id":"shizuoka-city","prefecture":"shizuoka","label":"Shizuoka · Castle Park","title":"Shizuoka · Castle Park","description":"Four selected places in one area; follow the directions for each transfer.","area":"Central Shizuoka","gap":25,"stops":[{"type":"sight","duration":65,"choices":[["Shizuoka Station","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E9%9D%99%E5%B2%A1%E9%A7%85%20%E9%9D%99%E5%B2%A1%E7%9C%8C"]]},{"type":"walk","duration":55,"choices":[["Sumpu Castle Park","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E9%A7%BF%E5%BA%9C%E5%9F%8E%E5%85%AC%E5%9C%92%20%E9%9D%99%E5%B2%A1%E7%9C%8C"]]},{"type":"food","duration":60,"choices":[["Lunch near Sumpu Castle Park","Choose a nearby restaurant for lunch.","https://www.google.com/maps/search/?api=1&query=%E3%83%AC%E3%82%B9%E3%83%88%E3%83%A9%E3%83%B3%20Sumpu%20Castle%20Park%20Central%20Shizuoka"]]},{"type":"sight","duration":75,"choices":[["Shizuoka City Museum of History","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E9%9D%99%E5%B2%A1%E5%B8%82%E6%AD%B4%E5%8F%B2%E5%8D%9A%E7%89%A9%E9%A4%A8%20%E9%9D%99%E5%B2%A1%E7%9C%8C"]]},{"type":"break","duration":55,"choices":[["Aoba Symbol Road Shizuoka","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E9%9D%92%E8%91%89%E3%82%B7%E3%83%B3%E3%83%9C%E3%83%AB%E3%83%AD%E3%83%BC%E3%83%89%20%E9%9D%99%E5%B2%A1%E7%9C%8C"]]}]},{"id":"nagoya-castle","prefecture":"aichi","label":"Nagoya · Castle and Sakae","title":"Nagoya · Castle and Sakae","description":"Four selected places in one area; follow the directions for each transfer.","area":"Nagoya Castle","gap":25,"stops":[{"type":"sight","duration":65,"choices":[["Nagoya Castle","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%90%8D%E5%8F%A4%E5%B1%8B%E5%9F%8E%20%E6%84%9B%E7%9F%A5%E7%9C%8C"]]},{"type":"walk","duration":55,"choices":[["Meijo Park","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%90%8D%E5%9F%8E%E5%85%AC%E5%9C%92%20%E6%84%9B%E7%9F%A5%E7%9C%8C"]]},{"type":"food","duration":60,"choices":[["Lunch near Meijo Park","Choose a nearby restaurant for lunch.","https://www.google.com/maps/search/?api=1&query=%E3%83%AC%E3%82%B9%E3%83%88%E3%83%A9%E3%83%B3%20Meijo%20Park%20Nagoya%20Castle"]]},{"type":"sight","duration":75,"choices":[["Hisaya Odori Park","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E4%B9%85%E5%B1%8B%E5%A4%A7%E9%80%9A%E5%85%AC%E5%9C%92%20%E6%84%9B%E7%9F%A5%E7%9C%8C"]]},{"type":"break","duration":55,"choices":[["Oasis 21 Nagoya","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E3%82%AA%E3%82%A2%E3%82%B7%E3%82%B921%20%E6%84%9B%E7%9F%A5%E7%9C%8C"]]}]},{"id":"nagoya-atsuta","prefecture":"aichi","label":"Nagoya · Atsuta","title":"Nagoya · Atsuta","description":"Four selected places in one area; follow the directions for each transfer.","area":"Atsuta Nagoya","gap":25,"stops":[{"type":"sight","duration":65,"choices":[["Atsuta Jingu Shrine","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E7%86%B1%E7%94%B0%E7%A5%9E%E5%AE%AE%20%E6%84%9B%E7%9F%A5%E7%9C%8C"]]},{"type":"walk","duration":55,"choices":[["Atsuta Jingu Treasure Hall","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E7%86%B1%E7%94%B0%E7%A5%9E%E5%AE%AE%E5%AE%9D%E7%89%A9%E9%A4%A8%20%E6%84%9B%E7%9F%A5%E7%9C%8C"]]},{"type":"food","duration":60,"choices":[["Lunch near Atsuta Jingu Treasure Hall","Choose a nearby restaurant for lunch.","https://www.google.com/maps/search/?api=1&query=%E3%83%AC%E3%82%B9%E3%83%88%E3%83%A9%E3%83%B3%20Atsuta%20Jingu%20Treasure%20Hall%20Atsuta%20Nagoya"]]},{"type":"sight","duration":75,"choices":[["Shirotori Garden Nagoya","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E7%99%BD%E9%B3%A5%E5%BA%AD%E5%9C%92%20%E6%84%9B%E7%9F%A5%E7%9C%8C"]]},{"type":"break","duration":55,"choices":[["Miya no Watashi Park Nagoya","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%AE%AE%E3%81%AE%E6%B8%A1%E3%81%97%E5%85%AC%E5%9C%92%20%E6%84%9B%E7%9F%A5%E7%9C%8C"]]}]},{"id":"ise","prefecture":"mie","label":"Ise · Shrine Town","title":"Ise · Shrine Town","description":"Four selected places in one area; follow the directions for each transfer.","area":"Ise","gap":25,"stops":[{"type":"sight","duration":65,"choices":[["Iseshi Station","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E4%BC%8A%E5%8B%A2%E5%B8%82%E9%A7%85%20%E4%B8%89%E9%87%8D%E7%9C%8C"]]},{"type":"walk","duration":55,"choices":[["Ise Jingu Geku","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E4%BC%8A%E5%8B%A2%E7%A5%9E%E5%AE%AE%20%E5%A4%96%E5%AE%AE%20%E4%B8%89%E9%87%8D%E7%9C%8C"]]},{"type":"food","duration":60,"choices":[["Lunch near Ise Jingu Geku","Choose a nearby restaurant for lunch.","https://www.google.com/maps/search/?api=1&query=%E3%83%AC%E3%82%B9%E3%83%88%E3%83%A9%E3%83%B3%20Ise%20Jingu%20Geku%20Ise"]]},{"type":"sight","duration":75,"choices":[["Sarutahiko Shrine Ise","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E7%8C%BF%E7%94%B0%E5%BD%A6%E7%A5%9E%E7%A4%BE%20%E4%B8%89%E9%87%8D%E7%9C%8C"]]},{"type":"break","duration":55,"choices":[["Okage Yokocho Ise","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E3%81%8A%E3%81%8B%E3%81%92%E6%A8%AA%E4%B8%81%20%E4%B8%89%E9%87%8D%E7%9C%8C"]]}]},{"id":"hikone","prefecture":"shiga","label":"Hikone · Castle Town","title":"Hikone · Castle Town","description":"Four selected places in one area; follow the directions for each transfer.","area":"Hikone Castle","gap":25,"stops":[{"type":"sight","duration":65,"choices":[["Hikone Station","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%BD%A6%E6%A0%B9%E9%A7%85%20%E6%BB%8B%E8%B3%80%E7%9C%8C"]]},{"type":"walk","duration":55,"choices":[["Hikone Castle","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%BD%A6%E6%A0%B9%E5%9F%8E%20%E6%BB%8B%E8%B3%80%E7%9C%8C"]]},{"type":"food","duration":60,"choices":[["Lunch near Hikone Castle","Choose a nearby restaurant for lunch.","https://www.google.com/maps/search/?api=1&query=%E3%83%AC%E3%82%B9%E3%83%88%E3%83%A9%E3%83%B3%20Hikone%20Castle%20Hikone%20Castle"]]},{"type":"sight","duration":75,"choices":[["Genkyuen Garden Hikone","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E7%8E%84%E5%AE%AE%E5%9C%92%20%E6%BB%8B%E8%B3%80%E7%9C%8C"]]},{"type":"break","duration":55,"choices":[["Yume Kyobashi Castle Road","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%A4%A2%E4%BA%AC%E6%A9%8B%E3%82%AD%E3%83%A3%E3%83%83%E3%82%B9%E3%83%AB%E3%83%AD%E3%83%BC%E3%83%89%20%E6%BB%8B%E8%B3%80%E7%9C%8C"]]}]},{"id":"arashiyama","prefecture":"kyoto","label":"Kyoto · Arashiyama","title":"Kyoto · Arashiyama","description":"Four selected places in one area; follow the directions for each transfer.","area":"Arashiyama","gap":25,"stops":[{"type":"sight","duration":65,"choices":[["Togetsukyo Bridge Kyoto","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E6%B8%A1%E6%9C%88%E6%A9%8B%20%E4%BA%AC%E9%83%BD%E5%BA%9C"]]},{"type":"walk","duration":55,"choices":[["Tenryuji Temple Kyoto","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%A4%A9%E9%BE%8D%E5%AF%BA%20%E4%BA%AC%E9%83%BD%E5%BA%9C"]]},{"type":"food","duration":60,"choices":[["Lunch near Tenryuji Temple Kyoto","Choose a nearby restaurant for lunch.","https://www.google.com/maps/search/?api=1&query=%E3%83%AC%E3%82%B9%E3%83%88%E3%83%A9%E3%83%B3%20Tenryuji%20Temple%20Kyoto%20Arashiyama"]]},{"type":"sight","duration":75,"choices":[["Arashiyama Bamboo Grove","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%B5%AF%E5%B3%A8%E9%87%8E%E7%AB%B9%E6%9E%97%E3%81%AE%E5%B0%8F%E5%BE%84%20%E4%BA%AC%E9%83%BD%E5%BA%9C"]]},{"type":"break","duration":55,"choices":[["Nonomiya Shrine Kyoto","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E9%87%8E%E5%AE%AE%E7%A5%9E%E7%A4%BE%20%E4%BA%AC%E9%83%BD%E5%BA%9C"]]}]},{"id":"fushimi","prefecture":"kyoto","label":"Kyoto · Fushimi and Higashiyama","title":"Kyoto · Fushimi and Higashiyama","description":"Four selected places in one area; follow the directions for each transfer.","area":"Fushimi Inari","gap":25,"stops":[{"type":"sight","duration":65,"choices":[["Fushimi Inari Station","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E4%BC%8F%E8%A6%8B%E7%A8%B2%E8%8D%B7%E9%A7%85%20%E4%BA%AC%E9%83%BD%E5%BA%9C"]]},{"type":"walk","duration":55,"choices":[["Fushimi Inari Taisha","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E4%BC%8F%E8%A6%8B%E7%A8%B2%E8%8D%B7%E5%A4%A7%E7%A4%BE%20%E4%BA%AC%E9%83%BD%E5%BA%9C"]]},{"type":"food","duration":60,"choices":[["Lunch near Fushimi Inari Taisha","Choose a nearby restaurant for lunch.","https://www.google.com/maps/search/?api=1&query=%E3%83%AC%E3%82%B9%E3%83%88%E3%83%A9%E3%83%B3%20Fushimi%20Inari%20Taisha%20Fushimi%20Inari"]]},{"type":"sight","duration":75,"choices":[["Tofukuji Temple Kyoto","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E6%9D%B1%E7%A6%8F%E5%AF%BA%20%E4%BA%AC%E9%83%BD%E5%BA%9C"]]},{"type":"break","duration":55,"choices":[["Sanjusangendo Temple Kyoto","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E4%B8%89%E5%8D%81%E4%B8%89%E9%96%93%E5%A0%82%20%E4%BA%AC%E9%83%BD%E5%BA%9C"]]}]},{"id":"osaka-castle","prefecture":"osaka","label":"Osaka · Castle and River","title":"Osaka · Castle and River","description":"Four selected places in one area; follow the directions for each transfer.","area":"Osaka Castle","gap":25,"stops":[{"type":"sight","duration":65,"choices":[["Osaka Castle Park","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%A4%A7%E9%98%AA%E5%9F%8E%E5%85%AC%E5%9C%92%20%E5%A4%A7%E9%98%AA%E5%BA%9C"]]},{"type":"walk","duration":55,"choices":[["Osaka Castle","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%A4%A7%E9%98%AA%E5%9F%8E%20%E5%A4%A7%E9%98%AA%E5%BA%9C"]]},{"type":"food","duration":60,"choices":[["Lunch near Osaka Castle","Choose a nearby restaurant for lunch.","https://www.google.com/maps/search/?api=1&query=%E3%83%AC%E3%82%B9%E3%83%88%E3%83%A9%E3%83%B3%20Osaka%20Castle%20Osaka%20Castle"]]},{"type":"sight","duration":75,"choices":[["Osaka Museum of History","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%A4%A7%E9%98%AA%E6%AD%B4%E5%8F%B2%E5%8D%9A%E7%89%A9%E9%A4%A8%20%E5%A4%A7%E9%98%AA%E5%BA%9C"]]},{"type":"break","duration":55,"choices":[["Nakanoshima Park Osaka","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E4%B8%AD%E4%B9%8B%E5%B3%B6%E5%85%AC%E5%9C%92%20%E5%A4%A7%E9%98%AA%E5%BA%9C"]]}]},{"id":"shinsekai","prefecture":"osaka","label":"Osaka · Shinsekai","title":"Osaka · Shinsekai","description":"Four selected places in one area; follow the directions for each transfer.","area":"Tennoji and Shinsekai","gap":25,"stops":[{"type":"sight","duration":65,"choices":[["Tennoji Station","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%A4%A9%E7%8E%8B%E5%AF%BA%E9%A7%85%20%E5%A4%A7%E9%98%AA%E5%BA%9C"]]},{"type":"walk","duration":55,"choices":[["Shitennoji Temple Osaka","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%9B%9B%E5%A4%A9%E7%8E%8B%E5%AF%BA%20%E5%A4%A7%E9%98%AA%E5%BA%9C"]]},{"type":"food","duration":60,"choices":[["Lunch near Shitennoji Temple Osaka","Choose a nearby restaurant for lunch.","https://www.google.com/maps/search/?api=1&query=%E3%83%AC%E3%82%B9%E3%83%88%E3%83%A9%E3%83%B3%20Shitennoji%20Temple%20Osaka%20Tennoji%20and%20Shinsekai"]]},{"type":"sight","duration":75,"choices":[["Tennoji Park Osaka","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%A4%A9%E7%8E%8B%E5%AF%BA%E5%85%AC%E5%9C%92%20%E5%A4%A7%E9%98%AA%E5%BA%9C"]]},{"type":"break","duration":55,"choices":[["Tsutenkaku Tower Osaka","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E9%80%9A%E5%A4%A9%E9%96%A3%20%E5%A4%A7%E9%98%AA%E5%BA%9C"]]}]},{"id":"kobe","prefecture":"hyogo","label":"Kobe · Waterfront","title":"Kobe · Waterfront","description":"Four selected places in one area; follow the directions for each transfer.","area":"Kobe Waterfront","gap":25,"stops":[{"type":"sight","duration":65,"choices":[["Kobe Harborland","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E7%A5%9E%E6%88%B8%E3%83%8F%E3%83%BC%E3%83%90%E3%83%BC%E3%83%A9%E3%83%B3%E3%83%89%20%E5%85%B5%E5%BA%AB%E7%9C%8C"]]},{"type":"walk","duration":55,"choices":[["Meriken Park Kobe","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E3%83%A1%E3%83%AA%E3%82%B1%E3%83%B3%E3%83%91%E3%83%BC%E3%82%AF%20%E5%85%B5%E5%BA%AB%E7%9C%8C"]]},{"type":"food","duration":60,"choices":[["Lunch near Meriken Park Kobe","Choose a nearby restaurant for lunch.","https://www.google.com/maps/search/?api=1&query=%E3%83%AC%E3%82%B9%E3%83%88%E3%83%A9%E3%83%B3%20Meriken%20Park%20Kobe%20Kobe%20Waterfront"]]},{"type":"sight","duration":75,"choices":[["Kobe Port Tower","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E7%A5%9E%E6%88%B8%E3%83%9D%E3%83%BC%E3%83%88%E3%82%BF%E3%83%AF%E3%83%BC%20%E5%85%B5%E5%BA%AB%E7%9C%8C"]]},{"type":"break","duration":55,"choices":[["Nankinmachi Kobe","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%8D%97%E4%BA%AC%E7%94%BA%20%E5%85%B5%E5%BA%AB%E7%9C%8C"]]}]},{"id":"ikaruga","prefecture":"nara","label":"Nara · Ikaruga Temples","title":"Nara · Ikaruga Temples","description":"Four selected places in one area; follow the directions for each transfer.","area":"Ikaruga","gap":25,"stops":[{"type":"sight","duration":65,"choices":[["Horyuji Station","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E6%B3%95%E9%9A%86%E5%AF%BA%E9%A7%85%20%E5%A5%88%E8%89%AF%E7%9C%8C"]]},{"type":"walk","duration":55,"choices":[["Horyuji Temple","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E6%B3%95%E9%9A%86%E5%AF%BA%20%E5%A5%88%E8%89%AF%E7%9C%8C"]]},{"type":"food","duration":60,"choices":[["Lunch near Horyuji Temple","Choose a nearby restaurant for lunch.","https://www.google.com/maps/search/?api=1&query=%E3%83%AC%E3%82%B9%E3%83%88%E3%83%A9%E3%83%B3%20Horyuji%20Temple%20Ikaruga"]]},{"type":"sight","duration":75,"choices":[["Chuguji Temple Nara","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E4%B8%AD%E5%AE%AE%E5%AF%BA%20%E5%A5%88%E8%89%AF%E7%9C%8C"]]},{"type":"break","duration":55,"choices":[["Hokiji Temple Nara","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E6%B3%95%E8%B5%B7%E5%AF%BA%20%E5%A5%88%E8%89%AF%E7%9C%8C"]]}]},{"id":"wakayama-city","prefecture":"wakayama","label":"Wakayama · Castle Town","title":"Wakayama · Castle Town","description":"Four selected places in one area; follow the directions for each transfer.","area":"Wakayama Castle","gap":25,"stops":[{"type":"sight","duration":65,"choices":[["Wakayamashi Station","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%92%8C%E6%AD%8C%E5%B1%B1%E5%B8%82%E9%A7%85%20%E5%92%8C%E6%AD%8C%E5%B1%B1%E7%9C%8C"]]},{"type":"walk","duration":55,"choices":[["Wakayama Castle","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%92%8C%E6%AD%8C%E5%B1%B1%E5%9F%8E%20%E5%92%8C%E6%AD%8C%E5%B1%B1%E7%9C%8C"]]},{"type":"food","duration":60,"choices":[["Lunch near Wakayama Castle","Choose a nearby restaurant for lunch.","https://www.google.com/maps/search/?api=1&query=%E3%83%AC%E3%82%B9%E3%83%88%E3%83%A9%E3%83%B3%20Wakayama%20Castle%20Wakayama%20Castle"]]},{"type":"sight","duration":75,"choices":[["Momijidani Garden Wakayama","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E7%B4%85%E8%91%89%E6%B8%93%E5%BA%AD%E5%9C%92%20%E5%92%8C%E6%AD%8C%E5%B1%B1%E7%9C%8C"]]},{"type":"break","duration":55,"choices":[["Wakayama Museum of Modern Art","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%92%8C%E6%AD%8C%E5%B1%B1%E7%9C%8C%E7%AB%8B%E8%BF%91%E4%BB%A3%E7%BE%8E%E8%A1%93%E9%A4%A8%20%E5%92%8C%E6%AD%8C%E5%B1%B1%E7%9C%8C"]]}]},{"id":"tottori-dunes","prefecture":"tottori","label":"Tottori · Sand Dunes","title":"Tottori · Sand Dunes","description":"Four selected places in one area; follow the directions for each transfer.","area":"Tottori Sand Dunes","gap":25,"stops":[{"type":"sight","duration":65,"choices":[["Tottori Sand Dunes Visitor Center","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E9%B3%A5%E5%8F%96%E7%A0%82%E4%B8%98%E3%83%93%E3%82%B8%E3%82%BF%E3%83%BC%E3%82%BB%E3%83%B3%E3%82%BF%E3%83%BC%20%E9%B3%A5%E5%8F%96%E7%9C%8C"]]},{"type":"walk","duration":55,"choices":[["Tottori Sand Dunes","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E9%B3%A5%E5%8F%96%E7%A0%82%E4%B8%98%20%E9%B3%A5%E5%8F%96%E7%9C%8C"]]},{"type":"food","duration":60,"choices":[["Lunch near Tottori Sand Dunes","Choose a nearby restaurant for lunch.","https://www.google.com/maps/search/?api=1&query=%E3%83%AC%E3%82%B9%E3%83%88%E3%83%A9%E3%83%B3%20Tottori%20Sand%20Dunes%20Tottori%20Sand%20Dunes"]]},{"type":"sight","duration":75,"choices":[["The Sand Museum Tottori","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E7%A0%82%E3%81%AE%E7%BE%8E%E8%A1%93%E9%A4%A8%20%E9%B3%A5%E5%8F%96%E7%9C%8C"]]},{"type":"break","duration":55,"choices":[["Sakyu Center View Hill Tottori","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E7%A0%82%E4%B8%98%E3%82%BB%E3%83%B3%E3%82%BF%E3%83%BC%E8%A6%8B%E6%99%B4%E3%82%89%E3%81%97%E3%81%AE%E4%B8%98%20%E9%B3%A5%E5%8F%96%E7%9C%8C"]]}]},{"id":"matsue","prefecture":"shimane","label":"Matsue · Castle and Lake","title":"Matsue · Castle and Lake","description":"Four selected places in one area; follow the directions for each transfer.","area":"Central Matsue","gap":25,"stops":[{"type":"sight","duration":65,"choices":[["Matsue Castle","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E6%9D%BE%E6%B1%9F%E5%9F%8E%20%E5%B3%B6%E6%A0%B9%E7%9C%8C"]]},{"type":"walk","duration":55,"choices":[["Shiomi Nawate Street Matsue","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%A1%A9%E8%A6%8B%E7%B8%84%E6%89%8B%20%E5%B3%B6%E6%A0%B9%E7%9C%8C"]]},{"type":"food","duration":60,"choices":[["Lunch near Shiomi Nawate Street Matsue","Choose a nearby restaurant for lunch.","https://www.google.com/maps/search/?api=1&query=%E3%83%AC%E3%82%B9%E3%83%88%E3%83%A9%E3%83%B3%20Shiomi%20Nawate%20Street%20Matsue%20Central%20Matsue"]]},{"type":"sight","duration":75,"choices":[["Lafcadio Hearn Memorial Museum Matsue","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%B0%8F%E6%B3%89%E5%85%AB%E9%9B%B2%E8%A8%98%E5%BF%B5%E9%A4%A8%20%E5%B3%B6%E6%A0%B9%E7%9C%8C"]]},{"type":"break","duration":55,"choices":[["Shimane Art Museum","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%B3%B6%E6%A0%B9%E7%9C%8C%E7%AB%8B%E7%BE%8E%E8%A1%93%E9%A4%A8%20%E5%B3%B6%E6%A0%B9%E7%9C%8C"]]}]},{"id":"okayama-city","prefecture":"okayama","label":"Okayama · Korakuen","title":"Okayama · Korakuen","description":"Four selected places in one area; follow the directions for each transfer.","area":"Central Okayama","gap":25,"stops":[{"type":"sight","duration":65,"choices":[["Okayama Station","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%B2%A1%E5%B1%B1%E9%A7%85%20%E5%B2%A1%E5%B1%B1%E7%9C%8C"]]},{"type":"walk","duration":55,"choices":[["Okayama Castle","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%B2%A1%E5%B1%B1%E5%9F%8E%20%E5%B2%A1%E5%B1%B1%E7%9C%8C"]]},{"type":"food","duration":60,"choices":[["Lunch near Okayama Castle","Choose a nearby restaurant for lunch.","https://www.google.com/maps/search/?api=1&query=%E3%83%AC%E3%82%B9%E3%83%88%E3%83%A9%E3%83%B3%20Okayama%20Castle%20Central%20Okayama"]]},{"type":"sight","duration":75,"choices":[["Okayama Korakuen Garden","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%B2%A1%E5%B1%B1%E5%BE%8C%E6%A5%BD%E5%9C%92%20%E5%B2%A1%E5%B1%B1%E7%9C%8C"]]},{"type":"break","duration":55,"choices":[["Okayama Prefectural Museum of Art","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%B2%A1%E5%B1%B1%E7%9C%8C%E7%AB%8B%E7%BE%8E%E8%A1%93%E9%A4%A8%20%E5%B2%A1%E5%B1%B1%E7%9C%8C"]]}]},{"id":"yamaguchi-city","prefecture":"yamaguchi","label":"Yamaguchi · Culture and Onsen","title":"Yamaguchi · Culture and Onsen","description":"Four selected places in one area; follow the directions for each transfer.","area":"Central Yamaguchi","gap":25,"stops":[{"type":"sight","duration":65,"choices":[["Yamaguchi Station","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%B1%B1%E5%8F%A3%E9%A7%85%20%E5%B1%B1%E5%8F%A3%E7%9C%8C"]]},{"type":"walk","duration":55,"choices":[["Yamaguchi Xavier Memorial Church","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%B1%B1%E5%8F%A3%E3%82%B5%E3%83%93%E3%82%A8%E3%83%AB%E8%A8%98%E5%BF%B5%E8%81%96%E5%A0%82%20%E5%B1%B1%E5%8F%A3%E7%9C%8C"]]},{"type":"food","duration":60,"choices":[["Lunch near Yamaguchi Xavier Memorial Church","Choose a nearby restaurant for lunch.","https://www.google.com/maps/search/?api=1&query=%E3%83%AC%E3%82%B9%E3%83%88%E3%83%A9%E3%83%B3%20Yamaguchi%20Xavier%20Memorial%20Church%20Central%20Yamaguchi"]]},{"type":"sight","duration":75,"choices":[["Yamaguchi Prefectural Museum of Art","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%B1%B1%E5%8F%A3%E7%9C%8C%E7%AB%8B%E7%BE%8E%E8%A1%93%E9%A4%A8%20%E5%B1%B1%E5%8F%A3%E7%9C%8C"]]},{"type":"break","duration":55,"choices":[["Yuda Onsen Yamaguchi","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E6%B9%AF%E7%94%B0%E6%B8%A9%E6%B3%89%20%E5%B1%B1%E5%8F%A3%E7%9C%8C"]]}]},{"id":"tokushima-city","prefecture":"tokushima","label":"Tokushima · Awa Odori","title":"Tokushima · Awa Odori","description":"Four selected places in one area; follow the directions for each transfer.","area":"Central Tokushima","gap":25,"stops":[{"type":"sight","duration":65,"choices":[["Tokushima Station","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%BE%B3%E5%B3%B6%E9%A7%85%20%E5%BE%B3%E5%B3%B6%E7%9C%8C"]]},{"type":"walk","duration":55,"choices":[["Awa Odori Kaikan","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E9%98%BF%E6%B3%A2%E3%81%8A%E3%81%A9%E3%82%8A%E4%BC%9A%E9%A4%A8%20%E5%BE%B3%E5%B3%B6%E7%9C%8C"]]},{"type":"food","duration":60,"choices":[["Lunch near Awa Odori Kaikan","Choose a nearby restaurant for lunch.","https://www.google.com/maps/search/?api=1&query=%E3%83%AC%E3%82%B9%E3%83%88%E3%83%A9%E3%83%B3%20Awa%20Odori%20Kaikan%20Central%20Tokushima"]]},{"type":"sight","duration":75,"choices":[["Bizan Ropeway","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E7%9C%89%E5%B1%B1%E3%83%AD%E3%83%BC%E3%83%97%E3%82%A6%E3%82%A7%E3%82%A4%20%E5%BE%B3%E5%B3%B6%E7%9C%8C"]]},{"type":"break","duration":55,"choices":[["Shinmachigawa Waterfront Park Tokushima","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E6%96%B0%E7%94%BA%E5%B7%9D%E6%B0%B4%E9%9A%9B%E5%85%AC%E5%9C%92%20%E5%BE%B3%E5%B3%B6%E7%9C%8C"]]}]},{"id":"takamatsu","prefecture":"kagawa","label":"Takamatsu · Garden and Port","title":"Takamatsu · Garden and Port","description":"Four selected places in one area; follow the directions for each transfer.","area":"Central Takamatsu","gap":25,"stops":[{"type":"sight","duration":65,"choices":[["Ritsurin Garden Takamatsu","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E6%A0%97%E6%9E%97%E5%85%AC%E5%9C%92%20%E9%A6%99%E5%B7%9D%E7%9C%8C"]]},{"type":"walk","duration":55,"choices":[["Takamatsu Marugamemachi Shopping Street","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E9%AB%98%E6%9D%BE%E4%B8%B8%E4%BA%80%E7%94%BA%E5%95%86%E5%BA%97%E8%A1%97%20%E9%A6%99%E5%B7%9D%E7%9C%8C"]]},{"type":"food","duration":60,"choices":[["Lunch near Takamatsu Marugamemachi Shopping Street","Choose a nearby restaurant for lunch.","https://www.google.com/maps/search/?api=1&query=%E3%83%AC%E3%82%B9%E3%83%88%E3%83%A9%E3%83%B3%20Takamatsu%20Marugamemachi%20Shopping%20Street%20Central%20Takamatsu"]]},{"type":"sight","duration":75,"choices":[["Tamamo Park Takamatsu","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E7%8E%89%E8%97%BB%E5%85%AC%E5%9C%92%20%E9%A6%99%E5%B7%9D%E7%9C%8C"]]},{"type":"break","duration":55,"choices":[["Sunport Takamatsu","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E3%82%B5%E3%83%B3%E3%83%9D%E3%83%BC%E3%83%88%E9%AB%98%E6%9D%BE%20%E9%A6%99%E5%B7%9D%E7%9C%8C"]]}]},{"id":"matsuyama","prefecture":"ehime","label":"Matsuyama · Castle and Dogo","title":"Matsuyama · Castle and Dogo","description":"Four selected places in one area; follow the directions for each transfer.","area":"Central Matsuyama","gap":25,"stops":[{"type":"sight","duration":65,"choices":[["Matsuyama Castle","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E6%9D%BE%E5%B1%B1%E5%9F%8E%20%E6%84%9B%E5%AA%9B%E7%9C%8C"]]},{"type":"walk","duration":55,"choices":[["Ropeway Street Matsuyama","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E3%83%AD%E3%83%BC%E3%83%97%E3%82%A6%E3%82%A7%E3%83%BC%E8%A1%97%20%E6%84%9B%E5%AA%9B%E7%9C%8C"]]},{"type":"food","duration":60,"choices":[["Lunch near Ropeway Street Matsuyama","Choose a nearby restaurant for lunch.","https://www.google.com/maps/search/?api=1&query=%E3%83%AC%E3%82%B9%E3%83%88%E3%83%A9%E3%83%B3%20Ropeway%20Street%20Matsuyama%20Central%20Matsuyama"]]},{"type":"sight","duration":75,"choices":[["Dogo Onsen Honkan","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E9%81%93%E5%BE%8C%E6%B8%A9%E6%B3%89%E6%9C%AC%E9%A4%A8%20%E6%84%9B%E5%AA%9B%E7%9C%8C"]]},{"type":"break","duration":55,"choices":[["Botchan Karakuri Clock","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%9D%8A%E3%81%A3%E3%81%A1%E3%82%83%E3%82%93%E3%82%AB%E3%83%A9%E3%82%AF%E3%83%AA%E6%99%82%E8%A8%88%20%E6%84%9B%E5%AA%9B%E7%9C%8C"]]}]},{"id":"kochi-city","prefecture":"kochi","label":"Kochi · Castle and Market","title":"Kochi · Castle and Market","description":"Four selected places in one area; follow the directions for each transfer.","area":"Central Kochi","gap":25,"stops":[{"type":"sight","duration":65,"choices":[["Kochi Station","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E9%AB%98%E7%9F%A5%E9%A7%85%20%E9%AB%98%E7%9F%A5%E7%9C%8C"]]},{"type":"walk","duration":55,"choices":[["Kochi Castle","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E9%AB%98%E7%9F%A5%E5%9F%8E%20%E9%AB%98%E7%9F%A5%E7%9C%8C"]]},{"type":"food","duration":60,"choices":[["Lunch near Kochi Castle","Choose a nearby restaurant for lunch.","https://www.google.com/maps/search/?api=1&query=%E3%83%AC%E3%82%B9%E3%83%88%E3%83%A9%E3%83%B3%20Kochi%20Castle%20Central%20Kochi"]]},{"type":"sight","duration":75,"choices":[["Hirome Market Kochi","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E3%81%B2%E3%82%8D%E3%82%81%E5%B8%82%E5%A0%B4%20%E9%AB%98%E7%9F%A5%E7%9C%8C"]]},{"type":"break","duration":55,"choices":[["Harimaya Bridge Kochi","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E3%81%AF%E3%82%8A%E3%81%BE%E3%82%84%E6%A9%8B%20%E9%AB%98%E7%9F%A5%E7%9C%8C"]]}]},{"id":"fukuoka-city","prefecture":"fukuoka","label":"Fukuoka · Ohori and Tenjin","title":"Fukuoka · Ohori and Tenjin","description":"Four selected places in one area; follow the directions for each transfer.","area":"Central Fukuoka","gap":25,"stops":[{"type":"sight","duration":65,"choices":[["Ohori Park Fukuoka","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%A4%A7%E6%BF%A0%E5%85%AC%E5%9C%92%20%E7%A6%8F%E5%B2%A1%E7%9C%8C"]]},{"type":"walk","duration":55,"choices":[["Fukuoka Art Museum","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E7%A6%8F%E5%B2%A1%E5%B8%82%E7%BE%8E%E8%A1%93%E9%A4%A8%20%E7%A6%8F%E5%B2%A1%E7%9C%8C"]]},{"type":"food","duration":60,"choices":[["Lunch near Fukuoka Art Museum","Choose a nearby restaurant for lunch.","https://www.google.com/maps/search/?api=1&query=%E3%83%AC%E3%82%B9%E3%83%88%E3%83%A9%E3%83%B3%20Fukuoka%20Art%20Museum%20Central%20Fukuoka"]]},{"type":"sight","duration":75,"choices":[["Fukuoka Castle Ruins","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E7%A6%8F%E5%B2%A1%E5%9F%8E%E8%B7%A1%20%E7%A6%8F%E5%B2%A1%E7%9C%8C"]]},{"type":"break","duration":55,"choices":[["Tenjin Fukuoka","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%A4%A9%E7%A5%9E%20%E7%A6%8F%E5%B2%A1%E7%9C%8C"]]}]},{"id":"dazaifu","prefecture":"fukuoka","label":"Fukuoka · Dazaifu","title":"Fukuoka · Dazaifu","description":"Four selected places in one area; follow the directions for each transfer.","area":"Dazaifu","gap":25,"stops":[{"type":"sight","duration":65,"choices":[["Dazaifu Station","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%A4%AA%E5%AE%B0%E5%BA%9C%E9%A7%85%20%E7%A6%8F%E5%B2%A1%E7%9C%8C"]]},{"type":"walk","duration":55,"choices":[["Dazaifu Tenmangu Approach","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%A4%AA%E5%AE%B0%E5%BA%9C%E5%A4%A9%E6%BA%80%E5%AE%AE%E5%8F%82%E9%81%93%20%E7%A6%8F%E5%B2%A1%E7%9C%8C"]]},{"type":"food","duration":60,"choices":[["Lunch near Dazaifu Tenmangu Approach","Choose a nearby restaurant for lunch.","https://www.google.com/maps/search/?api=1&query=%E3%83%AC%E3%82%B9%E3%83%88%E3%83%A9%E3%83%B3%20Dazaifu%20Tenmangu%20Approach%20Dazaifu"]]},{"type":"sight","duration":75,"choices":[["Dazaifu Tenmangu Shrine","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%A4%AA%E5%AE%B0%E5%BA%9C%E5%A4%A9%E6%BA%80%E5%AE%AE%20%E7%A6%8F%E5%B2%A1%E7%9C%8C"]]},{"type":"break","duration":55,"choices":[["Kyushu National Museum","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E4%B9%9D%E5%B7%9E%E5%9B%BD%E7%AB%8B%E5%8D%9A%E7%89%A9%E9%A4%A8%20%E7%A6%8F%E5%B2%A1%E7%9C%8C"]]}]},{"id":"saga-city","prefecture":"saga","label":"Saga · Castle Town","title":"Saga · Castle Town","description":"Four selected places in one area; follow the directions for each transfer.","area":"Central Saga","gap":25,"stops":[{"type":"sight","duration":65,"choices":[["Saga Station","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E4%BD%90%E8%B3%80%E9%A7%85%20%E4%BD%90%E8%B3%80%E7%9C%8C"]]},{"type":"walk","duration":55,"choices":[["Saga Castle History Museum","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E4%BD%90%E8%B3%80%E5%9F%8E%E6%9C%AC%E4%B8%B8%E6%AD%B4%E5%8F%B2%E9%A4%A8%20%E4%BD%90%E8%B3%80%E7%9C%8C"]]},{"type":"food","duration":60,"choices":[["Lunch near Saga Castle History Museum","Choose a nearby restaurant for lunch.","https://www.google.com/maps/search/?api=1&query=%E3%83%AC%E3%82%B9%E3%83%88%E3%83%A9%E3%83%B3%20Saga%20Castle%20History%20Museum%20Central%20Saga"]]},{"type":"sight","duration":75,"choices":[["Saga Prefectural Museum","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E4%BD%90%E8%B3%80%E7%9C%8C%E7%AB%8B%E5%8D%9A%E7%89%A9%E9%A4%A8%20%E4%BD%90%E8%B3%80%E7%9C%8C"]]},{"type":"break","duration":55,"choices":[["Chokokan Saga","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%BE%B4%E5%8F%A4%E9%A4%A8%20%E4%BD%90%E8%B3%80%E7%9C%8C"]]}]},{"id":"nagasaki-city","prefecture":"nagasaki","label":"Nagasaki · Peace Memorials","title":"Nagasaki · Peace Memorials","description":"Four selected places in one area; follow the directions for each transfer.","area":"Urakami Nagasaki","gap":25,"stops":[{"type":"sight","duration":65,"choices":[["Peace Park Nagasaki","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%B9%B3%E5%92%8C%E5%85%AC%E5%9C%92%20%E9%95%B7%E5%B4%8E%E7%9C%8C"]]},{"type":"walk","duration":55,"choices":[["Nagasaki Atomic Bomb Museum","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E9%95%B7%E5%B4%8E%E5%8E%9F%E7%88%86%E8%B3%87%E6%96%99%E9%A4%A8%20%E9%95%B7%E5%B4%8E%E7%9C%8C"]]},{"type":"food","duration":60,"choices":[["Lunch near Nagasaki Atomic Bomb Museum","Choose a nearby restaurant for lunch.","https://www.google.com/maps/search/?api=1&query=%E3%83%AC%E3%82%B9%E3%83%88%E3%83%A9%E3%83%B3%20Nagasaki%20Atomic%20Bomb%20Museum%20Urakami%20Nagasaki"]]},{"type":"sight","duration":75,"choices":[["Atomic Bomb Hypocenter Park Nagasaki","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%8E%9F%E7%88%86%E8%90%BD%E4%B8%8B%E4%B8%AD%E5%BF%83%E5%9C%B0%E5%85%AC%E5%9C%92%20%E9%95%B7%E5%B4%8E%E7%9C%8C"]]},{"type":"break","duration":55,"choices":[["Urakami Cathedral Nagasaki","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E6%B5%A6%E4%B8%8A%E5%A4%A9%E4%B8%BB%E5%A0%82%20%E9%95%B7%E5%B4%8E%E7%9C%8C"]]}]},{"id":"kumamoto-city","prefecture":"kumamoto","label":"Kumamoto · Castle and Garden","title":"Kumamoto · Castle and Garden","description":"Four selected places in one area; follow the directions for each transfer.","area":"Central Kumamoto","gap":25,"stops":[{"type":"sight","duration":65,"choices":[["Kumamoto Castle","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E7%86%8A%E6%9C%AC%E5%9F%8E%20%E7%86%8A%E6%9C%AC%E7%9C%8C"]]},{"type":"walk","duration":55,"choices":[["Sakura no Baba Josaien","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E6%A1%9C%E3%81%AE%E9%A6%AC%E5%A0%B4%20%E5%9F%8E%E5%BD%A9%E8%8B%91%20%E7%86%8A%E6%9C%AC%E7%9C%8C"]]},{"type":"food","duration":60,"choices":[["Lunch near Sakura no Baba Josaien","Choose a nearby restaurant for lunch.","https://www.google.com/maps/search/?api=1&query=%E3%83%AC%E3%82%B9%E3%83%88%E3%83%A9%E3%83%B3%20Sakura%20no%20Baba%20Josaien%20Central%20Kumamoto"]]},{"type":"sight","duration":75,"choices":[["Shimotori Arcade Kumamoto","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E4%B8%8B%E9%80%9A%E3%82%A2%E3%83%BC%E3%82%B1%E3%83%BC%E3%83%89%20%E7%86%8A%E6%9C%AC%E7%9C%8C"]]},{"type":"break","duration":55,"choices":[["Suizenji Jojuen Garden","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E6%B0%B4%E5%89%8D%E5%AF%BA%E6%88%90%E8%B6%A3%E5%9C%92%20%E7%86%8A%E6%9C%AC%E7%9C%8C"]]}]},{"id":"beppu","prefecture":"oita","label":"Beppu · Onsen Town","title":"Beppu · Onsen Town","description":"Four selected places in one area; follow the directions for each transfer.","area":"Central Beppu","gap":25,"stops":[{"type":"sight","duration":65,"choices":[["Beppu Station","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%88%A5%E5%BA%9C%E9%A7%85%20%E5%A4%A7%E5%88%86%E7%9C%8C"]]},{"type":"walk","duration":55,"choices":[["Takegawara Onsen Beppu","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E7%AB%B9%E7%93%A6%E6%B8%A9%E6%B3%89%20%E5%A4%A7%E5%88%86%E7%9C%8C"]]},{"type":"food","duration":60,"choices":[["Lunch near Takegawara Onsen Beppu","Choose a nearby restaurant for lunch.","https://www.google.com/maps/search/?api=1&query=%E3%83%AC%E3%82%B9%E3%83%88%E3%83%A9%E3%83%B3%20Takegawara%20Onsen%20Beppu%20Central%20Beppu"]]},{"type":"sight","duration":75,"choices":[["Beppu Tower","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%88%A5%E5%BA%9C%E3%82%BF%E3%83%AF%E3%83%BC%20%E5%A4%A7%E5%88%86%E7%9C%8C"]]},{"type":"break","duration":55,"choices":[["Beppu Park","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%88%A5%E5%BA%9C%E5%85%AC%E5%9C%92%20%E5%A4%A7%E5%88%86%E7%9C%8C"]]}]},{"id":"aoshima","prefecture":"miyazaki","label":"Miyazaki · Aoshima","title":"Miyazaki · Aoshima","description":"Four selected places in one area; follow the directions for each transfer.","area":"Aoshima Miyazaki","gap":25,"stops":[{"type":"sight","duration":65,"choices":[["Aoshima Station Miyazaki","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E9%9D%92%E5%B3%B6%E9%A7%85%20%E5%AE%AE%E5%B4%8E%E7%9C%8C"]]},{"type":"walk","duration":55,"choices":[["Aoshima Beach Miyazaki","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E9%9D%92%E5%B3%B6%E3%83%93%E3%83%BC%E3%83%81%20%E5%AE%AE%E5%B4%8E%E7%9C%8C"]]},{"type":"food","duration":60,"choices":[["Lunch near Aoshima Beach Miyazaki","Choose a nearby restaurant for lunch.","https://www.google.com/maps/search/?api=1&query=%E3%83%AC%E3%82%B9%E3%83%88%E3%83%A9%E3%83%B3%20Aoshima%20Beach%20Miyazaki%20Aoshima%20Miyazaki"]]},{"type":"sight","duration":75,"choices":[["Aoshima Shrine","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E9%9D%92%E5%B3%B6%E7%A5%9E%E7%A4%BE%20%E5%AE%AE%E5%B4%8E%E7%9C%8C"]]},{"type":"break","duration":55,"choices":[["Aoshima Botanical Garden","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%AE%AE%E4%BA%A4%E3%83%9C%E3%82%BF%E3%83%8B%E3%83%83%E3%82%AF%E3%82%AC%E3%83%BC%E3%83%87%E3%83%B3%E9%9D%92%E5%B3%B6%20%E5%AE%AE%E5%B4%8E%E7%9C%8C"]]}]},{"id":"kagoshima-city","prefecture":"kagoshima","label":"Kagoshima · City and Bay","title":"Kagoshima · City and Bay","description":"Four selected places in one area; follow the directions for each transfer.","area":"Central Kagoshima","gap":25,"stops":[{"type":"sight","duration":65,"choices":[["Kagoshima Chuo Station","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E9%B9%BF%E5%85%90%E5%B3%B6%E4%B8%AD%E5%A4%AE%E9%A7%85%20%E9%B9%BF%E5%85%90%E5%B3%B6%E7%9C%8C"]]},{"type":"walk","duration":55,"choices":[["Tenmonkan Kagoshima","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%A4%A9%E6%96%87%E9%A4%A8%20%E9%B9%BF%E5%85%90%E5%B3%B6%E7%9C%8C"]]},{"type":"food","duration":60,"choices":[["Lunch near Tenmonkan Kagoshima","Choose a nearby restaurant for lunch.","https://www.google.com/maps/search/?api=1&query=%E3%83%AC%E3%82%B9%E3%83%88%E3%83%A9%E3%83%B3%20Tenmonkan%20Kagoshima%20Central%20Kagoshima"]]},{"type":"sight","duration":75,"choices":[["Shiroyama Observatory Kagoshima","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%9F%8E%E5%B1%B1%E5%B1%95%E6%9C%9B%E5%8F%B0%20%E9%B9%BF%E5%85%90%E5%B3%B6%E7%9C%8C"]]},{"type":"break","duration":55,"choices":[["Kagoshima City Aquarium","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E3%81%8B%E3%81%94%E3%81%97%E3%81%BE%E6%B0%B4%E6%97%8F%E9%A4%A8%20%E9%B9%BF%E5%85%90%E5%B3%B6%E7%9C%8C"]]}]},{"id":"naha","prefecture":"okinawa","label":"Okinawa · Naha","title":"Okinawa · Naha","description":"Four selected places in one area; follow the directions for each transfer.","area":"Central Naha","gap":25,"stops":[{"type":"sight","duration":65,"choices":[["Kokusai Dori Naha","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%9B%BD%E9%9A%9B%E9%80%9A%E3%82%8A%20%E6%B2%96%E7%B8%84%E7%9C%8C"]]},{"type":"walk","duration":55,"choices":[["Makishi Public Market Naha","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E7%AC%AC%E4%B8%80%E7%89%A7%E5%BF%97%E5%85%AC%E8%A8%AD%E5%B8%82%E5%A0%B4%20%E6%B2%96%E7%B8%84%E7%9C%8C"]]},{"type":"food","duration":60,"choices":[["Lunch near Makishi Public Market Naha","Choose a nearby restaurant for lunch.","https://www.google.com/maps/search/?api=1&query=%E3%83%AC%E3%82%B9%E3%83%88%E3%83%A9%E3%83%B3%20Makishi%20Public%20Market%20Naha%20Central%20Naha"]]},{"type":"sight","duration":75,"choices":[["Tsuboya Pottery Street Naha","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%A3%BA%E5%B1%8B%E3%82%84%E3%81%A1%E3%82%80%E3%82%93%E9%80%9A%E3%82%8A%20%E6%B2%96%E7%B8%84%E7%9C%8C"]]},{"type":"break","duration":55,"choices":[["Fukushuen Garden Naha","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E7%A6%8F%E5%B7%9E%E5%9C%92%20%E6%B2%96%E7%B8%84%E7%9C%8C"]]}]},{"id":"shuri","prefecture":"okinawa","label":"Okinawa · Shuri","title":"Okinawa · Shuri","description":"Four selected places in one area; follow the directions for each transfer.","area":"Shuri Naha","gap":25,"stops":[{"type":"sight","duration":65,"choices":[["Shuri Station Naha","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E9%A6%96%E9%87%8C%E9%A7%85%20%E6%B2%96%E7%B8%84%E7%9C%8C"]]},{"type":"walk","duration":55,"choices":[["Shuri Castle Park","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E9%A6%96%E9%87%8C%E5%9F%8E%E5%85%AC%E5%9C%92%20%E6%B2%96%E7%B8%84%E7%9C%8C"]]},{"type":"food","duration":60,"choices":[["Lunch near Shuri Castle Park","Choose a nearby restaurant for lunch.","https://www.google.com/maps/search/?api=1&query=%E3%83%AC%E3%82%B9%E3%83%88%E3%83%A9%E3%83%B3%20Shuri%20Castle%20Park%20Shuri%20Naha"]]},{"type":"sight","duration":75,"choices":[["Tamaudun Shuri","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E7%8E%89%E9%99%B5%20%E6%B2%96%E7%B8%84%E7%9C%8C"]]},{"type":"break","duration":55,"choices":[["Kinjo Stone Paved Road Shuri","Check local access and opening information before visiting.","https://www.google.com/maps/search/?api=1&query=%E9%87%91%E5%9F%8E%E7%94%BA%E7%9F%B3%E7%95%B3%E9%81%93%20%E6%B2%96%E7%B8%84%E7%9C%8C"]]}]}]
+"""#
+        guard let value = try? JSONDecoder().decode([DayRoute].self, from: Data(json.utf8)) else {
+            preconditionFailure("Invalid nationwide route catalog")
+        }
+        return value
+    }()
+    static let prefectures: [PrefectureOption] = {
+        let json = #"""
+[{"id":"hokkaido","ja":"北海道","en":"Hokkaido","region":"hokkaido"},{"id":"aomori","ja":"青森県","en":"Aomori","region":"tohoku"},{"id":"iwate","ja":"岩手県","en":"Iwate","region":"tohoku"},{"id":"miyagi","ja":"宮城県","en":"Miyagi","region":"tohoku"},{"id":"akita","ja":"秋田県","en":"Akita","region":"tohoku"},{"id":"yamagata","ja":"山形県","en":"Yamagata","region":"tohoku"},{"id":"fukushima","ja":"福島県","en":"Fukushima","region":"tohoku"},{"id":"ibaraki","ja":"茨城県","en":"Ibaraki","region":"kanto"},{"id":"tochigi","ja":"栃木県","en":"Tochigi","region":"kanto"},{"id":"gunma","ja":"群馬県","en":"Gunma","region":"kanto"},{"id":"saitama","ja":"埼玉県","en":"Saitama","region":"kanto"},{"id":"chiba","ja":"千葉県","en":"Chiba","region":"kanto"},{"id":"tokyo","ja":"東京都","en":"Tokyo","region":"kanto"},{"id":"kanagawa","ja":"神奈川県","en":"Kanagawa","region":"kanto"},{"id":"niigata","ja":"新潟県","en":"Niigata","region":"hokuriku"},{"id":"toyama","ja":"富山県","en":"Toyama","region":"hokuriku"},{"id":"ishikawa","ja":"石川県","en":"Ishikawa","region":"hokuriku"},{"id":"fukui","ja":"福井県","en":"Fukui","region":"hokuriku"},{"id":"yamanashi","ja":"山梨県","en":"Yamanashi","region":"hokuriku"},{"id":"nagano","ja":"長野県","en":"Nagano","region":"hokuriku"},{"id":"gifu","ja":"岐阜県","en":"Gifu","region":"tokai"},{"id":"shizuoka","ja":"静岡県","en":"Shizuoka","region":"tokai"},{"id":"aichi","ja":"愛知県","en":"Aichi","region":"tokai"},{"id":"mie","ja":"三重県","en":"Mie","region":"tokai"},{"id":"shiga","ja":"滋賀県","en":"Shiga","region":"kansai"},{"id":"kyoto","ja":"京都府","en":"Kyoto","region":"kansai"},{"id":"osaka","ja":"大阪府","en":"Osaka","region":"kansai"},{"id":"hyogo","ja":"兵庫県","en":"Hyogo","region":"kansai"},{"id":"nara","ja":"奈良県","en":"Nara","region":"kansai"},{"id":"wakayama","ja":"和歌山県","en":"Wakayama","region":"kansai"},{"id":"tottori","ja":"鳥取県","en":"Tottori","region":"chugoku"},{"id":"shimane","ja":"島根県","en":"Shimane","region":"chugoku"},{"id":"okayama","ja":"岡山県","en":"Okayama","region":"chugoku"},{"id":"hiroshima","ja":"広島県","en":"Hiroshima","region":"chugoku"},{"id":"yamaguchi","ja":"山口県","en":"Yamaguchi","region":"chugoku"},{"id":"tokushima","ja":"徳島県","en":"Tokushima","region":"shikoku"},{"id":"kagawa","ja":"香川県","en":"Kagawa","region":"shikoku"},{"id":"ehime","ja":"愛媛県","en":"Ehime","region":"shikoku"},{"id":"kochi","ja":"高知県","en":"Kochi","region":"shikoku"},{"id":"fukuoka","ja":"福岡県","en":"Fukuoka","region":"kyushu"},{"id":"saga","ja":"佐賀県","en":"Saga","region":"kyushu"},{"id":"nagasaki","ja":"長崎県","en":"Nagasaki","region":"kyushu"},{"id":"kumamoto","ja":"熊本県","en":"Kumamoto","region":"kyushu"},{"id":"oita","ja":"大分県","en":"Oita","region":"kyushu"},{"id":"miyazaki","ja":"宮崎県","en":"Miyazaki","region":"kyushu"},{"id":"kagoshima","ja":"鹿児島県","en":"Kagoshima","region":"kyushu"},{"id":"okinawa","ja":"沖縄県","en":"Okinawa","region":"okinawa"}]
+"""#
+        return (try? JSONDecoder().decode([PrefectureOption].self, from: Data(json.utf8))) ?? []
+    }()
+    static let regions: [RegionOption] = [
+        RegionOption(id: "hokkaido", japanese: "北海道", english: "Hokkaido"),
+        RegionOption(id: "tohoku", japanese: "東北", english: "Tohoku"),
+        RegionOption(id: "kanto", japanese: "関東", english: "Kanto"),
+        RegionOption(id: "hokuriku", japanese: "北陸・甲信越", english: "Hokuriku & Koshinetsu"),
+        RegionOption(id: "tokai", japanese: "東海", english: "Tokai"),
+        RegionOption(id: "kansai", japanese: "関西", english: "Kansai"),
+        RegionOption(id: "chugoku", japanese: "中国", english: "Chugoku"),
+        RegionOption(id: "shikoku", japanese: "四国", english: "Shikoku"),
+        RegionOption(id: "kyushu", japanese: "九州", english: "Kyushu"),
+        RegionOption(id: "okinawa", japanese: "沖縄", english: "Okinawa")
+    ]
+    static let existingPrefectures: [String: String] = [
+        "asakusa": "tokyo",
+        "ueno": "tokyo",
+        "kyoto": "kyoto",
+        "osaka": "osaka",
+        "nara": "nara",
+        "hiroshima": "hiroshima"
+    ]
+    static let japaneseLabels: [String: String] = [
+        "sapporo": "札幌・大通",
+        "hakodate": "函館・港と坂道",
+        "aomori-city": "青森・港とねぶた",
+        "morioka": "盛岡・城跡と街歩き",
+        "sendai": "仙台・青葉山と街",
+        "akita-city": "秋田・千秋公園",
+        "yamagata-city": "山形・城跡と文翔館",
+        "aizu": "会津・鶴ヶ城",
+        "mito": "水戸・偕楽園",
+        "nikko": "日光・社寺",
+        "kusatsu": "草津・温泉街",
+        "kawagoe": "川越・小江戸",
+        "narita": "成田・参道と公園",
+        "shibuya": "渋谷・原宿",
+        "yokohama": "横浜・港散策",
+        "niigata-city": "新潟・港と信濃川",
+        "toyama-city": "富山・水辺とガラス",
+        "kanazawa": "金沢・庭園と茶屋街",
+        "fukui-city": "福井・城跡と庭園",
+        "kofu": "甲府・城跡と神社",
+        "nagano-city": "長野・善光寺",
+        "takayama": "高山・古い町並",
+        "shizuoka-city": "静岡・駿府の街",
+        "nagoya-castle": "名古屋・城と栄",
+        "nagoya-atsuta": "名古屋・熱田の歴史",
+        "ise": "伊勢・神宮と門前町",
+        "hikone": "彦根・城下町",
+        "arashiyama": "京都・嵐山",
+        "fushimi": "京都・伏見と東山",
+        "osaka-castle": "大阪・城と中之島",
+        "shinsekai": "大阪・新世界と天王寺",
+        "kobe": "神戸・港と街",
+        "ikaruga": "奈良・斑鳩",
+        "wakayama-city": "和歌山・城と街",
+        "tottori-dunes": "鳥取・砂丘",
+        "matsue": "松江・城と湖",
+        "okayama-city": "岡山・後楽園",
+        "yamaguchi-city": "山口・文化と湯田",
+        "tokushima-city": "徳島・阿波おどり",
+        "takamatsu": "高松・庭園と港",
+        "matsuyama": "松山・城と道後",
+        "kochi-city": "高知・城と市場",
+        "fukuoka-city": "福岡・大濠と天神",
+        "dazaifu": "福岡・太宰府",
+        "saga-city": "佐賀・城下町",
+        "nagasaki-city": "長崎・平和を巡る",
+        "kumamoto-city": "熊本・城と庭",
+        "beppu": "別府・温泉街",
+        "aoshima": "宮崎・青島",
+        "kagoshima-city": "鹿児島・城山と湾",
+        "naha": "沖縄・那覇の街",
+        "shuri": "沖縄・首里の歴史"
+    ]
+    static let japaneseAreas: [String: String] = [
+        "sapporo": "札幌中心部",
+        "hakodate": "函館元町",
+        "aomori-city": "青森駅周辺",
+        "morioka": "盛岡中心部",
+        "sendai": "仙台中心部",
+        "akita-city": "秋田駅周辺",
+        "yamagata-city": "山形中心部",
+        "aizu": "会津若松",
+        "mito": "水戸中心部",
+        "nikko": "日光社寺周辺",
+        "kusatsu": "草津温泉",
+        "kawagoe": "川越中心部",
+        "narita": "成田山周辺",
+        "shibuya": "原宿・渋谷",
+        "yokohama": "みなとみらい",
+        "niigata-city": "新潟中心部",
+        "toyama-city": "富山中心部",
+        "kanazawa": "金沢中心部",
+        "fukui-city": "福井中心部",
+        "kofu": "甲府中心部",
+        "nagano-city": "長野市中心部",
+        "takayama": "飛騨高山",
+        "shizuoka-city": "静岡中心部",
+        "nagoya-castle": "名古屋城周辺",
+        "nagoya-atsuta": "熱田神宮周辺",
+        "ise": "伊勢",
+        "hikone": "彦根城周辺",
+        "arashiyama": "嵐山",
+        "fushimi": "伏見稲荷",
+        "osaka-castle": "大阪城周辺",
+        "shinsekai": "天王寺・新世界",
+        "kobe": "神戸港周辺",
+        "ikaruga": "斑鳩",
+        "wakayama-city": "和歌山城周辺",
+        "tottori-dunes": "鳥取砂丘",
+        "matsue": "松江中心部",
+        "okayama-city": "岡山中心部",
+        "yamaguchi-city": "山口市中心部",
+        "tokushima-city": "徳島中心部",
+        "takamatsu": "高松中心部",
+        "matsuyama": "松山中心部",
+        "kochi-city": "高知中心部",
+        "fukuoka-city": "福岡中心部",
+        "dazaifu": "太宰府",
+        "saga-city": "佐賀中心部",
+        "nagasaki-city": "長崎・浦上",
+        "kumamoto-city": "熊本中心部",
+        "beppu": "別府中心部",
+        "aoshima": "青島",
+        "kagoshima-city": "鹿児島中心部",
+        "naha": "那覇中心部",
+        "shuri": "那覇・首里"
+    ]
+    static let japanesePlaces: [String: String] = [
+        "Odori Park": "大通公園",
+        "Sapporo TV Tower": "さっぽろテレビ塔",
+        "Sapporo Clock Tower": "札幌市時計台",
+        "Tanukikoji Shopping Street": "狸小路商店街",
+        "Hakodate Morning Market": "函館朝市",
+        "Kanemori Red Brick Warehouses": "金森赤レンガ倉庫",
+        "Hachimanzaka Slope": "八幡坂",
+        "Old Public Hall of Hakodate Ward": "旧函館区公会堂",
+        "Aomori Station": "青森駅",
+        "Nebuta Museum WA RASSE": "ねぶたの家 ワ・ラッセ",
+        "A-FACTORY Aomori": "A-FACTORY",
+        "Aomori ASPAM": "青森県観光物産館アスパム",
+        "Morioka Castle Ruins Park": "盛岡城跡公園",
+        "Morioka History and Culture Museum": "もりおか歴史文化館",
+        "Sakurayama Shrine Morioka": "桜山神社",
+        "Iwate Bank Red Brick Building": "岩手銀行赤レンガ館",
+        "Sendai Station": "仙台駅",
+        "Zuihoden Sendai": "瑞鳳殿",
+        "Sendai Castle Ruins": "仙台城跡",
+        "Jozenji-dori Avenue": "定禅寺通",
+        "Akita Station": "秋田駅",
+        "Senshu Park": "千秋公園",
+        "Akita Museum of Art": "秋田県立美術館",
+        "Akita Citizen Market": "秋田市民市場",
+        "Yamagata Station": "山形駅",
+        "Kajo Park Yamagata": "霞城公園",
+        "Yamagata Museum of Art": "山形美術館",
+        "Bunshokan Yamagata": "文翔館",
+        "Aizuwakamatsu Station": "会津若松駅",
+        "Tsuruga Castle Aizu": "鶴ヶ城",
+        "Oyakuen Garden Aizu": "御薬園",
+        "Nanokamachi Street Aizu": "七日町通り",
+        "Mito Station": "水戸駅",
+        "Kodokan Mito": "弘道館",
+        "Kairakuen Garden": "偕楽園",
+        "Lake Senba": "千波湖",
+        "Shinkyo Bridge Nikko": "神橋",
+        "Rinnoji Temple Nikko": "輪王寺",
+        "Nikko Toshogu Shrine": "日光東照宮",
+        "Nikko Futarasan Shrine": "日光二荒山神社",
+        "Kusatsu Onsen Bus Terminal": "草津温泉バスターミナル",
+        "Yubatake Kusatsu": "湯畑",
+        "Netsunoyu Kusatsu": "熱乃湯",
+        "Sainokawara Park Kusatsu": "西の河原公園",
+        "Kawagoe Ichibangai": "川越一番街",
+        "Toki no Kane Kawagoe": "時の鐘",
+        "Kashiya Yokocho": "菓子屋横丁",
+        "Kawagoe Hikawa Shrine": "川越氷川神社",
+        "Narita Station": "成田駅",
+        "Naritasan Omotesando": "成田山表参道",
+        "Naritasan Shinshoji Temple": "成田山新勝寺",
+        "Naritasan Park": "成田山公園",
+        "Meiji Jingu Shrine": "明治神宮",
+        "Takeshita Street": "竹下通り",
+        "Omotesando Tokyo": "表参道",
+        "Hachiko Square Shibuya": "ハチ公前広場",
+        "Yokohama Red Brick Warehouse": "横浜赤レンガ倉庫",
+        "Osanbashi Pier Yokohama": "大さん橋",
+        "Yamashita Park": "山下公園",
+        "Yokohama Chinatown": "横浜中華街",
+        "Niigata Station": "新潟駅",
+        "Bandai Bridge Niigata": "萬代橋",
+        "Pier Bandai": "ピアBandai",
+        "Toki Messe Niigata": "朱鷺メッセ",
+        "Toyama Station": "富山駅",
+        "Kansui Park Toyama": "富岩運河環水公園",
+        "Toyama Glass Art Museum": "富山市ガラス美術館",
+        "Toyama Castle Park": "富山城址公園",
+        "Omicho Market Kanazawa": "近江町市場",
+        "Kanazawa Castle Park": "金沢城公園",
+        "Kenrokuen Garden": "兼六園",
+        "Higashi Chaya District": "ひがし茶屋街",
+        "Fukui Station": "福井駅",
+        "Fukui Castle Ruins": "福井城址",
+        "Fukui City History Museum": "福井市立郷土歴史博物館",
+        "Yokokan Garden Fukui": "養浩館庭園",
+        "Kofu Station": "甲府駅",
+        "Maizuru Castle Park Kofu": "舞鶴城公園",
+        "Fujimura Memorial Hall Kofu": "甲府市藤村記念館",
+        "Takeda Shrine Kofu": "武田神社",
+        "Nagano Station": "長野駅",
+        "Zenkoji Approach": "善光寺表参道",
+        "Zenkoji Temple Nagano": "善光寺",
+        "Nagano Prefectural Art Museum": "長野県立美術館",
+        "Takayama Station": "高山駅",
+        "Miyagawa Morning Market": "宮川朝市",
+        "Takayama Jinya": "高山陣屋",
+        "Takayama Old Town": "古い町並",
+        "Shizuoka Station": "静岡駅",
+        "Sumpu Castle Park": "駿府城公園",
+        "Shizuoka City Museum of History": "静岡市歴史博物館",
+        "Aoba Symbol Road Shizuoka": "青葉シンボルロード",
+        "Nagoya Castle": "名古屋城",
+        "Meijo Park": "名城公園",
+        "Hisaya Odori Park": "久屋大通公園",
+        "Oasis 21 Nagoya": "オアシス21",
+        "Atsuta Jingu Shrine": "熱田神宮",
+        "Atsuta Jingu Treasure Hall": "熱田神宮宝物館",
+        "Shirotori Garden Nagoya": "白鳥庭園",
+        "Miya no Watashi Park Nagoya": "宮の渡し公園",
+        "Iseshi Station": "伊勢市駅",
+        "Ise Jingu Geku": "伊勢神宮 外宮",
+        "Sarutahiko Shrine Ise": "猿田彦神社",
+        "Okage Yokocho Ise": "おかげ横丁",
+        "Hikone Station": "彦根駅",
+        "Hikone Castle": "彦根城",
+        "Genkyuen Garden Hikone": "玄宮園",
+        "Yume Kyobashi Castle Road": "夢京橋キャッスルロード",
+        "Togetsukyo Bridge Kyoto": "渡月橋",
+        "Tenryuji Temple Kyoto": "天龍寺",
+        "Arashiyama Bamboo Grove": "嵯峨野竹林の小径",
+        "Nonomiya Shrine Kyoto": "野宮神社",
+        "Fushimi Inari Station": "伏見稲荷駅",
+        "Fushimi Inari Taisha": "伏見稲荷大社",
+        "Tofukuji Temple Kyoto": "東福寺",
+        "Sanjusangendo Temple Kyoto": "三十三間堂",
+        "Osaka Castle Park": "大阪城公園",
+        "Osaka Castle": "大阪城",
+        "Osaka Museum of History": "大阪歴史博物館",
+        "Nakanoshima Park Osaka": "中之島公園",
+        "Tennoji Station": "天王寺駅",
+        "Shitennoji Temple Osaka": "四天王寺",
+        "Tennoji Park Osaka": "天王寺公園",
+        "Tsutenkaku Tower Osaka": "通天閣",
+        "Kobe Harborland": "神戸ハーバーランド",
+        "Meriken Park Kobe": "メリケンパーク",
+        "Kobe Port Tower": "神戸ポートタワー",
+        "Nankinmachi Kobe": "南京町",
+        "Horyuji Station": "法隆寺駅",
+        "Horyuji Temple": "法隆寺",
+        "Chuguji Temple Nara": "中宮寺",
+        "Hokiji Temple Nara": "法起寺",
+        "Wakayamashi Station": "和歌山市駅",
+        "Wakayama Castle": "和歌山城",
+        "Momijidani Garden Wakayama": "紅葉渓庭園",
+        "Wakayama Museum of Modern Art": "和歌山県立近代美術館",
+        "Tottori Sand Dunes Visitor Center": "鳥取砂丘ビジターセンター",
+        "Tottori Sand Dunes": "鳥取砂丘",
+        "The Sand Museum Tottori": "砂の美術館",
+        "Sakyu Center View Hill Tottori": "砂丘センター見晴らしの丘",
+        "Matsue Castle": "松江城",
+        "Shiomi Nawate Street Matsue": "塩見縄手",
+        "Lafcadio Hearn Memorial Museum Matsue": "小泉八雲記念館",
+        "Shimane Art Museum": "島根県立美術館",
+        "Okayama Station": "岡山駅",
+        "Okayama Castle": "岡山城",
+        "Okayama Korakuen Garden": "岡山後楽園",
+        "Okayama Prefectural Museum of Art": "岡山県立美術館",
+        "Yamaguchi Station": "山口駅",
+        "Yamaguchi Xavier Memorial Church": "山口サビエル記念聖堂",
+        "Yamaguchi Prefectural Museum of Art": "山口県立美術館",
+        "Yuda Onsen Yamaguchi": "湯田温泉",
+        "Tokushima Station": "徳島駅",
+        "Awa Odori Kaikan": "阿波おどり会館",
+        "Bizan Ropeway": "眉山ロープウェイ",
+        "Shinmachigawa Waterfront Park Tokushima": "新町川水際公園",
+        "Ritsurin Garden Takamatsu": "栗林公園",
+        "Takamatsu Marugamemachi Shopping Street": "高松丸亀町商店街",
+        "Tamamo Park Takamatsu": "玉藻公園",
+        "Sunport Takamatsu": "サンポート高松",
+        "Matsuyama Castle": "松山城",
+        "Ropeway Street Matsuyama": "ロープウェー街",
+        "Dogo Onsen Honkan": "道後温泉本館",
+        "Botchan Karakuri Clock": "坊っちゃんカラクリ時計",
+        "Kochi Station": "高知駅",
+        "Kochi Castle": "高知城",
+        "Hirome Market Kochi": "ひろめ市場",
+        "Harimaya Bridge Kochi": "はりまや橋",
+        "Ohori Park Fukuoka": "大濠公園",
+        "Fukuoka Art Museum": "福岡市美術館",
+        "Fukuoka Castle Ruins": "福岡城跡",
+        "Tenjin Fukuoka": "天神",
+        "Dazaifu Station": "太宰府駅",
+        "Dazaifu Tenmangu Approach": "太宰府天満宮参道",
+        "Dazaifu Tenmangu Shrine": "太宰府天満宮",
+        "Kyushu National Museum": "九州国立博物館",
+        "Saga Station": "佐賀駅",
+        "Saga Castle History Museum": "佐賀城本丸歴史館",
+        "Saga Prefectural Museum": "佐賀県立博物館",
+        "Chokokan Saga": "徴古館",
+        "Peace Park Nagasaki": "平和公園",
+        "Nagasaki Atomic Bomb Museum": "長崎原爆資料館",
+        "Atomic Bomb Hypocenter Park Nagasaki": "原爆落下中心地公園",
+        "Urakami Cathedral Nagasaki": "浦上天主堂",
+        "Kumamoto Castle": "熊本城",
+        "Sakura no Baba Josaien": "桜の馬場 城彩苑",
+        "Shimotori Arcade Kumamoto": "下通アーケード",
+        "Suizenji Jojuen Garden": "水前寺成趣園",
+        "Beppu Station": "別府駅",
+        "Takegawara Onsen Beppu": "竹瓦温泉",
+        "Beppu Tower": "別府タワー",
+        "Beppu Park": "別府公園",
+        "Aoshima Station Miyazaki": "青島駅",
+        "Aoshima Beach Miyazaki": "青島ビーチ",
+        "Aoshima Shrine": "青島神社",
+        "Aoshima Botanical Garden": "宮交ボタニックガーデン青島",
+        "Kagoshima Chuo Station": "鹿児島中央駅",
+        "Tenmonkan Kagoshima": "天文館",
+        "Shiroyama Observatory Kagoshima": "城山展望台",
+        "Kagoshima City Aquarium": "かごしま水族館",
+        "Kokusai Dori Naha": "国際通り",
+        "Makishi Public Market Naha": "第一牧志公設市場",
+        "Tsuboya Pottery Street Naha": "壺屋やちむん通り",
+        "Fukushuen Garden Naha": "福州園",
+        "Shuri Station Naha": "首里駅",
+        "Shuri Castle Park": "首里城公園",
+        "Tamaudun Shuri": "玉陵",
+        "Kinjo Stone Paved Road Shuri": "金城町石畳道"
+    ]
+    static let summary = [
+        "同じエリアの観光スポットを順番に巡ります。移動時間は経路検索で確認してください。",
+        "같은 지역의 관광지를 차례로 둘러봅니다. 실제 이동 시간은 길찾기에서 확인하세요.",
+        "依次游览同一区域的景点。请用路线搜索确认实际交通时间。",
+        "Explore nearby sights in sequence. Check actual transfer times in directions.",
+        "เที่ยวสถานที่ใกล้กันตามลำดับ ตรวจสอบเวลาเดินทางจริงในแผนที่"
+    ]
+    static let venueDetails = [
+        "営業時間・入場方法を確認してから訪れてください。",
+        "방문 전에 운영 시간과 입장 방법을 확인하세요.",
+        "请在出发前确认营业时间和入场方式。",
+        "Check hours and access before visiting.",
+        "ตรวจสอบเวลาเปิดและวิธีเข้าชมก่อนเดินทาง"
+    ]
+}
+
+private struct HotelSuggestion: Codable, Identifiable {
+    let id: String
+    let name: String
+    let address: String
+    let latitude: Double
+    let longitude: Double
+    let phone: String?
+    let website: String?
+    let distance: Double
+    var query: String { "\(latitude),\(longitude)" }
 }
