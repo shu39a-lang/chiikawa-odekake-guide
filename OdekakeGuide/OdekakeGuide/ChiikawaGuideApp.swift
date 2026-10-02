@@ -241,7 +241,8 @@ private struct PlannerView: View {
             if venue.name.hasPrefix("Lunch near "), let place = lunchSelection {
                 lines.append("\(time(startOfStop(index))) · \(place.name) · \(place.address)")
             } else {
-                lines.append("\(time(startOfStop(index))) · \(venueText(venue, 0)) · \(venue.url)")
+                let url = URL(string: venue.url).flatMap { translatedGuideURL($0) }?.absoluteString ?? venue.url
+                lines.append("\(time(startOfStop(index))) · \(venueText(venue, 0)) · \(url)")
             }
         }
         if !hotelQuery.isEmpty { lines.insert("\(journeyText("chooseHotel")) · \(hotelName)", at: 1) }
@@ -264,6 +265,9 @@ private struct PlannerView: View {
                         VStack(alignment: .leading, spacing: 18) {
                             Text(routeText(route, 0)).font(.title2.bold())
                             Text(journeyText("opening")).font(.subheadline).foregroundStyle(.secondary)
+                            if language != .ja {
+                                Text(journeyText("webTranslationNote")).font(.footnote).foregroundStyle(.secondary)
+                            }
                             controls
                             journeyHotelPicker
                             dinnerAreaPicker
@@ -451,8 +455,53 @@ private struct PlannerView: View {
         }
         .buttonStyle(.plain)
     }
+    private var targetWebLanguage: String {
+        switch language {
+        case .ja: return "ja"
+        case .ko: return "ko"
+        case .zh: return "zh-CN"
+        case .en: return "en"
+        case .th: return "th"
+        }
+    }
+    private func translatedGuideURL(_ original: URL) -> URL? {
+        guard language != .ja, let scheme = original.scheme?.lowercased(),
+              scheme == "https" || scheme == "http",
+              let host = original.host?.lowercased(),
+              host != "translate.google.com", host != "translate.google.co.jp",
+              !host.hasSuffix("google.com"), !host.hasSuffix("google.co.jp") else { return nil }
+        var parts = URLComponents(string: "https://translate.google.com/translate")
+        parts?.queryItems = [
+            URLQueryItem(name: "sl", value: "auto"),
+            URLQueryItem(name: "tl", value: targetWebLanguage),
+            URLQueryItem(name: "hl", value: targetWebLanguage),
+            URLQueryItem(name: "u", value: original.absoluteString)
+        ]
+        return parts?.url
+    }
+    private func localizedMapURL(_ original: URL) -> URL {
+        guard language != .ja, let host = original.host?.lowercased(),
+              (host == "www.google.com" || host == "maps.google.com"),
+              original.path.hasPrefix("/maps/") else { return original }
+        var parts = URLComponents(url: original, resolvingAgainstBaseURL: false)
+        var items = parts?.queryItems ?? []
+        items.removeAll(where: { $0.name == "hl" })
+        items.append(URLQueryItem(name: "hl", value: targetWebLanguage))
+        parts?.queryItems = items
+        return parts?.url ?? original
+    }
+    private func translatedGuideLink(_ title: String, url: URL) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            if let translated = translatedGuideURL(url) {
+                journeyLink("\(title) · \(journeyText("translatedPage"))", url: translated, systemImage: "character.book.closed")
+                journeyLink(journeyText("originalPage"), url: url, systemImage: "globe")
+            } else {
+                journeyLink(title, url: url, systemImage: "globe")
+            }
+        }
+    }
     private func journeyLink(_ title: String, url: URL, systemImage: String = "magnifyingglass") -> some View {
-        Link(destination: url) {
+        Link(destination: localizedMapURL(url)) {
             Label(title, systemImage: systemImage)
                 .font(.subheadline.bold()).fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
@@ -473,7 +522,7 @@ private struct PlannerView: View {
             if hotelChoice == "suggested", let hotel = selectedSuggestedHotel {
                 Text(hotel.address).font(.subheadline).foregroundStyle(.secondary)
                 if let url = hotel.website.flatMap(URL.init(string:)) {
-                    journeyLink(extra("rate"), url: url, systemImage: "yensign.circle")
+                    translatedGuideLink(extra("rate"), url: url)
                 }
                 if let url = locationURL(hotel.query) { journeyLink(extra("hotelMap"), url: url, systemImage: "mappin.and.ellipse") }
                 if let phone = hotel.phone, let url = URL(string: "tel:\(phone)") {
@@ -486,14 +535,14 @@ private struct PlannerView: View {
                 Text(journeyText("hotelInputNote")).font(.footnote).foregroundStyle(.secondary)
             } else if let hotel = chosenHotel {
                 Text(language == .ja ? hotel.addressJP : hotel.addressEN).font(.subheadline).foregroundStyle(.secondary)
-                if let url = URL(string: hotel.rateURL) { journeyLink(extra("rate"), url: url, systemImage: "yensign.circle") }
+                if let url = URL(string: hotel.rateURL) { translatedGuideLink(extra("rate"), url: url) }
                 if let url = locationURL(hotelQuery) { journeyLink(extra("hotelMap"), url: url, systemImage: "mappin.and.ellipse") }
                 DisclosureGroup(extra("contact")) {
                     VStack(alignment: .leading, spacing: 10) {
                         if let url = URL(string: "tel:\(hotel.phone)") {
                             journeyLink("\(extra("call")) · \(hotel.phoneDisplay)", url: url, systemImage: "phone")
                         }
-                        if let url = URL(string: hotel.contactURL) { journeyLink(extra("contact"), url: url, systemImage: "globe") }
+                        if let url = URL(string: hotel.contactURL) { translatedGuideLink(extra("contact"), url: url) }
                         Text(extra("rateNote")).font(.footnote).foregroundStyle(.secondary)
                     }.padding(.top, 10)
                 }
@@ -511,7 +560,7 @@ private struct PlannerView: View {
                     Text(String(format: journeyText("distance"), locale: language.locale, arguments: [Int(hotel.distance.rounded())]))
                         .font(.caption).foregroundStyle(.secondary)
                     if let url = locationURL(hotel.query) { journeyLink(extra("hotelMap"), url: url, systemImage: "mappin.and.ellipse") }
-                    if let url = hotel.website.flatMap(URL.init(string:)) { journeyLink(extra("rate"), url: url, systemImage: "yensign.circle") }
+                    if let url = hotel.website.flatMap(URL.init(string:)) { translatedGuideLink(extra("rate"), url: url) }
                     if let phone = hotel.phone, let url = URL(string: "tel:\(phone)") { journeyLink("\(extra("call")) · \(phone)", url: url, systemImage: "phone") }
                     journeyAction(journeyText("chooseThisHotel"), systemImage: "checkmark.circle") { chooseSuggestedHotel(hotel) }
                 }
@@ -957,7 +1006,7 @@ private struct PlannerView: View {
                 Text(TravelExtras.arrivalText[route.id]?[language.index] ?? journeyText("newArrival"))
                     .font(.subheadline)
                 if let value = TravelExtras.arrivalSources[route.id], let url = URL(string: value) {
-                    Link(extra("officialAccess"), destination: url).font(.subheadline.bold())
+                    translatedGuideLink(extra("officialAccess"), url: url)
                 }
             } else {
                 Text(extra("customArrival")).font(.subheadline)
@@ -986,7 +1035,7 @@ private struct PlannerView: View {
             if route.id == "asakusa" && west.contains(from.name) && east.contains(to.name) {
                 Text(extra("asakusaRail")).font(.subheadline)
                 if let url = URL(string: "https://www.tobu.co.jp/railway/guide/station/info/1103/") {
-                    Link(extra("officialAccess"), destination: url).font(.subheadline.bold())
+                    translatedGuideLink(extra("officialAccess"), url: url)
                 }
             }
             Text(String(format: extra("planningGap"), locale: language.locale, arguments: [route.gap]))
@@ -1054,7 +1103,7 @@ private struct PlannerView: View {
             }
             VStack(alignment: .leading, spacing: 10) {
                 if let url = URL(string: venue.url) {
-                    journeyLink(NationwideRoutes.japanesePlaces[venue.name] == nil ? text("details") : journeyText("placeMap"), url: url, systemImage: "globe")
+                    translatedGuideLink(NationwideRoutes.japanesePlaces[venue.name] == nil ? text("details") : journeyText("placeMap"), url: url)
                 }
                 if stop.choices.count > 1 {
                     journeyAction(text("swap"), systemImage: "arrow.triangle.2.circlepath") { swapIndex = index }
@@ -1719,6 +1768,9 @@ private struct DinnerPlace: Identifiable {
 
 private enum JourneyTranslations {
     static let ui: [String: [String]] = [
+        "translatedPage": ["翻訳ページを開く", "번역 페이지 열기", "打开翻译页面", "Open translated page", "เปิดหน้าที่แปลแล้ว"],
+        "originalPage": ["元のページを開く", "원본 페이지 열기", "打开原网页", "Open original page", "เปิดหน้าต้นฉบับ"],
+        "webTranslationNote": ["外部の案内ページは翻訳版を優先表示します。翻訳できない場合は元のページを開いてください。", "외부 안내 페이지는 번역판을 우선 표시합니다. 번역이 되지 않으면 원본 페이지를 여세요.", "外部指南优先打开翻译页面。如无法翻译，请打开原网页。", "Guide links open in your chosen language when translation is available. Use the original page if it does not load.", "ลิงก์ข้อมูลจะเปิดคำแปลเป็นภาษาที่เลือก หากไม่แสดงให้เปิดหน้าต้นฉบับ"],
         "lunchSearch": ["昼食のお店を選ぶ", "점심 식당 선택", "选择午餐餐厅", "Choose a lunch restaurant", "เลือกร้านมื้อกลางวัน"],
         "lunchNote": ["近くのお店を検索し、実際に行くお店を選んでください。", "주변 식당을 검색해 방문할 곳을 선택하세요.", "搜索附近餐厅并选择实际要去的餐厅。", "Search nearby restaurants and choose the one you will visit.", "ค้นหาร้านอาหารใกล้เคียงแล้วเลือกร้านที่จะไป"],
         "lunchNext": ["次は近くで昼食です。お店を選ぶと行き方を表示します。", "다음은 주변에서 점심입니다. 식당을 선택하면 경로가 표시됩니다.", "下一站在附近吃午餐。选好餐厅后显示路线。", "Lunch is next. Choose a restaurant to show its directions.", "ต่อไปทานมื้อกลางวันใกล้เคียง เลือกร้านเพื่อดูเส้นทาง"],
