@@ -475,7 +475,9 @@ private struct PlannerView: View {
               scheme == "https" || scheme == "http",
               let host = original.host?.lowercased(),
               host != "translate.google.com", host != "translate.google.co.jp",
-              !host.hasSuffix("google.com"), !host.hasSuffix("google.co.jp") else { return nil }
+              !host.hasSuffix(".translate.goog"),
+              !(host == "google.com" || host.hasSuffix(".google.com")),
+              !(host == "google.co.jp" || host.hasSuffix(".google.co.jp")) else { return nil }
         var parts = URLComponents(string: "https://translate.google.com/translate")
         parts?.queryItems = [
             URLQueryItem(name: "sl", value: "auto"),
@@ -500,14 +502,21 @@ private struct PlannerView: View {
         VStack(alignment: .leading, spacing: 7) {
             if let translated = translatedGuideURL(url) {
                 journeyLink("\(title) · \(journeyText("translatedPage"))", url: translated, systemImage: "character.book.closed")
-                journeyLink(journeyText("originalPage"), url: url, systemImage: "globe")
+                Menu {
+                    Link(destination: localizedMapURL(url)) {
+                        Label(journeyText("originalPage"), systemImage: "globe")
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle").font(.title3)
+                        .frame(minWidth: 44, minHeight: 44)
+                }
             } else {
                 journeyLink(title, url: url, systemImage: "globe")
             }
         }
     }
     private func journeyLink(_ title: String, url: URL, systemImage: String = "magnifyingglass") -> some View {
-        Link(destination: localizedMapURL(url)) {
+        Link(destination: translatedGuideURL(url) ?? localizedMapURL(url)) {
             Label(title, systemImage: systemImage)
                 .font(.subheadline.bold()).fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
@@ -976,10 +985,10 @@ private struct PlannerView: View {
             Text(name).font(.headline)
             Text(address).font(.subheadline).foregroundStyle(.secondary)
             if let url = locationURL(query) {
-                Link(destination: url) { Label(extra("hotelMap"), systemImage: "mappin.and.ellipse") }
+                Link(destination: localizedMapURL(url)) { Label(extra("hotelMap"), systemImage: "mappin.and.ellipse") }
             }
             if let url = URL(string: hotel.rateURL) {
-                Link(destination: url) { Label(extra("rate"), systemImage: "yensign.circle.fill") }
+                Link(destination: translatedGuideURL(url) ?? url) { Label(extra("rate"), systemImage: "yensign.circle.fill") }
                     .font(.subheadline.bold())
                     .padding(12).frame(maxWidth: .infinity, alignment: .leading)
                     .foregroundStyle(.black)
@@ -991,7 +1000,7 @@ private struct PlannerView: View {
                 }
             }
             if let url = URL(string: hotel.contactURL) {
-                Link(destination: url) { Label(extra("contact"), systemImage: "globe") }
+                Link(destination: translatedGuideURL(url) ?? url) { Label(extra("contact"), systemImage: "globe") }
             }
             Divider()
             Text("\(extra("toFirst")) · \(venueText(first, 0))").font(.caption.bold())
