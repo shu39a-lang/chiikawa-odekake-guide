@@ -47,7 +47,7 @@ private struct GuideData: Decodable {
         guard let guide = try? JSONDecoder().decode(GuideData.self, from: Data(json.utf8)) else {
             fatalError("Embedded guide data is invalid")
         }
-        return GuideData(routes: guide.routes + NationwideRoutes.routes, notes: guide.notes, visitMinutes: guide.visitMinutes)
+        return GuideData(routes: guide.routes + NationwideRoutes.routes + FeaturedRoutes.routes, notes: guide.notes, visitMinutes: guide.visitMinutes)
     }()
 }
 
@@ -95,6 +95,7 @@ private struct PlannerView: View {
         String(format: text(key), locale: language.locale, arguments: arguments)
     }
     private func routeText(_ item: DayRoute, _ field: Int) -> String {
+        if let featured = FeaturedRoutes.info[item.id] { return featured.fields[language.index][field] }
         if let standard = GuideTranslations.routes[item.id]?[language.index] { return standard[field] }
         if field == 2 { return NationwideRoutes.summary[language.index] }
         if language == .ja {
@@ -104,6 +105,9 @@ private struct PlannerView: View {
         return [item.label, item.title, item.description, item.area][field]
     }
     private func venueText(_ venue: Venue, _ field: Int) -> String {
+        if let names = FeaturedRoutes.names[venue.name] {
+            return field == 0 ? names[language.index] : FeaturedRoutes.ui["visitNote"]![language.index]
+        }
         if venue.name.hasPrefix("Lunch near ") {
             return field == 0 ? journeyText("lunchSearch") : journeyText("lunchNote")
         }
@@ -169,12 +173,14 @@ private struct PlannerView: View {
         guide.routes.filter { ($0.prefecture ?? NationwideRoutes.existingPrefectures[$0.id]) == prefectureID }
     }
     private func selectRegion(_ value: String) {
+        guard value != regionID else { return }
         regionID = value
         if let first = NationwideRoutes.prefectures.first(where: { $0.region == value }) {
             selectPrefecture(first.id)
         }
     }
     private func selectPrefecture(_ value: String) {
+        guard value != prefectureID else { return }
         prefectureID = value
         if let first = guide.routes.first(where: { ($0.prefecture ?? NationwideRoutes.existingPrefectures[$0.id]) == value }) {
             routeID = first.id
@@ -263,12 +269,12 @@ private struct PlannerView: View {
                 ScrollViewReader { proxy in
                     ScrollView {
                         VStack(alignment: .leading, spacing: 18) {
+                            controls
                             Text(routeText(route, 0)).font(.title2.bold())
                             Text(journeyText("opening")).font(.subheadline).foregroundStyle(.secondary)
                             if language != .ja {
                                 Text(journeyText("webTranslationNote")).font(.footnote).foregroundStyle(.secondary)
                             }
-                            controls
                             journeyHotelPicker
                             dinnerAreaPicker
                             journeyOverview
@@ -513,12 +519,13 @@ private struct PlannerView: View {
     private var journeyHotelPicker: some View {
         journeyPanel {
             Label(journeyText("chooseHotel"), systemImage: "bed.double.fill").font(.headline)
-            Picker(journeyText("chooseHotel"), selection: Binding(get: { hotelChoice }, set: { saveHotelValue($0) })) {
-                ForEach(availableHotels) { hotel in Text(hotel.names[language.index]).tag(hotel.id) }
-                if let hotel = selectedSuggestedHotel { Text(hotel.name).tag("suggested") }
-                Text(journeyText("ownHotel")).tag("custom")
+            ForEach(availableHotels) { hotel in
+                visibleChoice(hotel.names[language.index], selected: hotelChoice == hotel.id) { saveHotelValue(hotel.id) }
             }
-            .pickerStyle(.menu).tint(journeyGold)
+            if let hotel = selectedSuggestedHotel {
+                visibleChoice(hotel.name, selected: hotelChoice == "suggested") { saveHotelValue("suggested") }
+            }
+            visibleChoice(journeyText("ownHotel"), selected: hotelChoice == "custom") { saveHotelValue("custom") }
             if hotelChoice == "suggested", let hotel = selectedSuggestedHotel {
                 Text(hotel.address).font(.subheadline).foregroundStyle(.secondary)
                 if let url = hotel.website.flatMap(URL.init(string:)) {
@@ -537,7 +544,7 @@ private struct PlannerView: View {
                 Text(language == .ja ? hotel.addressJP : hotel.addressEN).font(.subheadline).foregroundStyle(.secondary)
                 if let url = URL(string: hotel.rateURL) { translatedGuideLink(extra("rate"), url: url) }
                 if let url = locationURL(hotelQuery) { journeyLink(extra("hotelMap"), url: url, systemImage: "mappin.and.ellipse") }
-                DisclosureGroup(extra("contact")) {
+                VStack(alignment: .leading, spacing: 10) {
                     VStack(alignment: .leading, spacing: 10) {
                         if let url = URL(string: "tel:\(hotel.phone)") {
                             journeyLink("\(extra("call")) · \(hotel.phoneDisplay)", url: url, systemImage: "phone")
@@ -738,11 +745,9 @@ private struct PlannerView: View {
         journeyPanel {
             Label(journeyText("dinnerPlan"), systemImage: "fork.knife").font(.headline)
             Text(journeyText("cutoffNote")).font(.footnote).foregroundStyle(.secondary)
-            Picker(journeyText("dinnerArea"), selection: $dinnerArea) {
-                Text(journeyText("automatic")).tag("auto")
-                Text(journeyText("nearHotel")).tag("hotel")
-                Text(journeyText("nearLast")).tag("last")
-            }.pickerStyle(.menu).tint(journeyGold)
+            visibleChoice(journeyText("automatic"), selected: dinnerArea == "auto") { dinnerArea = "auto" }
+            visibleChoice(journeyText("nearHotel"), selected: dinnerArea == "hotel") { dinnerArea = "hotel" }
+            visibleChoice(journeyText("nearLast"), selected: dinnerArea == "last") { dinnerArea = "last" }
             Text(journeyText(dinnerNearHotel ? "earlyNote" : "lateNote")).font(.subheadline)
         }
     }
@@ -920,7 +925,7 @@ private struct PlannerView: View {
     private func venueQuery(_ venue: Venue) -> String {
         if venue.name.hasPrefix("Lunch near "), let place = lunchSelection { return place.query }
         // Japanese names avoid ambiguous translated or romanized businesses.
-        let localName = GuideTranslations.venues[venue.name]?[0][0] ?? NationwideRoutes.japanesePlaces[venue.name] ?? venue.name
+        let localName = FeaturedRoutes.names[venue.name]?[0] ?? GuideTranslations.venues[venue.name]?[0][0] ?? NationwideRoutes.japanesePlaces[venue.name] ?? venue.name
         let prefecture = NationwideRoutes.prefectures.first(where: { $0.id == routePrefecture })?.ja ?? "日本"
         return "\(localName), \(prefecture), Japan"
     }
@@ -1027,7 +1032,9 @@ private struct PlannerView: View {
         return VStack(alignment: .leading, spacing: 12) {
             Label(journeyText("nextDestination"), systemImage: "arrow.down.circle.fill").font(.headline)
             Text("\(venueText(from, 0)) → \(venueText(to, 0))").font(.subheadline.bold())
-            if isOriginalPair, let legs = TravelExtras.legs[route.id], legs.indices.contains(index - 1) {
+            if let info = FeaturedRoutes.info[route.id] {
+                Text(info.notes[language.index]).font(.subheadline)
+            } else if isOriginalPair, let legs = TravelExtras.legs[route.id], legs.indices.contains(index - 1) {
                 Text(legs[index - 1][language.index]).font(.subheadline)
             } else {
                 Text(extra("walkFallback")).font(.subheadline)
@@ -1059,24 +1066,74 @@ private struct PlannerView: View {
         .background(Color(red: 0.08, green: 0.17, blue: 0.22), in: RoundedRectangle(cornerRadius: 18))
     }
 
+    private func featuredText(_ key: String) -> String { FeaturedRoutes.ui[key]?[language.index] ?? key }
+
+    private func visibleChoice(_ title: String, selected: Bool, subtitle: String? = nil, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(alignment: .top, spacing: 9) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(title).font(.subheadline.bold())
+                    if let subtitle = subtitle { Text(subtitle).font(.caption) }
+                }.fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
+                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+            }
+            .padding(12).frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
+            .foregroundStyle(selected ? Color.black : Color.white)
+            .background(selected ? journeyGold : Color(red: 0.15, green: 0.22, blue: 0.33), in: RoundedRectangle(cornerRadius: 12))
+        }.buttonStyle(.plain).accessibilityAddTraits(selected ? [.isSelected] : [])
+    }
+
+    private func selectCourse(_ item: DayRoute) {
+        guard routeID != item.id else { return }
+        let pref = item.prefecture ?? NationwideRoutes.existingPrefectures[item.id] ?? "tokyo"
+        prefectureID = pref
+        regionID = NationwideRoutes.prefectures.first(where: { $0.id == pref })?.region ?? "kanto"
+        routeID = item.id
+        swapIndex = nil
+        clearHotelSearch()
+        resetJourney()
+    }
+
+    private func courseButton(_ item: DayRoute) -> some View {
+        let outline = item.stops.filter { $0.type != "food" }.compactMap { $0.choices.first }.map { venueText($0, 0) }.joined(separator: " → ")
+        return visibleChoice(routeText(item, 0), selected: routeID == item.id, subtitle: outline) { selectCourse(item) }
+    }
+
     private var controls: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Picker(journeyText("region"), selection: Binding(get: { regionID }, set: { selectRegion($0) })) {
-                ForEach(NationwideRoutes.regions) { item in Text(label(item.japanese, item.english)).tag(item.id) }
-            }
-            Picker(journeyText("prefecture"), selection: Binding(get: { prefectureID }, set: { selectPrefecture($0) })) {
-                ForEach(prefecturesInRegion) { item in Text(label(item.ja, item.en)).tag(item.id) }
-            }
-            Picker(text("route"), selection: $routeID) {
-                ForEach(routesInPrefecture) { item in Text(routeText(item, 0)).tag(item.id) }
-            }
-            Picker(text("start"), selection: $startMinutes) {
-                ForEach(Array(stride(from: 540, through: 840, by: 60)), id: \.self) { value in
-                    Text(time(value)).tag(value)
+        VStack(alignment: .leading, spacing: 14) {
+            Label(featuredText("featured"), systemImage: "sparkles").font(.headline).foregroundStyle(journeyGold)
+            Text(featuredText("featuredNote")).font(.caption).foregroundStyle(.secondary)
+            ForEach(FeaturedRoutes.routes) { item in courseButton(item) }
+            Divider()
+            Text(journeyText("region")).font(.headline)
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 105), spacing: 8)], spacing: 8) {
+                ForEach(NationwideRoutes.regions) { item in
+                    visibleChoice(label(item.japanese, item.english), selected: regionID == item.id) { selectRegion(item.id) }
                 }
             }
+            Text(journeyText("prefecture")).font(.headline)
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 105), spacing: 8)], spacing: 8) {
+                ForEach(prefecturesInRegion) { item in
+                    visibleChoice(label(item.ja, item.en), selected: prefectureID == item.id) { selectPrefecture(item.id) }
+                }
+            }
+            Text(text("route")).font(.headline)
+            ForEach(routesInPrefecture) { item in courseButton(item) }
             Text(String(format: journeyText("courseCount"), locale: language.locale, arguments: [routesInPrefecture.count]))
                 .font(.footnote).foregroundStyle(.secondary)
+            Text(text("start")).font(.headline)
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 85), spacing: 8)], spacing: 8) {
+                ForEach(Array(stride(from: 540, through: 840, by: 60)), id: \.self) { value in
+                    visibleChoice(time(value), selected: startMinutes == value) { startMinutes = value }
+                }
+            }
+            if let info = FeaturedRoutes.info[route.id] {
+                Text(info.fields[language.index][2]).font(.subheadline)
+                Text(info.notes[language.index]).font(.footnote).foregroundStyle(journeyGold)
+                if let url = URL(string: info.accessURL) { translatedGuideLink(featuredText("access"), url: url) }
+                if let url = URL(string: info.sourceURL) { translatedGuideLink(featuredText("source"), url: url) }
+            }
         }
         .padding(14).background(journeySurface, in: RoundedRectangle(cornerRadius: 15))
     }
@@ -1106,7 +1163,13 @@ private struct PlannerView: View {
                     translatedGuideLink(NationwideRoutes.japanesePlaces[venue.name] == nil ? text("details") : journeyText("placeMap"), url: url)
                 }
                 if stop.choices.count > 1 {
-                    journeyAction(text("swap"), systemImage: "arrow.triangle.2.circlepath") { swapIndex = index }
+                    ForEach(stop.choices.indices, id: \.self) { choice in
+                        let option = stop.choices[choice]
+                        let used = route.stops.indices.contains { $0 != index && selectedVenue($0).name == option.name }
+                        if !used {
+                            visibleChoice(venueText(option, 0), selected: selectedIndex(index) == choice) { choose(choice, at: index) }
+                        }
+                    }
                 }
             }
         }
@@ -2228,4 +2291,41 @@ private struct HotelSuggestion: Codable, Identifiable {
     let website: String?
     let distance: Double
     var query: String { "\(latitude),\(longitude)" }
+}
+
+private struct FeaturedRouteInfo: Decodable {
+    let fields: [[String]]
+    let notes: [String]
+    let accessURL: String
+    let sourceURL: String
+}
+private enum FeaturedRoutes {
+    static let routes: [DayRoute] = {
+        let json = #"""
+[{"id":"sns-gotokuji","prefecture":"tokyo","label":"Tokyo · Lucky cats & Setagaya tram","title":"Tokyo · Lucky cats & Setagaya tram","description":"Visit the temple whose lucky cats drew overseas social media attention, then local shopping streets.","area":"tokyo","gap":20,"stops":[{"type":"sight","duration":55,"choices":[["Gotokuji Temple","Check official information before visiting.","https://gotokuji.jp/"]]},{"type":"walk","duration":55,"choices":[["Gotokuji shopping street","Check official information before visiting.","https://www.google.com/maps/search/?api=1&query=%E8%B1%AA%E5%BE%B3%E5%AF%BA%E5%95%86%E5%BA%97%E8%A1%97+Japan"]]},{"type":"food","duration":60,"choices":[["Lunch near Gotokuji Station","Choose a nearby restaurant.","https://www.google.com/maps/search/?api=1&query=restaurants+Gotokuji+Station"]]},{"type":"break","duration":55,"choices":[["Sangenjaya shopping streets","Check official information before visiting.","https://www.google.com/maps/search/?api=1&query=%E4%B8%89%E8%BB%92%E8%8C%B6%E5%B1%8B%E3%81%AE%E5%95%86%E5%BA%97%E8%A1%97+Japan"]]}]},{"id":"sns-katsuoji","prefecture":"osaka","label":"Osaka · Katsuoji daruma & Minoh","title":"Osaka · Katsuoji daruma & Minoh","description":"Explore Katsuoji, popular with international visitors, then Minoh Station and the waterfall trail entrance.","area":"osaka","gap":45,"stops":[{"type":"sight","duration":55,"choices":[["Katsuoji Temple","Check official information before visiting.","https://katsuo-ji-temple.or.jp/"]]},{"type":"walk","duration":55,"choices":[["Minoh Station shopping street","Check official information before visiting.","https://www.google.com/maps/search/?api=1&query=%E7%AE%95%E9%9D%A2%E9%A7%85%E5%89%8D%E5%95%86%E5%BA%97%E8%A1%97+Japan"]]},{"type":"food","duration":60,"choices":[["Lunch near Minoh Station","Choose a nearby restaurant.","https://www.google.com/maps/search/?api=1&query=restaurants+Minoh+Station"]]},{"type":"break","duration":55,"choices":[["Minoh waterfall trail entrance","Check official information before visiting.","https://www.google.com/maps/search/?api=1&query=%E7%AE%95%E9%9D%A2%E6%BB%9D%E9%81%93%E5%85%A5%E5%8F%A3+Japan"]]}]},{"id":"sns-okusaga","prefecture":"kyoto","label":"Kyoto · Okusaga stone figures & old lanes","title":"Kyoto · Okusaga stone figures & old lanes","description":"Start at Otagi Nenbutsuji, attracting international visitors, and walk downhill through Saga Toriimoto.","area":"kyoto","gap":20,"stops":[{"type":"sight","duration":55,"choices":[["Otagi Nenbutsuji Temple","Check official information before visiting.","https://www.otagiji.com/visit-en"]]},{"type":"walk","duration":55,"choices":[["Saga Toriimoto preserved street","Check official information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%B5%AF%E5%B3%A8%E9%B3%A5%E5%B1%85%E6%9C%AC%E7%94%BA%E4%B8%A6%E3%81%BF%E4%BF%9D%E5%AD%98%E5%9C%B0%E5%8C%BA+Japan"]]},{"type":"food","duration":60,"choices":[["Lunch near Saga Toriimoto","Choose a nearby restaurant.","https://www.google.com/maps/search/?api=1&query=restaurants+Saga+Toriimoto+Kyoto"]]},{"type":"sight","duration":55,"choices":[["Adashino Nenbutsuji Temple","Check official information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%8C%96%E9%87%8E%E5%BF%B5%E4%BB%8F%E5%AF%BA+Japan"]]},{"type":"break","duration":55,"choices":[["Saga Arashiyama Station","Check official information before visiting.","https://www.google.com/maps/search/?api=1&query=%E5%B5%AF%E5%B3%A8%E5%B5%90%E5%B1%B1%E9%A7%85+Japan"]]}]},{"id":"sns-chichibugahama","prefecture":"kagawa","label":"Kagawa · Chichibugahama mirror beach & Nio","title":"Kagawa · Chichibugahama mirror beach & Nio","description":"Explore Nio port town and the beach attracting international social media attention.","area":"kagawa","gap":20,"stops":[{"type":"sight","duration":55,"choices":[["Nio port town","Check official information before visiting.","https://www.google.com/maps/search/?api=1&query=%E4%BB%81%E5%B0%BE%E3%81%AE%E6%B8%AF%E7%94%BA+Japan"]]},{"type":"walk","duration":55,"choices":[["Nio Hachiman Shrine","Check official information before visiting.","https://www.google.com/maps/search/?api=1&query=%E4%BB%81%E5%B0%BE%E5%85%AB%E5%B9%A1%E7%A5%9E%E7%A4%BE+Japan"]]},{"type":"food","duration":60,"choices":[["Lunch near Nio Mitoyo","Choose a nearby restaurant.","https://www.google.com/maps/search/?api=1&query=restaurants+Nio+Mitoyo"]]},{"type":"break","duration":55,"choices":[["Chichibugahama Beach","Check official information before visiting.","https://www.mitoyo-kanko.com/chichibugahama/"]]}]}]
+"""#
+        guard let result = try? JSONDecoder().decode([DayRoute].self, from: Data(json.utf8)) else { preconditionFailure("Invalid featured routes") }
+        return result
+    }()
+    static let info: [String: FeaturedRouteInfo] = {
+        let json = #"""
+{"sns-gotokuji":{"fields":[["東京・豪徳寺の招き猫と世田谷線","東京・豪徳寺の招き猫と世田谷線","招き猫が海外SNSで話題の豪徳寺から、世田谷の商店街へ。","東京・豪徳寺の招き猫と世田谷線"],["도쿄·고토쿠지 고양이와 세타가야선","도쿄·고토쿠지 고양이와 세타가야선","해외 SNS에서 주목받는 고토쿠지와 세타가야 상점가.","도쿄·고토쿠지 고양이와 세타가야선"],["东京·豪德寺招财猫与世田谷线","东京·豪德寺招财猫与世田谷线","从海外社交媒体关注的豪德寺，游览世田谷商店街。","东京·豪德寺招财猫与世田谷线"],["Tokyo · Lucky cats & Setagaya tram","Tokyo · Lucky cats & Setagaya tram","Visit the temple whose lucky cats drew overseas social media attention, then local shopping streets.","Tokyo · Lucky cats & Setagaya tram"],["โตเกียว·แมวกวักและรถรางเซตากายะ","โตเกียว·แมวกวักและรถรางเซตากายะ","ชมแมวกวักที่เป็นที่สนใจบนโซเชียลต่างประเทศแล้วเดินย่านร้านค้าท้องถิ่น","โตเกียว·แมวกวักและรถรางเซตากายะ"]],"notes":["宮の坂駅から徒歩約5分。招き猫は動かさず、住宅街では通行の妨げにならないように。","미야노사카역에서 도보 약 5분. 고양이상을 옮기지 말고 주거지 통행을 방해하지 마세요.","宫之坂站步行约5分钟。请勿移动猫像或妨碍住宅区通行。","About 5 minutes on foot from Miyanosaka Station. Leave cat figures in place and keep residential paths clear.","เดินประมาณ 5 นาทีจากสถานีมิยาโนะซากะ ไม่เคลื่อนย้ายรูปแมวและไม่กีดขวางทาง"],"accessURL":"https://gotokuji.jp/","sourceURL":"https://www.fnn.jp/articles/-/965434"},"sns-katsuoji":{"fields":[["大阪・勝尾寺のだるまと箕面","大阪・勝尾寺のだるまと箕面","外国人旅行者にも人気の勝尾寺と、箕面の駅前・滝道入口を巡る。","大阪・勝尾寺のだるまと箕面"],["오사카·가쓰오지 달마와 미노오","오사카·가쓰오지 달마와 미노오","외국인에게도 인기 있는 가쓰오지와 미노오 역·산책로 입구.","오사카·가쓰오지 달마와 미노오"],["大阪·胜尾寺达摩与箕面","大阪·胜尾寺达摩与箕面","游览海外游客喜爱的胜尾寺及箕面站与瀑布步道入口。","大阪·胜尾寺达摩与箕面"],["Osaka · Katsuoji daruma & Minoh","Osaka · Katsuoji daruma & Minoh","Explore Katsuoji, popular with international visitors, then Minoh Station and the waterfall trail entrance.","Osaka · Katsuoji daruma & Minoh"],["โอซาก้า·ดารุมะวัดคัตสึโอจิและมิโน","โอซาก้า·ดารุมะวัดคัตสึโอจิและมิโน","ชมวัดคัตสึโอจิที่นักท่องเที่ยวต่างชาติชื่นชอบแล้วเดินบริเวณสถานีมิโน","โอซาก้า·ดารุมะวัดคัตสึโอจิและมิโน"]],"notes":["勝尾寺へは箕面萱野駅からバス。寺から箕面駅周辺は公共交通・タクシーの経路を確認。山道の徒歩移動を前提にしません。","미노오카야노역에서 버스. 사찰에서 미노오역까지 대중교통·택시 경로를 확인하세요. 산길 도보 코스가 아닙니다.","从箕面萱野站乘巴士。寺院到箕面站请查看公交或出租车路线，不按山路步行安排。","Take a bus from Minoh-kayano. Check transit or taxi routing to Minoh Station; this plan does not assume walking mountain roads.","นั่งรถบัสจากมิโนคายาโนะ ตรวจสอบขนส่งหรือแท็กซี่ไปสถานีมิโน ไม่วางแผนเดินถนนบนเขา"],"accessURL":"https://katsuo-ji-temple.or.jp/access/index.php","sourceURL":"https://prtimes.jp/main/html/rd/p/000000030.000111535.html"},"sns-okusaga":{"fields":[["京都・奥嵯峨の羅漢と古い街並み","京都・奥嵯峨の羅漢と古い街並み","海外旅行者が注目する愛宕念仏寺から、嵯峨鳥居本を下る散策。","京都・奥嵯峨の羅漢と古い街並み"],["교토·오쿠사가 석상과 옛 거리","교토·오쿠사가 석상과 옛 거리","해외 여행자가 주목하는 오타기넨부쓰지에서 사가토리이모토로 내려가는 산책.","교토·오쿠사가 석상과 옛 거리"],["京都·奥嵯峨罗汉与古街","京都·奥嵯峨罗汉与古街","从海外游客关注的爱宕念佛寺，沿嵯峨鸟居本下行漫步。","京都·奥嵯峨罗汉与古街"],["Kyoto · Okusaga stone figures & old lanes","Kyoto · Okusaga stone figures & old lanes","Start at Otagi Nenbutsuji, attracting international visitors, and walk downhill through Saga Toriimoto.","Kyoto · Okusaga stone figures & old lanes"],["เกียวโต·รูปหินและถนนเก่าโอคุซากะ","เกียวโต·รูปหินและถนนเก่าโอคุซากะ","เริ่มวัดโอตากิเน็นบุตสึจิที่นักท่องเที่ยวต่างชาติสนใจแล้วเดินลงผ่านซากะโทริอิโมโตะ","เกียวโต·รูปหินและถนนเก่าโอคุซากะ"]],"notes":["寺へは先にバス・タクシーで上がり、帰りは下り坂。公式案内では水曜・土曜休み。訪問前に営業日を確認してください。","먼저 버스·택시로 올라가고 내려오는 코스입니다. 공식 안내는 수·토 휴무. 방문 전 확인하세요.","先乘巴士或出租车上山，再沿下坡游览。官网目前周三、周六休息，出发前请确认。","Go uphill by bus or taxi, then walk downhill. The official site currently lists Wednesday and Saturday closures; recheck before visiting.","ขึ้นไปด้วยรถบัสหรือแท็กซี่แล้วเดินลง เว็บไซต์แจ้งหยุดพุธและเสาร์ ตรวจสอบก่อนเดินทาง"],"accessURL":"https://www.otagiji.com/visit-jp","sourceURL":"https://mezamashi.media/articles/-/186389"},"sns-chichibugahama":{"fields":[["香川・父母ヶ浜の天空の鏡と仁尾","香川・父母ヶ浜の天空の鏡と仁尾","海外SNSでも注目される父母ヶ浜へ。仁尾の港町散策と海辺の写真を楽しむ。","香川・父母ヶ浜の天空の鏡と仁尾"],["가가와·지치부가하마 거울 바다와 니오","가가와·지치부가하마 거울 바다와 니오","해외 SNS에서도 주목받는 해변. 니오 항구 산책과 바다 사진.","가가와·지치부가하마 거울 바다와 니오"],["香川·父母之滨天空之镜与仁尾","香川·父母之滨天空之镜与仁尾","前往海外社交媒体关注的海滩，漫步仁尾港镇并欣赏海景。","香川·父母之滨天空之镜与仁尾"],["Kagawa · Chichibugahama mirror beach & Nio","Kagawa · Chichibugahama mirror beach & Nio","Explore Nio port town and the beach attracting international social media attention.","Kagawa · Chichibugahama mirror beach & Nio"],["คางาวะ·หาดกระจกจิจิบุกาฮามะและนิโอ","คางาวะ·หาดกระจกจิจิบุกาฮามะและนิโอ","เดินเมืองท่านิโอและชมหาดที่ได้รับความสนใจบนโซเชียลต่างประเทศ","คางาวะ·หาดกระจกจิจิบุกาฮามะและนิโอ"]],"notes":["天空の鏡は干潮・日没・弱い風が条件。表示時刻は目安なので、公式カレンダーに合わせて出発時間を調整。帰りの交通も先に確認。","거울 풍경은 간조·일몰·약한 바람이 조건입니다. 시간은 예시이므로 공식 달력에 맞춰 출발을 조정하고 귀가 교통도 확인하세요.","镜面景观需退潮、日落与微风。行程时间为参考，请按官网日历调整出发时间并提前确认返程交通。","Mirror photos need low tide, sunset and calm wind. Times are estimates: adjust departure to the official calendar and check return transport.","ภาพกระจกต้องช่วงน้ำลง พระอาทิตย์ตก และลมสงบ เวลาเป็นประมาณการ ปรับตามปฏิทินและตรวจสอบรถกลับ"],"accessURL":"https://www.mitoyo-kanko.com/chichibugahama/","sourceURL":"https://www.mitoyo-kanko.com/author/mitoyokokusaikanko/"}}
+"""#
+        guard let result = try? JSONDecoder().decode([String: FeaturedRouteInfo].self, from: Data(json.utf8)) else { preconditionFailure("Invalid featured info") }
+        return result
+    }()
+    static let names: [String: [String]] = {
+        let json = #"""
+{"Gotokuji Temple":["豪徳寺","고토쿠지","豪德寺","Gotokuji Temple","วัดโกโทคุจิ"],"Gotokuji shopping street":["豪徳寺商店街","고토쿠지 상점가","豪德寺商店街","Gotokuji shopping street","ย่านร้านค้าโกโทคุจิ"],"Sangenjaya shopping streets":["三軒茶屋の商店街","산겐자야 상점가","三轩茶屋商店街","Sangenjaya shopping streets","ย่านร้านค้าซังเก็นจายะ"],"Katsuoji Temple":["勝尾寺","가쓰오지","胜尾寺","Katsuoji Temple","วัดคัตสึโอจิ"],"Minoh Station shopping street":["箕面駅前商店街","미노오역 상점가","箕面站前商店街","Minoh Station shopping street","ย่านร้านค้าสถานีมิโน"],"Minoh waterfall trail entrance":["箕面滝道入口","미노오 폭포 산책로 입구","箕面瀑布步道入口","Minoh waterfall trail entrance","ทางเข้าทางเดินน้ำตกมิโน"],"Otagi Nenbutsuji Temple":["愛宕念仏寺","오타기넨부쓰지","爱宕念佛寺","Otagi Nenbutsuji Temple","วัดโอตากิเน็นบุตสึจิ"],"Saga Toriimoto preserved street":["嵯峨鳥居本町並み保存地区","사가토리이모토 옛 거리","嵯峨鸟居本传统街区","Saga Toriimoto preserved street","ถนนอนุรักษ์ซากะโทริอิโมโตะ"],"Adashino Nenbutsuji Temple":["化野念仏寺","아다시노넨부쓰지","化野念佛寺","Adashino Nenbutsuji Temple","วัดอาดาชิโนะเน็นบุตสึจิ"],"Saga Arashiyama Station":["嵯峨嵐山駅","사가아라시야마역","嵯峨岚山站","Saga Arashiyama Station","สถานีซากะอาราชิยามะ"],"Nio port town":["仁尾の港町","니오 항구마을","仁尾港镇","Nio port town","เมืองท่านิโอ"],"Nio Hachiman Shrine":["仁尾八幡神社","니오하치만 신사","仁尾八幡神社","Nio Hachiman Shrine","ศาลเจ้านิโอฮาจิมัง"],"Chichibugahama Beach":["父母ヶ浜","지치부가하마","父母之滨","Chichibugahama Beach","หาดจิจิบุกาฮามะ"]}
+"""#
+        guard let result = try? JSONDecoder().decode([String: [String]].self, from: Data(json.utf8)) else { preconditionFailure("Invalid featured names") }
+        return result
+    }()
+    static let ui: [String: [String]] = {
+        let json = #"""
+{"featured":["SNS・海外旅行者の注目コース","SNS·해외 여행자 주목 코스","社交媒体与海外游客关注路线","Social media & international visitor picks","เส้นทางที่ได้รับความสนใจบนโซเชียลและจากนักท่องเที่ยว"],"featuredNote":["コース名と行き先を見て、ボタンを押すだけ。2026年10月調査。人気順ではありません。","코스와 장소를 보고 바로 선택하세요. 2026년 10월 조사. 인기 순위가 아닙니다.","查看路线与景点，直接点击选择。2026年10月核查，非人气排名。","See the stops and tap a course. Researched October 2026; not a popularity ranking.","ดูสถานที่แล้วกดเลือกเส้นทาง ตรวจสอบตุลาคม 2026 ไม่ใช่อันดับความนิยม"],"access":["営業時間・交通・撮影条件を確認","운영 시간·교통·촬영 조건 확인","查看开放时间、交通与拍摄条件","Check hours, access & photo conditions","ตรวจสอบเวลา การเดินทาง และเงื่อนไขถ่ายภาพ"],"source":["注目されている理由・調査元","주목받는 이유·출처","关注原因与资料来源","Why it is featured · source","เหตุผลที่ได้รับความสนใจและแหล่งข้อมูล"],"visitNote":["営業時間や撮影ルールは公式情報で確認。移動は下の徒歩・公共交通リンクから。","공식 운영 시간과 촬영 규칙을 확인하세요. 아래 도보·대중교통 링크를 이용하세요.","请在官网查看开放时间与拍摄规则。下方提供步行和公共交通路线。","Check official hours and photo rules. Use the walking and transit links below.","ตรวจสอบเวลาเปิดและกฎถ่ายภาพ ใช้ลิงก์เดินหรือขนส่งสาธารณะด้านล่าง"]}
+"""#
+        guard let result = try? JSONDecoder().decode([String: [String]].self, from: Data(json.utf8)) else { preconditionFailure("Invalid featured ui") }
+        return result
+    }()
 }
