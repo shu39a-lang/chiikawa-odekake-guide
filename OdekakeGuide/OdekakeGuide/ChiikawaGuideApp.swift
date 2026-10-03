@@ -2,6 +2,7 @@ import SwiftUI
 import Foundation
 import MapKit
 import CoreLocation
+import WebKit
 
 private struct Venue: Decodable {
     let name: String
@@ -66,6 +67,7 @@ private struct PlannerView: View {
     @AppStorage("japanDay.start") private var startMinutes = 600
     @AppStorage("japanDay.choices") private var savedChoices = "{}"
     @State private var swapIndex: Int?
+    @State private var presentedMap: PlannerMapRequest?
     @AppStorage("japanDay.language") private var languageCode = "ja"
     @State private var showingGuide = false
     @AppStorage("japanDay.hotels") private var savedHotels = "{}"
@@ -317,6 +319,9 @@ private struct PlannerView: View {
                 languageHome
             }
         }
+        .sheet(item: $presentedMap) { request in
+            PlannerMapScreen(request: request, language: language)
+        }
         .environment(\.locale, language.locale)
         .preferredColorScheme(.dark)
         .tint(journeyGold)
@@ -487,10 +492,14 @@ private struct PlannerView: View {
         ]
         return parts?.url
     }
+    private func isMapURL(_ url: URL) -> Bool {
+        guard let host = url.host?.lowercased() else { return false }
+        return (host == "www.google.com" || host == "google.com" || host == "maps.google.com"
+                || host == "www.google.co.jp" || host == "maps.google.co.jp")
+            && (url.path == "/maps" || url.path.hasPrefix("/maps/") || host.hasPrefix("maps."))
+    }
     private func localizedMapURL(_ original: URL) -> URL {
-        guard language != .ja, let host = original.host?.lowercased(),
-              (host == "www.google.com" || host == "maps.google.com"),
-              original.path.hasPrefix("/maps/") else { return original }
+        guard isMapURL(original) else { return original }
         var parts = URLComponents(url: original, resolvingAgainstBaseURL: false)
         var items = parts?.queryItems ?? []
         items.removeAll(where: { $0.name == "hl" })
@@ -516,14 +525,27 @@ private struct PlannerView: View {
         }
     }
     private func journeyLink(_ title: String, url: URL, systemImage: String = "magnifyingglass") -> some View {
-        Link(destination: translatedGuideURL(url) ?? localizedMapURL(url)) {
-            Label(title, systemImage: systemImage)
-                .font(.subheadline.bold()).fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-                .padding(.horizontal, 12)
-                .foregroundStyle(journeyGold)
-                .background(Color(red: 0.15, green: 0.22, blue: 0.33), in: RoundedRectangle(cornerRadius: 10))
+        Group {
+            if isMapURL(url) {
+                Button {
+                    presentedMap = PlannerMapRequest(url: localizedMapURL(url), title: title)
+                } label: {
+                    journeyLinkLabel(title, systemImage: systemImage)
+                }.buttonStyle(.plain)
+            } else {
+                Link(destination: translatedGuideURL(url) ?? url) {
+                    journeyLinkLabel(title, systemImage: systemImage)
+                }
+            }
         }
+    }
+    private func journeyLinkLabel(_ title: String, systemImage: String) -> some View {
+        Label(title, systemImage: systemImage)
+            .font(.subheadline.bold()).fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+            .padding(.horizontal, 12)
+            .foregroundStyle(journeyGold)
+            .background(Color(red: 0.15, green: 0.22, blue: 0.33), in: RoundedRectangle(cornerRadius: 10))
     }
     private var journeyHotelPicker: some View {
         journeyPanel {
@@ -985,7 +1007,7 @@ private struct PlannerView: View {
             Text(name).font(.headline)
             Text(address).font(.subheadline).foregroundStyle(.secondary)
             if let url = locationURL(query) {
-                Link(destination: localizedMapURL(url)) { Label(extra("hotelMap"), systemImage: "mappin.and.ellipse") }
+                journeyLink(extra("hotelMap"), url: url, systemImage: "mappin.and.ellipse")
             }
             if let url = URL(string: hotel.rateURL) {
                 Link(destination: translatedGuideURL(url) ?? url) { Label(extra("rate"), systemImage: "yensign.circle.fill") }
@@ -2338,4 +2360,167 @@ private enum FeaturedRoutes {
         guard let result = try? JSONDecoder().decode([String: [String]].self, from: Data(json.utf8)) else { preconditionFailure("Invalid featured ui") }
         return result
     }()
+}
+
+
+private struct PlannerMapRequest: Identifiable {
+    let id = UUID()
+    let url: URL
+    let title: String
+}
+
+private enum PlannerMapText {
+    static let values: [String: [String]] = [
+        "close": ["閉じる", "닫기", "关闭", "Close", "ปิด"],
+        "loading": ["地図を読み込み中…", "지도를 불러오는 중…", "正在加载地图…", "Loading map…", "กำลังโหลดแผนที่…"],
+        "retry": ["再読み込み", "새로고침", "重新加载", "Reload", "โหลดใหม่"],
+        "error": ["地図を読み込めませんでした。通信状態を確認し、再読み込みしてください。", "지도를 불러오지 못했습니다. 연결을 확인하고 다시 시도하세요.", "无法加载地图，请检查网络并重新加载。", "The map could not load. Check your connection and reload.", "โหลดแผนที่ไม่ได้ ตรวจสอบการเชื่อมต่อแล้วโหลดใหม่"],
+        "note": ["選択言語で地図を読み込みます。地名・店舗名は現地表記が残る場合があります。", "선택한 언어로 지도를 요청합니다. 지명·상호는 현지 언어로 남을 수 있습니다.", "以所选语言加载地图；部分地名与店名可能保留当地文字。", "The map is requested in your chosen language. Some place and business names may remain in the local language.", "โหลดแผนที่ตามภาษาที่เลือก ชื่อสถานที่และร้านบางแห่งอาจยังเป็นภาษาท้องถิ่น"]
+    ]
+    static func text(_ key: String, _ language: GuideLanguage) -> String {
+        values[key]?[language.index] ?? key
+    }
+}
+
+private struct PlannerMapScreen: View {
+    let request: PlannerMapRequest
+    let language: GuideLanguage
+    @Environment(\.dismiss) private var dismiss
+    @State private var loading = true
+    @State private var failed = false
+    @State private var reloadID = UUID()
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                HStack {
+                    Image(systemName: "globe")
+                    Text(language.title).font(.subheadline.bold())
+                    Spacer()
+                }.padding(.horizontal).padding(.vertical, 8)
+                Text(PlannerMapText.text("note", language))
+                    .font(.caption).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal).padding(.bottom, 8)
+                ZStack {
+                    PlannerMapWebView(url: request.url, languageCode: language.rawValue,
+                                      loading: $loading, failed: $failed)
+                        .id(reloadID)
+                    if loading && !failed {
+                        ProgressView(PlannerMapText.text("loading", language))
+                            .padding(16).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+                    }
+                    if failed {
+                        VStack(spacing: 16) {
+                            Text(PlannerMapText.text("error", language)).multilineTextAlignment(.center)
+                            Button(PlannerMapText.text("retry", language)) { reload() }
+                                .buttonStyle(.borderedProminent)
+                        }.padding(24).frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .background(Color(.systemBackground))
+                    }
+                }
+            }
+            .navigationTitle(request.title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button(PlannerMapText.text("close", language)) { dismiss() }
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button { reload() } label: { Image(systemName: "arrow.clockwise") }
+                        .accessibilityLabel(PlannerMapText.text("retry", language))
+                }
+            }
+        }
+        .environment(\.locale, language.locale)
+    }
+    private func reload() {
+        loading = true
+        failed = false
+        reloadID = UUID()
+    }
+}
+
+private struct PlannerMapWebView: UIViewRepresentable {
+    let url: URL
+    let languageCode: String
+    @Binding var loading: Bool
+    @Binding var failed: Bool
+
+    func makeCoordinator() -> Coordinator { Coordinator(loading: $loading, failed: $failed) }
+    func makeUIView(context: Context) -> WKWebView {
+        let configuration = WKWebViewConfiguration()
+        // A fresh map session avoids inheriting a previous signed-in display language.
+        configuration.websiteDataStore = .nonPersistent()
+        let view = WKWebView(frame: .zero, configuration: configuration)
+        view.navigationDelegate = context.coordinator
+        view.uiDelegate = context.coordinator
+        view.allowsBackForwardNavigationGestures = true
+        var request = URLRequest(url: url)
+        let code = languageCode == "zh" ? "zh-CN" : languageCode
+        request.setValue("\(code),en;q=0.8", forHTTPHeaderField: "Accept-Language")
+        view.load(request)
+        return view
+    }
+    func updateUIView(_ uiView: WKWebView, context: Context) {}
+    static func dismantleUIView(_ uiView: WKWebView, coordinator: Coordinator) {
+        uiView.stopLoading()
+        uiView.navigationDelegate = nil
+        uiView.uiDelegate = nil
+    }
+    final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
+        let loading: Binding<Bool>
+        let failed: Binding<Bool>
+        init(loading: Binding<Bool>, failed: Binding<Bool>) {
+            self.loading = loading
+            self.failed = failed
+        }
+        func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+            loading.wrappedValue = true
+            failed.wrappedValue = false
+        }
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            loading.wrappedValue = false
+        }
+        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+            showError(error)
+        }
+        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+            showError(error)
+        }
+        private func showError(_ error: Error) {
+            if (error as NSError).code == NSURLErrorCancelled { return }
+            loading.wrappedValue = false
+            failed.wrappedValue = true
+        }
+        func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
+                     decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+            let scheme = navigationAction.request.url?.scheme?.lowercased()
+            // Keep maps in this screen; app-launch schemes do not take over navigation.
+            decisionHandler(scheme == "https" || scheme == "http" || scheme == "about" ? .allow : .cancel)
+        }
+        func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse,
+                     decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
+            if navigationResponse.isForMainFrame,
+               let response = navigationResponse.response as? HTTPURLResponse, response.statusCode >= 400 {
+                loading.wrappedValue = false
+                failed.wrappedValue = true
+                decisionHandler(.cancel)
+            } else {
+                decisionHandler(.allow)
+            }
+        }
+        func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+            loading.wrappedValue = false
+            failed.wrappedValue = true
+        }
+        func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
+                     for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+            if navigationAction.targetFrame == nil,
+               let scheme = navigationAction.request.url?.scheme?.lowercased(),
+               scheme == "https" || scheme == "http" {
+                webView.load(navigationAction.request)
+            }
+            return nil
+        }
+    }
 }
