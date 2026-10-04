@@ -90,6 +90,8 @@ private struct PlannerView: View {
     @State private var hotelSearching = false
     @State private var hotelSearchError = false
     @State private var hotelSearchID = UUID()
+    @State private var hotelTravelMinutes: [String: Int] = [:]
+    @State private var hotelTravelLoading = false
     @AppStorage("japanDay.suggestedHotels") private var savedSuggestedHotels = "{}"
 
     private var language: GuideLanguage { GuideLanguage(rawValue: languageCode) ?? .ja }
@@ -407,6 +409,9 @@ private struct PlannerView: View {
         let prefecture = NationwideRoutes.prefectures.first(where: { $0.id == routePrefecture })?.ja ?? cityQuery
         return value.isEmpty ? "" : "\(value), \(prefecture), Japan"
     }
+    private var hotelTravelKey: String {
+        "\(route.id)|\(selectedVenue(0).name)|\(hotelQuery)"
+    }
     private var finishMinutes: Int {
         guard let index = route.stops.indices.last else { return startMinutes }
         return startOfStop(index) + duration(route.stops[index], venue: selectedVenue(index))
@@ -610,12 +615,20 @@ private struct PlannerView: View {
                     }.padding(.top, 10)
                 }
             }
+            if !hotelQuery.isEmpty {
+                hotelTravelSummary
+                    .task(id: hotelTravelKey) { await updateHotelTravelTimes() }
+            }
             if !hotelSearching {
                 journeyAction(journeyText("findHotels"), systemImage: "magnifyingglass") { searchHotels() }
             } else {
                 ProgressView(journeyText("searchingHotels"))
             }
             if hotelSearchError { Text(journeyText("hotelsUnavailable")).font(.footnote) }
+            if !hotelResults.isEmpty {
+                Text(hotelTravelText("nearestFive"))
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             ForEach(hotelResults) { hotel in
                 VStack(alignment: .leading, spacing: 10) {
                     Text(hotel.name).font(.headline)
@@ -663,20 +676,20 @@ private struct PlannerView: View {
                 request.naturalLanguageQuery = "ホテル"
                 request.resultTypes = .pointOfInterest
                 request.pointOfInterestFilter = MKPointOfInterestFilter(including: [.hotel])
-                request.region = MKCoordinateRegion(center: coordinate, latitudinalMeters: 5000, longitudinalMeters: 5000)
+                request.region = MKCoordinateRegion(center: coordinate, latitudinalMeters: 4000, longitudinalMeters: 4000)
                 let response = try await MKLocalSearch(request: request).start()
                 guard hotelSearchID == token else { return }
                 var seen = Set<String>()
                 hotelResults = Array(response.mapItems.compactMap { item -> HotelSuggestion? in
                     let point = item.placemark.coordinate
                     let distance = center.distance(from: CLLocation(latitude: point.latitude, longitude: point.longitude))
-                    guard distance <= 3500, let name = item.name, !name.isEmpty else { return nil }
+                    guard distance <= 2000, let name = item.name, !name.isEmpty else { return nil }
                     let id = "\(name)|\(point.latitude)|\(point.longitude)"
                     guard seen.insert(id).inserted else { return nil }
                     return HotelSuggestion(id: id, name: name, address: item.placemark.title ?? name,
                                            latitude: point.latitude, longitude: point.longitude,
                                            phone: item.phoneNumber, website: item.url?.absoluteString, distance: distance)
-                }.sorted { $0.distance < $1.distance }.prefix(8))
+                }.sorted { $0.distance < $1.distance }.prefix(5))
                 hotelSearching = false
                 hotelSearchError = hotelResults.isEmpty
             } catch {
@@ -685,6 +698,82 @@ private struct PlannerView: View {
                 hotelSearchError = true
             }
         }
+    }
+    private func hotelTravelText(_ key: String) -> String {
+        HotelTravelTranslations.ui[key]?[language.index] ?? key
+    }
+    private var hotelTravelSummary: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("\(extra("toFirst")) · \(venueText(selectedVenue(0), 0))")
+                .font(.subheadline.bold()).foregroundStyle(journeyGold)
+            if hotelTravelLoading { ProgressView(hotelTravelText("calculating")) }
+            ForEach(["transit", "walking", "taxi"], id: \.self) { mode in
+                HStack {
+                    Text(hotelTravelText(mode))
+                    Spacer(minLength: 8)
+                    if let minutes = hotelTravelMinutes[mode] {
+                        Text(String(format: hotelTravelText("minutes"), locale: language.locale, arguments: [minutes]))
+                            .fontWeight(.bold).monospacedDigit()
+                    } else if !hotelTravelLoading {
+                        Text(hotelTravelText("unavailable")).foregroundStyle(.secondary)
+                    }
+                }.font(.subheadline)
+            }
+            Text(hotelTravelText("estimateNote"))
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        .padding(12)
+        .background(Color(red: 0.10, green: 0.18, blue: 0.26), in: RoundedRectangle(cornerRadius: 12))
+    }
+    @MainActor
+    private func updateHotelTravelTimes() async {
+        hotelTravelMinutes = [:]
+        hotelTravelLoading = true
+        do {
+            // Pause while a manually entered hotel name is still being typed.
+            try await Task.sleep(nanoseconds: 500_000_000)
+            let origin: MKMapItem
+            if hotelChoice == "suggested", let hotel = selectedSuggestedHotel {
+                origin = MKMapItem(placemark: MKPlacemark(coordinate: CLLocationCoordinate2D(latitude: hotel.latitude, longitude: hotel.longitude)))
+            } else {
+                let request = MKLocalSearch.Request()
+                request.naturalLanguageQuery = hotelQuery
+                guard let result = try await MKLocalSearch(request: request).start().mapItems.first else {
+                    if !Task.isCancelled { hotelTravelLoading = false }
+                    return
+                }
+                origin = result
+            }
+            let destinationRequest = MKLocalSearch.Request()
+            destinationRequest.naturalLanguageQuery = venueQuery(selectedVenue(0))
+            guard let destination = try await MKLocalSearch(request: destinationRequest).start().mapItems.first else {
+                if !Task.isCancelled { hotelTravelLoading = false }
+                return
+            }
+            guard !Task.isCancelled else { return }
+            async let transit = travelMinutes(from: origin, to: destination, by: .transit)
+            async let walking = travelMinutes(from: origin, to: destination, by: .walking)
+            async let taxi = travelMinutes(from: origin, to: destination, by: .automobile)
+            let (t, w, a) = await (transit, walking, taxi)
+            guard !Task.isCancelled else { return }
+            if let t = t { hotelTravelMinutes["transit"] = t }
+            if let w = w { hotelTravelMinutes["walking"] = w }
+            if let a = a { hotelTravelMinutes["taxi"] = a }
+            hotelTravelLoading = false
+        } catch {
+            if !Task.isCancelled { hotelTravelLoading = false }
+        }
+    }
+    private func travelMinutes(from origin: MKMapItem, to destination: MKMapItem,
+                               by transport: MKDirectionsTransportType) async -> Int? {
+        let request = MKDirections.Request()
+        request.source = origin
+        request.destination = destination
+        request.transportType = transport
+        request.departureDate = Date()
+        guard let response = try? await MKDirections(request: request).calculateETA(),
+              response.expectedTravelTime > 0 else { return nil }
+        return max(1, Int(ceil(response.expectedTravelTime / 60)))
     }
     private var journeyOverview: some View {
         journeyPanel {
@@ -1400,6 +1489,19 @@ private enum PlannerInstructions {
             ]
         }
     }
+}
+
+private enum HotelTravelTranslations {
+    static let ui: [String: [String]] = [
+        "nearestFive": ["最初の観光地から近い順・5件まで（2km以内）", "첫 관광지에서 가까운 순 · 최대 5곳(2km 이내)", "距第一站由近到远，最多5家（2公里内）", "Nearest to the first stop · up to 5 within 2 km", "ใกล้จุดเที่ยวแรกที่สุด สูงสุด 5 แห่งในระยะ 2 กม."],
+        "calculating": ["経路の所要時間を確認中…", "경로 소요 시간 확인 중…", "正在查询路线时间…", "Checking travel times…", "กำลังตรวจสอบเวลาเดินทาง…"],
+        "transit": ["電車・バス", "전철·버스", "电车・公交", "Train / bus", "รถไฟ / รถบัส"],
+        "walking": ["徒歩", "도보", "步行", "Walking", "เดิน"],
+        "taxi": ["車・タクシー", "차량·택시", "汽车・出租车", "Car / taxi", "รถยนต์ / แท็กซี่"],
+        "minutes": ["約%d分", "약 %d분", "约%d分钟", "About %d min", "ประมาณ %d นาที"],
+        "unavailable": ["経路を取得できません", "경로를 가져올 수 없음", "无法获取路线", "Route unavailable", "ไม่พบเส้นทาง"],
+        "estimateNote": ["現在の経路による目安です。電車の待ち時間・道路状況は出発時に確認してください。", "현재 경로 기준 예상 시간입니다. 열차 대기 시간과 도로 상황은 출발할 때 확인하세요.", "按当前路线估算。请在出发时确认等车时间与路况。", "Current route estimates. Check train waits and traffic when you leave.", "เป็นเวลาโดยประมาณตามเส้นทางปัจจุบัน โปรดตรวจสอบเวลารอรถและสภาพจราจรก่อนออกเดินทาง"]
+    ]
 }
 
 private enum GuideTranslations {
