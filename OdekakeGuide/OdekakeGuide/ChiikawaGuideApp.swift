@@ -93,6 +93,7 @@ private struct PlannerView: View {
     @State private var hotelTravelMinutes: [String: Int] = [:]
     @State private var hotelTravelLoading = false
     @State private var savedSuggestedHotels = "{}"
+    @State private var routeLegTimes: [String: [String: Int]] = [:]
 
     private var language: GuideLanguage { GuideLanguage(rawValue: languageCode) ?? .ja }
     private func text(_ key: String) -> String { GuideTranslations.ui[key]?[language.index] ?? key }
@@ -349,7 +350,7 @@ private struct PlannerView: View {
                 }
                 .onChange(of: startMinutes) { _ in resetJourney() }
                 .onChange(of: dinnerArea) { _ in resetJourney() }
-                .onChange(of: savedChoices) { _ in resetDinner(); resetLunch() }
+                .onChange(of: savedChoices) { _ in routeLegTimes = [:]; resetDinner(); resetLunch() }
                 .onChange(of: dinnerNearHotel) { _ in resetJourney() }
             } else {
                 languageHome
@@ -481,6 +482,7 @@ private struct PlannerView: View {
     private func resetJourney() {
         journeyIndex = 0
         journeyCompleted = false
+        routeLegTimes = [:]
         resetDinner()
         resetLunch()
     }
@@ -1112,16 +1114,76 @@ private struct PlannerView: View {
         return parts?.url
     }
     private func routeLinks(origin: String?, destination: String) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
+        let key = routeLegKey(origin: origin, destination: destination)
+        return VStack(alignment: .leading, spacing: 10) {
             if let url = mapURL(origin: origin, destination: destination, mode: "transit") {
-                journeyLink(extra("transitRoute"), url: url, systemImage: "tram.fill")
+                timedRouteLink(extra("transitRoute"), url: url, systemImage: "tram.fill", key: key, mode: "transit", canEstimate: origin?.isEmpty == false)
             }
             if let url = mapURL(origin: origin, destination: destination, mode: "walking") {
-                journeyLink(extra("walkRoute"), url: url, systemImage: "figure.walk")
+                timedRouteLink(extra("walkRoute"), url: url, systemImage: "figure.walk", key: key, mode: "walking", canEstimate: origin?.isEmpty == false)
             }
             if let url = mapURL(origin: origin, destination: destination, mode: "driving") {
-                journeyLink(extra("driveRoute"), url: url, systemImage: "car.fill")
+                timedRouteLink(extra("driveRoute"), url: url, systemImage: "car.fill", key: key, mode: "taxi", canEstimate: origin?.isEmpty == false)
             }
+        }
+        .task(id: key) {
+            guard let origin, !origin.isEmpty else { return }
+            await updateRouteLegTimes(origin: origin, destination: destination, key: key)
+        }
+    }
+    private func routeLegKey(origin: String?, destination: String) -> String {
+        "\(route.id)|\(origin ?? "")|\(destination)"
+    }
+    private func timedRouteLink(_ title: String, url: URL, systemImage: String, key: String, mode: String, canEstimate: Bool) -> some View {
+        Button {
+            presentedMap = PlannerMapRequest(url: localizedMapURL(url), title: title)
+        } label: {
+            HStack(spacing: 8) {
+                Label(title, systemImage: systemImage)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                if let minutes = routeLegTimes[key]?[mode] {
+                    Text(String(format: hotelTravelText("minutes"), locale: language.locale, arguments: [minutes]))
+                        .monospacedDigit().fixedSize()
+                } else if routeLegTimes[key] != nil {
+                    Text(hotelTravelText("unavailable")).font(.caption).multilineTextAlignment(.trailing)
+                } else if canEstimate {
+                    ProgressView().tint(journeyGold)
+                }
+            }
+            .font(.subheadline.bold()).fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+            .padding(.horizontal, 12)
+            .foregroundStyle(journeyGold)
+            .background(Color(red: 0.15, green: 0.22, blue: 0.33), in: RoundedRectangle(cornerRadius: 10))
+        }.buttonStyle(.plain)
+    }
+    @MainActor
+    private func updateRouteLegTimes(origin: String, destination: String, key: String) async {
+        guard routeLegTimes[key] == nil else { return }
+        do {
+            let fromRequest = MKLocalSearch.Request()
+            fromRequest.naturalLanguageQuery = origin
+            let toRequest = MKLocalSearch.Request()
+            toRequest.naturalLanguageQuery = destination
+            let from = try await MKLocalSearch(request: fromRequest).start()
+            let to = try await MKLocalSearch(request: toRequest).start()
+            guard !Task.isCancelled else { return }
+            guard let start = from.mapItems.first, let end = to.mapItems.first else {
+                routeLegTimes[key] = [:]
+                return
+            }
+            async let transit = travelMinutes(from: start, to: end, by: .transit)
+            async let walking = travelMinutes(from: start, to: end, by: .walking)
+            async let taxi = travelMinutes(from: start, to: end, by: .automobile)
+            let (t, w, a) = await (transit, walking, taxi)
+            guard !Task.isCancelled else { return }
+            var times: [String: Int] = [:]
+            if let t { times["transit"] = t }
+            if let w { times["walking"] = w }
+            if let a { times["taxi"] = a }
+            routeLegTimes[key] = times
+        } catch {
+            if !Task.isCancelled { routeLegTimes[key] = [:] }
         }
     }
     private var hotelSection: some View {
@@ -2058,7 +2120,7 @@ private enum TravelExtras {
         "driveRoute": ["車・タクシーの経路", "차량·택시 경로", "汽车・出租车路线", "Car / taxi route", "เส้นทางรถยนต์หรือแท็กซี่"],
         "liveNote": ["乗車駅・降車駅・乗換・発車時刻・運賃は「電車・地下鉄・バスの乗換」で確認できます。目的地を入れ替えるとリンクも更新されます。", "승차역, 하차역, 환승, 출발 시간과 요금은 대중교통 링크에서 확인할 수 있습니다. 장소를 바꾸면 링크도 업데이트됩니다.", "点击公共交通链接查看上车站、下车站、换乘、发车时间和票价。更换目的地后链接也会更新。", "Open transit routes for boarding and exit stops, transfers, departures and fares. Links update when you swap a destination.", "เปิดเส้นทางขนส่งสาธารณะเพื่อดูจุดขึ้นลง การต่อรถ เวลาออก และค่าโดยสาร ลิงก์จะเปลี่ยนตามสถานที่ที่เลือก"],
         "walkFallback": ["徒歩でこの2か所を移動できます。細かな曲がり角や横断場所は「徒歩の道順」で確認してください。歩く距離が長い場合は公共交通の候補も比較できます。", "두 장소 사이를 걸어서 이동할 수 있습니다. 자세한 회전 지점과 횡단 위치는 도보 경로에서 확인하세요. 거리가 길면 대중교통도 비교할 수 있습니다.", "这两处可步行前往。转弯与过街位置请查看步行路线；距离较长时也可比较公共交通方案。", "You can walk between these stops. Open walking directions for turns and crossings; compare transit if the walk is long.", "เดินระหว่างสองจุดนี้ได้ ดูทางเลี้ยวและจุดข้ามถนนในเส้นทางเดิน หากระยะไกลสามารถเปรียบเทียบขนส่งสาธารณะได้"],
-        "planningGap": ["計画上の移動枠：約%d分（実際の所要時間は経路図で確認）", "계획상 이동 시간: 약 %d분 (실제 시간은 지도에서 확인)", "规划交通时间：约%d分钟（实际时间请查看地图）", "Planning allowance: about %d min (check the map for actual travel time)", "เวลาเผื่อเดินทางในแผนประมาณ %d นาที (ดูเวลาจริงจากแผนที่)"],
+        "planningGap": ["計画上の移動枠：約%d分（下の各経路の所要時間とは別）", "계획상 이동 여유: 약 %d분 (아래 경로별 소요 시간과 별도)", "行程预留交通时间：约%d分钟（与下方各路线时间不同）", "Time allowed in the plan: about %d min (separate from route times below)", "เวลาเผื่อเดินทางในแผนประมาณ %d นาที (แยกจากเวลาแต่ละเส้นทางด้านล่าง)"],
         "asakusaRail": ["電車なら、東武浅草駅→東武スカイツリーライン→とうきょうスカイツリー駅→徒歩で目的地へ。地下鉄を使う候補や駅までの徒歩も、乗換リンクで比較できます。", "전철 이용 시 도부 아사쿠사역→도부 스카이트리선→도쿄스카이트리역→목적지까지 도보입니다. 지하철과 역까지의 도보도 환승 링크에서 비교하세요.", "乘电车可从东武浅草站→东武晴空塔线→东京晴空塔站→步行至目的地。地铁及前往车站的步行路线也可在换乘链接比较。", "By train: Tobu Asakusa Station → Tobu Skytree Line → Tokyo Skytree Station → walk to the venue. Compare subway options and station walks through the transit link.", "หากใช้รถไฟ: สถานีโทบุอาซากุสะ → สายโทบุสกายทรี → สถานีโตเกียวสกายทรี → เดินไปสถานที่ เปรียบเทียบรถไฟใต้ดินและทางเดินถึงสถานีได้จากลิงก์"],
         "checked": ["公式情報確認：2026年10月2日", "공식 정보 확인: 2026년 10월 2일", "官方信息核对：2026年10月2日", "Official details checked: 2 Oct 2026", "ตรวจสอบข้อมูลทางการ: 2 ต.ค. 2026"]
     ]
