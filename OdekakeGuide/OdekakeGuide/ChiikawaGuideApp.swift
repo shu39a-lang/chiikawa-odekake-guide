@@ -719,25 +719,43 @@ private struct PlannerView: View {
                 }
                 let coordinate = first.placemark.coordinate
                 let center = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
-                let request = MKLocalSearch.Request()
-                request.naturalLanguageQuery = "ホテル"
-                request.resultTypes = .pointOfInterest
-                request.pointOfInterestFilter = MKPointOfInterestFilter(including: [.hotel])
-                request.region = MKCoordinateRegion(center: coordinate, latitudinalMeters: 4000, longitudinalMeters: 4000)
-                let response = try await MKLocalSearch(request: request).start()
-                guard hotelSearchID == token else { return }
                 var seen = Set<String>()
-                hotelResults = Array(response.mapItems.compactMap { item -> HotelSuggestion? in
-                    let point = item.placemark.coordinate
-                    let distance = center.distance(from: CLLocation(latitude: point.latitude, longitude: point.longitude))
-                    guard distance <= 2000, hotelPlace(item, isIn: prefecture),
-                          let name = item.name, !name.isEmpty else { return nil }
-                    let id = "\(name)|\(point.latitude)|\(point.longitude)"
-                    guard seen.insert(id).inserted else { return nil }
-                    return HotelSuggestion(id: id, name: name, address: item.placemark.title ?? name,
-                                           latitude: point.latitude, longitude: point.longitude,
-                                           phone: item.phoneNumber, website: item.url?.absoluteString, distance: distance)
-                }.sorted { $0.distance < $1.distance }.prefix(5))
+                var suggestions: [HotelSuggestion] = []
+                // Keep cities local; widen the search only when fewer than three stays were found.
+                for radius in [2000.0, 5000.0, 10000.0, 25000.0, 50000.0] {
+                    for term in ["ホテル", "旅館"] {
+                        let request = MKLocalSearch.Request()
+                        request.naturalLanguageQuery = term
+                        request.resultTypes = .pointOfInterest
+                        request.region = MKCoordinateRegion(center: coordinate,
+                                                            latitudinalMeters: radius * 2,
+                                                            longitudinalMeters: radius * 2)
+                        do {
+                            let response = try await MKLocalSearch(request: request).start()
+                            guard hotelSearchID == token else { return }
+                            for item in response.mapItems {
+                                let point = item.placemark.coordinate
+                                let distance = center.distance(from: CLLocation(latitude: point.latitude, longitude: point.longitude))
+                                guard distance <= radius, hotelPlace(item, isIn: prefecture),
+                                      let name = item.name, !name.isEmpty else { continue }
+                                let lodgingName = name.lowercased()
+                                guard item.pointOfInterestCategory == .hotel || ["ホテル", "旅館", "宿", "hotel", "inn", "ryokan", "lodge"]
+                                    .contains(where: { lodgingName.contains($0) }) else { continue }
+                                let id = "\(name)|\(point.latitude)|\(point.longitude)"
+                                guard seen.insert(id).inserted else { continue }
+                                suggestions.append(HotelSuggestion(id: id, name: name, address: item.placemark.title ?? name,
+                                                                   latitude: point.latitude, longitude: point.longitude,
+                                                                   phone: item.phoneNumber, website: item.url?.absoluteString,
+                                                                   distance: distance))
+                            }
+                        } catch {
+                            guard hotelSearchID == token else { return }
+                        }
+                        if suggestions.count >= 3 { break }
+                    }
+                    if suggestions.count >= 3 { break }
+                }
+                hotelResults = Array(suggestions.sorted { $0.distance < $1.distance }.prefix(5))
                 hotelSearching = false
                 hotelSearchError = hotelResults.isEmpty
             } catch {
@@ -748,7 +766,8 @@ private struct PlannerView: View {
         }
     }
     private func hotelPlace(_ item: MKMapItem, isIn prefecture: PrefectureOption) -> Bool {
-        guard let area = item.placemark.administrativeArea?.trimmingCharacters(in: .whitespacesAndNewlines),
+        guard let area = (item.placemark.administrativeArea ?? item.placemark.title)?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
               !area.isEmpty else { return false }
         let japaneseName = prefecture.ja.replacingOccurrences(of: "都", with: "")
             .replacingOccurrences(of: "道", with: "")
@@ -761,6 +780,18 @@ private struct PlannerView: View {
     private func hotelTravelText(_ key: String) -> String {
         HotelTravelTranslations.ui[key]?[language.index] ?? key
     }
+    private func travelDurationText(_ minutes: Int) -> String {
+        guard minutes >= 60 else {
+            return String(format: hotelTravelText("minutes"), locale: language.locale, arguments: [minutes])
+        }
+        let hours = minutes / 60
+        let remainder = minutes % 60
+        if remainder == 0 {
+            return String(format: hotelTravelText("hours"), locale: language.locale, arguments: [hours])
+        }
+        return String(format: hotelTravelText("hoursAndMinutes"), locale: language.locale,
+                      arguments: [hours, remainder])
+    }
     private var hotelTravelSummary: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("\(extra("toFirst")) · \(venueText(selectedVenue(0), 0))")
@@ -771,7 +802,7 @@ private struct PlannerView: View {
                     Text(hotelTravelText(mode))
                     Spacer(minLength: 8)
                     if let minutes = hotelTravelMinutes[mode] {
-                        Text(String(format: hotelTravelText("minutes"), locale: language.locale, arguments: [minutes]))
+                        Text(travelDurationText(minutes))
                             .fontWeight(.bold).monospacedDigit()
                     } else if !hotelTravelLoading {
                         Text(hotelTravelText("unavailable")).foregroundStyle(.secondary)
@@ -1174,7 +1205,7 @@ private struct PlannerView: View {
                 Label(title, systemImage: systemImage)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 if let minutes = routeLegTimes[key]?[mode] {
-                    Text(String(format: hotelTravelText("minutes"), locale: language.locale, arguments: [minutes]))
+                    Text(travelDurationText(minutes))
                         .monospacedDigit().fixedSize()
                 } else if routeLegTimes[key] != nil {
                     Text(hotelTravelText("unavailable")).font(.caption).multilineTextAlignment(.trailing)
@@ -1617,12 +1648,14 @@ private enum HotelTravelTranslations {
         "notChosen": ["ホテルはまだ選ばれていません。近くのホテルを探すか、自分のホテルを入力してください。", "아직 호텔을 선택하지 않았습니다. 주변 호텔을 찾거나 예약한 호텔을 입력하세요.", "尚未选择酒店。请搜索附近酒店或输入已预订的酒店。", "No hotel selected yet. Find one nearby or enter your booked hotel.", "ยังไม่ได้เลือกโรงแรม ค้นหาโรงแรมใกล้เคียงหรือระบุโรงแรมที่จองไว้"],
         "selectedHotel": ["選択中のホテル", "선택한 호텔", "已选酒店", "Selected hotel", "โรงแรมที่เลือก"],
         "afterChoosing": ["ホテルを選ぶと、その下に最初の観光地までの所要時間が表示されます。次は旅の順番へ進んでください。", "호텔을 고르면 바로 아래에 첫 관광지까지의 이동 시간이 표시됩니다. 다음에는 여행 순서를 확인하세요.", "选择酒店后，下方会显示到第一处景点的所需时间。接着查看行程顺序。", "Choose a hotel to see travel times to the first stop directly below it. Then follow the trip order.", "เลือกโรงแรมแล้วดูเวลาเดินทางไปยังจุดเที่ยวแรกด้านล่าง จากนั้นทำตามลำดับทริป"],
-        "nearestFive": ["最初の観光地から近い順・5件まで（2km以内）", "첫 관광지에서 가까운 순 · 최대 5곳(2km 이내)", "距第一站由近到远，最多5家（2公里内）", "Nearest to the first stop · up to 5 within 2 km", "ใกล้จุดเที่ยวแรกที่สุด สูงสุด 5 แห่งในระยะ 2 กม."],
+        "nearestFive": ["最初の観光地から近い順・最大5件（少ない地域では検索範囲を拡大）", "첫 관광지에서 가까운 순 · 최대 5곳(결과가 적으면 범위 확대)", "距第一站由近到远，最多5家（数量较少时扩大范围）", "Nearest to the first stop · up to 5 (wider search where needed)", "ใกล้จุดเที่ยวแรกที่สุด สูงสุด 5 แห่ง (ขยายพื้นที่หากพบน้อย)"],
         "calculating": ["経路の所要時間を確認中…", "경로 소요 시간 확인 중…", "正在查询路线时间…", "Checking travel times…", "กำลังตรวจสอบเวลาเดินทาง…"],
         "transit": ["電車・バス", "전철·버스", "电车・公交", "Train / bus", "รถไฟ / รถบัส"],
         "walking": ["徒歩", "도보", "步行", "Walking", "เดิน"],
         "taxi": ["車・タクシー", "차량·택시", "汽车・出租车", "Car / taxi", "รถยนต์ / แท็กซี่"],
         "minutes": ["約%d分", "약 %d분", "约%d分钟", "About %d min", "ประมาณ %d นาที"],
+        "hours": ["約%d時間", "약 %d시간", "约%d小时", "About %d hr", "ประมาณ %d ชม."],
+        "hoursAndMinutes": ["約%d時間%d分", "약 %d시간 %d분", "约%d小时%d分钟", "About %d hr %d min", "ประมาณ %d ชม. %d นาที"],
         "unavailable": ["経路を取得できません", "경로를 가져올 수 없음", "无法获取路线", "Route unavailable", "ไม่พบเส้นทาง"],
         "estimateNote": ["現在の経路による目安です。電車の待ち時間・道路状況は出発時に確認してください。", "현재 경로 기준 예상 시간입니다. 열차 대기 시간과 도로 상황은 출발할 때 확인하세요.", "按当前路线估算。请在出发时确认等车时间与路况。", "Current route estimates. Check train waits and traffic when you leave.", "เป็นเวลาโดยประมาณตามเส้นทางปัจจุบัน โปรดตรวจสอบเวลารอรถและสภาพจราจรก่อนออกเดินทาง"]
     ]
