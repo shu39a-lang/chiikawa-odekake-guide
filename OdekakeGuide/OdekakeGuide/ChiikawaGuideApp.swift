@@ -70,6 +70,7 @@ private struct PlannerView: View {
     @State private var presentedMap: PlannerMapRequest?
     @AppStorage("japanDay.language") private var languageCode = "ja"
     @State private var showingGuide = false
+    @State private var instructionsLanguage: GuideLanguage?
     @AppStorage("japanDay.hotels") private var savedHotels = "{}"
     @AppStorage("japanDay.customHotels") private var savedCustomHotels = "{}"
     @AppStorage("japanDay.dinnerArea") private var dinnerArea = "auto"
@@ -125,8 +126,9 @@ private struct PlannerView: View {
         return time(startOfStop(last) + duration(route.stops[last], venue: selectedVenue(last)))
     }
     private var languageButtons: some View {
-        LazyVGrid(columns: [GridItem(.adaptive(minimum: 125), spacing: 12)], spacing: 12) {
+        VStack(spacing: 12) {
             ForEach(GuideLanguage.allCases) { item in
+                HStack(alignment: .center, spacing: 12) {
                 Button {
                     swapIndex = nil
                     languageCode = item.rawValue
@@ -142,6 +144,26 @@ private struct PlannerView: View {
                     .background(language == item ? Color.yellow : Color(red: 0.08, green: 0.24, blue: 0.29), in: RoundedRectangle(cornerRadius: 14))
                 }
                 .buttonStyle(.plain)
+                .accessibilityAddTraits(language == item ? [.isSelected] : [])
+                Button {
+                    instructionsLanguage = item
+                } label: {
+                    VStack(spacing: 4) {
+                        Image(systemName: "book.closed.fill")
+                        Text(PlannerInstructions.buttonTitle(item))
+                            .multilineTextAlignment(.center)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .font(.headline)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 10)
+                    .frame(maxWidth: .infinity, minHeight: 52)
+                    .foregroundStyle(.white)
+                    .background(Color(red: 0.16, green: 0.22, blue: 0.35), in: RoundedRectangle(cornerRadius: 14))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("\(item.title) · \(PlannerInstructions.buttonTitle(item))")
+                }
             }
         }
     }
@@ -321,6 +343,9 @@ private struct PlannerView: View {
         }
         .sheet(item: $presentedMap) { request in
             PlannerMapScreen(request: request, language: language)
+        }
+        .sheet(item: $instructionsLanguage) { item in
+            PlannerInstructionsView(language: item)
         }
         .environment(\.locale, language.locale)
         .preferredColorScheme(.dark)
@@ -1256,6 +1281,124 @@ private enum GuideLanguage: String, CaseIterable, Identifiable {
     }
     var locale: Locale {
         Locale(identifier: ["ja_JP", "ko_KR", "zh_CN", "en_US", "th_TH"][index])
+    }
+}
+
+private struct PlannerInstructionsView: View {
+    let language: GuideLanguage
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    Text(language.title).font(.title2.bold()).foregroundStyle(.yellow)
+                    ForEach(PlannerInstructions.sections(language).indices, id: \.self) { index in
+                        let section = PlannerInstructions.sections(language)[index]
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("\(index + 1). \(section.0)")
+                                .font(.headline).foregroundStyle(.yellow)
+                                .accessibilityAddTraits(.isHeader)
+                            Text(section.1).font(.body).foregroundStyle(.white)
+                                .lineSpacing(5)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(16)
+                        .background(Color(red: 0.08, green: 0.17, blue: 0.22), in: RoundedRectangle(cornerRadius: 14))
+                    }
+                }.padding(20)
+            }
+            .background(Color.black)
+            .navigationTitle(PlannerInstructions.buttonTitle(language))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button(PlannerInstructions.closeTitle(language)) { dismiss() }
+                }
+            }
+        }
+        .environment(\.locale, language.locale)
+        .preferredColorScheme(.dark)
+        .tint(.yellow)
+    }
+}
+
+private enum PlannerInstructions {
+    static func buttonTitle(_ language: GuideLanguage) -> String {
+        ["使い方", "사용 방법", "使用说明", "User guide", "วิธีใช้งาน"][language.index]
+    }
+    static func closeTitle(_ language: GuideLanguage) -> String {
+        ["閉じる", "닫기", "关闭", "Close", "ปิด"][language.index]
+    }
+    static func sections(_ language: GuideLanguage) -> [(String, String)] {
+        switch language {
+        case .ja:
+            return [
+                ("このアプリでできること", "日本各地の一日観光コースを選び、観光地・昼食・ホテル・夕食を組み合わせて旅程を作れます。おすすめコースやSNSで話題のコースから選ぶこともできます。まずコースと出発時刻、宿泊するホテルを設定してください。"),
+                ("言語を選ぶ", "トップ画面の左側にある言語ボタンを押すと、その言語の観光画面が開きます。右側の「使い方」は、横にある言語の説明だけを開きます。説明を閉じてから左側の言語ボタンを押して始めてください。観光画面の「言語選択」から、このトップ画面に戻れます。"),
+                ("地域・コース・出発時刻", "おすすめのコースボタンを押すか、地域 → 都道府県 → 観光コースの順に選びます。出発時刻を変更すると、各立ち寄り先の予定時刻と終了予定時刻が更新されます。コースや出発時刻を変更すると、旅の進行は最初に戻ります。"),
+                ("ホテルを設定する", "ホテルの候補から宿泊先を選びます。自分で予約したホテルを使う場合は「自分のホテルを入力」を選び、ホテル名と地域・住所を入力してください。周辺ホテル検索で見つかった候補を選ぶこともできます。表示される地図、料金確認、公式サイト、電話などのボタンで詳細を確認します。ホテルの選択だけでは予約は完了しません。"),
+                ("旅程を進める", "旅の順番には、ホテルからの出発、観光、食事、ホテルへの帰着が並びます。一覧の行を押すと、その段階の案内が開きます。順に進む場合は画面下の次へ進むボタンを押し、戻る場合は前へ戻るボタンを押してください。必要なホテルや食事を選ぶまでは、次へ進めない段階があります。"),
+                ("観光地・昼食を変更する", "観光地の「立ち寄り先を変更」や昼食の選択ボタンを押し、表示された候補から選びます。変更後は旅程の予定時刻が更新されます。昼食を周辺から検索するコースでは、昼食検索ボタンを押し、住所やメニュー・営業時間を確認して店を選んでください。候補が出ない場合は、追加の地図検索リンクから探せます。"),
+                ("地図・移動経路を見る", "電車・バスなどの公共交通、徒歩、車の経路ボタンから、出発地と目的地の地図を開きます。地図はアプリ内で表示されます。公共交通のページでは乗車駅、乗り換え、所要時間などを確認してください。地図画面を閉じると旅程に戻ります。表示される時刻は目安なので、実際の出発時刻に合わせて経路を確認してください。"),
+                ("夕食とホテルへの帰り方", "夕食エリアは自動、ホテル周辺、最後の観光地周辺から選べます。自動では観光終了が18時より前ならホテル周辺、18時以降なら最後の観光地周辺を選びます。夕食検索ボタンで店を探し、店を選択してから経路を確認します。食後は選んだホテルへの帰り道を確認できます。"),
+                ("公式情報・翻訳・旅程共有", "観光地や店の公式情報ボタンで、営業時間・料金・チケット・予約条件を確認します。日本語以外ではリンク先の翻訳表示を優先しますが、翻訳できないページや固有名詞が元の言語で表示される場合があります。観光画面右上の共有ボタンで、旅程をメッセージやメモなどへ送れます。"),
+                ("保存と困ったとき", "選んだ言語、コース、出発時刻、観光地の選択、ホテル設定は端末に保存されます。検索した昼食・夕食の選択や旅の進行は、設定変更やアプリの再起動で再設定が必要になる場合があります。検索が出ない場合は通信を確認し、ホテル名に地域や住所を加えて再検索してください。予定時刻・移動時間・料金は目安です。出発前に公式情報と地図で最新の条件を確認してください。")
+            ]
+        case .ko:
+            return [
+                ("앱에서 할 수 있는 일", "일본 각지의 당일 관광 코스를 고르고 관광지, 점심, 호텔, 저녁을 조합하여 일정을 만듭니다. 추천 코스나 SNS에서 주목받는 코스도 선택할 수 있습니다. 먼저 코스, 출발 시간, 숙박할 호텔을 설정하세요."),
+                ("언어 선택", "첫 화면 왼쪽의 언어 버튼을 누르면 해당 언어의 여행 화면이 열립니다. 오른쪽 사용 방법 버튼은 같은 줄에 있는 언어의 설명만 엽니다. 설명을 닫고 왼쪽 언어 버튼을 눌러 시작하세요. 여행 화면의 언어 선택 버튼으로 첫 화면에 돌아갈 수 있습니다."),
+                ("지역, 코스, 출발 시간", "추천 코스를 누르거나 지역 → 도도부현 → 관광 코스 순서로 선택하세요. 출발 시간을 바꾸면 각 장소의 예정 시간과 종료 예정 시간이 갱신됩니다. 코스나 출발 시간을 바꾸면 여행 진행 단계가 처음으로 돌아갑니다."),
+                ("호텔 설정", "호텔 후보에서 숙박할 곳을 선택하세요. 직접 예약한 호텔은 내 호텔 입력을 선택한 뒤 호텔 이름과 지역 또는 주소를 입력하세요. 주변 호텔 검색으로 찾은 후보도 선택할 수 있습니다. 표시되는 지도, 요금 확인, 공식 사이트, 전화 버튼으로 상세 정보를 확인하세요. 호텔을 선택하는 것만으로 예약되지는 않습니다."),
+                ("일정 진행", "순서 목록에는 호텔 출발, 관광, 식사, 호텔 복귀가 표시됩니다. 목록의 항목을 누르면 해당 단계의 안내가 열립니다. 순서대로 진행하려면 아래의 다음 단계 버튼을, 돌아가려면 이전 단계 버튼을 누르세요. 필요한 호텔이나 식당을 선택해야 다음으로 넘어갈 수 있는 단계도 있습니다."),
+                ("관광지와 점심 변경", "관광지 변경 또는 점심 선택 버튼을 누르고 후보를 선택하세요. 변경하면 일정의 예정 시간이 갱신됩니다. 주변 점심 식당을 검색하는 코스에서는 점심 검색 버튼으로 찾고 주소, 메뉴, 영업시간을 확인한 뒤 식당을 선택하세요. 결과가 없으면 추가 지도 검색 링크를 이용하세요."),
+                ("지도와 이동 경로", "대중교통, 도보, 자동차 경로 버튼으로 출발지와 목적지의 지도를 엽니다. 지도는 앱 안에서 표시됩니다. 대중교통 페이지에서 승차역, 환승, 소요 시간 등을 확인하세요. 지도를 닫으면 일정으로 돌아갑니다. 예정 시간은 추정치이므로 실제 출발 시간에 맞춰 경로를 확인하세요."),
+                ("저녁과 호텔 복귀", "저녁 장소는 자동, 호텔 주변, 마지막 관광지 주변 중에서 고릅니다. 자동은 관광이 18시 전에 끝나면 호텔 주변, 18시부터는 마지막 관광지 주변을 선택합니다. 저녁 검색 버튼으로 식당을 찾고 선택한 뒤 경로를 확인하세요. 식사 후에는 선택한 호텔로 돌아가는 길을 확인할 수 있습니다."),
+                ("공식 정보, 번역, 공유", "관광지와 식당의 공식 정보 버튼으로 영업시간, 요금, 입장권, 예약 조건을 확인하세요. 일본어 이외의 언어에서는 번역 페이지를 우선 표시하지만 일부 페이지나 고유명사는 원래 언어로 나올 수 있습니다. 여행 화면 오른쪽 위 공유 버튼으로 일정을 메시지나 메모 등에 보낼 수 있습니다."),
+                ("저장 및 문제 해결", "선택한 언어, 코스, 출발 시간, 관광지 선택, 호텔 설정은 기기에 저장됩니다. 검색한 점심·저녁 선택과 여행 진행 단계는 설정 변경이나 앱 재시작 후 다시 설정해야 할 수 있습니다. 검색이 안 되면 인터넷 연결을 확인하고 호텔 이름에 지역이나 주소를 더해 다시 검색하세요. 시간, 이동 간격, 요금은 참고용입니다. 출발 전에 공식 정보와 지도에서 최신 조건을 확인하세요.")
+            ]
+        case .zh:
+            return [
+                ("这个应用可以做什么", "选择日本各地的一日观光路线，组合景点、午餐、酒店和晚餐，制定行程。也可以选择推荐路线或在社交媒体上受关注的路线。请先设置路线、出发时间和入住酒店。"),
+                ("选择语言", "点击首页左侧的语言按钮，进入该语言的旅游页面。右侧的使用说明按钮只打开同一行语言的说明。关闭说明后，点击左侧语言按钮开始。在旅游页面点击选择语言，可以返回首页。"),
+                ("地区、路线和出发时间", "点击推荐路线，或按地区 → 都道府县 → 观光路线的顺序选择。修改出发时间后，各站预计时间和预计结束时间会更新。更改路线或出发时间后，行程进度会回到第一步。"),
+                ("设置酒店", "从酒店候选中选择入住地点。如已自行预订，请选择输入自己的酒店，并输入酒店名称及地区或地址。也可以通过周边酒店搜索选择候选。使用页面显示的地图、价格查询、官网、电话等按钮查看详情。选择酒店本身不会完成预订。"),
+                ("按步骤游览", "行程顺序中列出酒店出发、观光、用餐和返回酒店。点击列表中的一项，即可查看该阶段的说明。按顺序游览时，点击底部的下一步；需要返回时，点击上一步。某些阶段需要先选定酒店或餐厅，才能继续。"),
+                ("更换景点和午餐", "点击更换景点或选择午餐按钮，再从候选中选择。更改后，行程预计时间会更新。需要搜索附近午餐的路线，请点击午餐搜索，确认餐厅地址、菜单和营业时间后选择餐厅。没有结果时，可以使用更多地图搜索链接。"),
+                ("查看地图和交通路线", "点击公共交通、步行或驾车路线按钮，打开出发地与目的地的地图。地图在应用内显示。请在公共交通页面确认上车站、换乘和所需时间等信息。关闭地图后返回行程。预计时间仅供参考，请按实际出发时间确认路线。"),
+                ("晚餐和返回酒店", "晚餐区域可选自动、酒店附近或最后景点附近。自动模式下，观光在18点前结束时选择酒店附近，18点及之后选择最后景点附近。点击晚餐搜索，选定餐厅后查看路线。餐后可以查看返回所选酒店的路线。"),
+                ("官方信息、翻译和分享", "通过景点或餐厅的官方信息按钮确认营业时间、价格、门票和预订条件。使用日语以外的语言时，会优先打开翻译页面，但部分网页或专有名称可能仍显示原文。点击旅游页面右上角的分享按钮，可将行程发送到消息、备忘录等。"),
+                ("保存和问题处理", "所选语言、路线、出发时间、景点选择和酒店设置会保存在设备上。搜索得到的午餐、晚餐选择以及行程进度，在更改设置或重启应用后可能需要重新设置。搜索无结果时，请检查网络，并在酒店名后加上地区或地址再搜索。时间、交通间隔和价格仅供参考。出发前请通过官方信息和地图确认最新条件。")
+            ]
+        case .en:
+            return [
+                ("What you can do", "Build a day trip in Japan by choosing a sightseeing route, places to visit, lunch, a hotel and dinner. You can also choose featured routes and routes highlighted on social media. Start by setting your route, departure time and hotel."),
+                ("Choose a language", "Tap a language button on the left of the home screen to open the planner in that language. The User guide button on the right opens instructions in the language on the same row. Close the guide, then tap the language button to begin. Use Languages in the planner to return home."),
+                ("Choose your route and start time", "Tap a featured route, or choose a region, prefecture and sightseeing route in that order. Changing the start time updates the planned times at each stop and the estimated finish time. Changing the route or start time returns your journey progress to the first stage."),
+                ("Set your hotel", "Choose a hotel from the suggestions. If you have booked elsewhere, choose Enter your own hotel and enter its name with the area or address. You can also search for nearby hotels and select a result. Use the available map, rate, website and phone buttons to check details. Selecting a hotel does not make a booking."),
+                ("Follow your itinerary", "The order list shows departure from the hotel, sightseeing, meals and return to the hotel. Tap a row to open that stage. To follow the trip in order, use the next-stage button at the bottom; use the previous-stage button to go back. Some stages require a hotel or restaurant selection before you can continue."),
+                ("Change a stop or lunch", "Tap Swap this stop or Choose lunch and pick an alternative. The planned times update after a change. On routes that search for nearby lunch, use the lunch search button, check the address, menu and opening hours, then select a restaurant. If no results appear, use the additional map search link."),
+                ("Open maps and directions", "Use the public transport, walking or driving buttons to open a map between the origin and destination. Maps appear inside the app. Check boarding stations, transfers and travel times on the public transport page. Close the map to return to your itinerary. Planned times are estimates; check directions for your actual departure time."),
+                ("Plan dinner and return to your hotel", "Choose Auto, Near hotel or Near final stop for dinner. Auto chooses the hotel area when sightseeing ends before 18:00, and the final stop area from 18:00 onwards. Search for dinner, select a restaurant and check the directions. After dinner, view the route back to your selected hotel."),
+                ("Official details, translation and sharing", "Open official information for each attraction or restaurant to check hours, prices, tickets and reservation conditions. For languages other than Japanese, translated pages are preferred, but some pages and proper names may remain in their original language. Use the share button at the top right of the planner to send your itinerary to messages, notes or another app."),
+                ("Saved settings and troubleshooting", "Your language, route, start time, sightseeing choices and hotel settings are saved on your device. Lunch and dinner search selections and journey progress may need to be set again after settings change or the app restarts. If a search returns no results, check your connection and add an area or address to the hotel name before searching again. Times, transfer gaps and prices are estimates. Check current conditions using official information and maps before you leave.")
+            ]
+        case .th:
+            return [
+                ("แอปนี้ทำอะไรได้บ้าง", "วางแผนเที่ยวญี่ปุ่นหนึ่งวันโดยเลือกเส้นทาง สถานที่ท่องเที่ยว มื้อกลางวัน โรงแรม และมื้อเย็น เลือกได้ทั้งเส้นทางแนะนำและเส้นทางที่ได้รับความสนใจบนโซเชียลมีเดีย เริ่มจากกำหนดเส้นทาง เวลาออกเดินทาง และโรงแรมที่จะพัก"),
+                ("เลือกภาษา", "กดปุ่มภาษาทางซ้ายของหน้าแรกเพื่อเปิดหน้าวางแผนในภาษานั้น ปุ่มวิธีใช้งานทางขวาจะเปิดคำอธิบายเป็นภาษาเดียวกับปุ่มในแถวเดียวกัน ปิดคำอธิบายแล้วกดปุ่มภาษาเพื่อเริ่มใช้งาน กดปุ่มเลือกภาษาในหน้าวางแผนเพื่อกลับหน้าแรก"),
+                ("เลือกพื้นที่ เส้นทาง และเวลา", "กดเส้นทางแนะนำ หรือเลือกภูมิภาค → จังหวัด → เส้นทางท่องเที่ยวตามลำดับ เมื่อเปลี่ยนเวลาเริ่ม เวลาแต่ละจุดและเวลาสิ้นสุดโดยประมาณจะปรับตาม เมื่อเปลี่ยนเส้นทางหรือเวลาเริ่ม ความคืบหน้าของทริปจะกลับไปขั้นแรก"),
+                ("กำหนดโรงแรม", "เลือกที่พักจากรายชื่อโรงแรม หากจองที่อื่นไว้แล้ว ให้เลือกตัวเลือกระบุโรงแรมของคุณ แล้วกรอกชื่อพร้อมพื้นที่หรือที่อยู่ สามารถค้นหาโรงแรมใกล้เคียงและเลือกผลการค้นหาได้ ใช้ปุ่มแผนที่ ตรวจสอบราคา เว็บไซต์ หรือโทรศัพท์ที่แสดงเพื่อดูรายละเอียด การเลือกโรงแรมไม่ได้เป็นการจองห้องพัก"),
+                ("เดินทางตามแผน", "รายการลำดับทริปแสดงการออกจากโรงแรม การเที่ยว มื้ออาหาร และการกลับโรงแรม กดรายการเพื่อเปิดคำแนะนำของขั้นนั้น หากต้องการเดินทางตามลำดับ ให้กดปุ่มขั้นถัดไปด้านล่าง หรือกดปุ่มขั้นก่อนหน้าเพื่อย้อนกลับ บางขั้นต้องเลือกโรงแรมหรือร้านอาหารก่อนจึงจะไปต่อได้"),
+                ("เปลี่ยนสถานที่หรือมื้อกลางวัน", "กดปุ่มเปลี่ยนสถานที่หรือเลือกมื้อกลางวัน แล้วเลือกจากตัวเลือกที่แสดง เวลาตามแผนจะปรับหลังเปลี่ยน สำหรับเส้นทางที่ค้นหาร้านมื้อกลางวันใกล้เคียง ให้กดค้นหา ตรวจสอบที่อยู่ เมนู และเวลาเปิด แล้วเลือกร้าน หากไม่มีผลลัพธ์ ให้ใช้ลิงก์ค้นหาเพิ่มเติมบนแผนที่"),
+                ("ดูแผนที่และเส้นทาง", "กดปุ่มขนส่งสาธารณะ เดิน หรือรถยนต์ เพื่อเปิดแผนที่จากจุดเริ่มต้นไปยังจุดหมาย แผนที่แสดงภายในแอป ตรวจสอบสถานีขึ้นรถ จุดเปลี่ยนรถ และเวลาเดินทางในหน้าขนส่งสาธารณะ ปิดแผนที่เพื่อกลับไปยังแผนทริป เวลาเป็นค่าประมาณ ควรตรวจสอบเส้นทางตามเวลาออกเดินทางจริง"),
+                ("มื้อเย็นและการกลับโรงแรม", "เลือกพื้นที่มื้อเย็นแบบอัตโนมัติ ใกล้โรงแรม หรือใกล้สถานที่สุดท้าย แบบอัตโนมัติจะเลือกใกล้โรงแรมเมื่อเที่ยวเสร็จก่อน 18:00 และใกล้สถานที่สุดท้ายเมื่อเสร็จตั้งแต่ 18:00 เป็นต้นไป กดค้นหามื้อเย็น เลือกร้าน แล้วตรวจสอบเส้นทาง หลังรับประทานอาหารสามารถดูทางกลับโรงแรมที่เลือกไว้ได้"),
+                ("ข้อมูลทางการ คำแปล และการแชร์", "เปิดข้อมูลทางการของสถานที่หรือร้านอาหารเพื่อตรวจสอบเวลาเปิด ราคา ตั๋ว และเงื่อนไขการจอง เมื่อใช้ภาษาอื่นที่ไม่ใช่ญี่ปุ่น แอปจะเปิดหน้าคำแปลก่อน แต่บางหน้าหรือชื่อเฉพาะอาจยังเป็นภาษาต้นฉบับ กดปุ่มแชร์มุมขวาบนของหน้าวางแผนเพื่อส่งแผนทริปไปยังข้อความ โน้ต หรือแอปอื่น"),
+                ("การบันทึกและการแก้ปัญหา", "ภาษา เส้นทาง เวลาเริ่ม สถานที่ที่เลือก และการตั้งค่าโรงแรมจะบันทึกไว้ในอุปกรณ์ ร้านมื้อกลางวันและมื้อเย็นที่ค้นหาไว้ รวมถึงความคืบหน้าของทริป อาจต้องเลือกใหม่หลังเปลี่ยนการตั้งค่าหรือเปิดแอปใหม่ หากค้นหาไม่พบ ให้ตรวจสอบอินเทอร์เน็ตและเพิ่มพื้นที่หรือที่อยู่ต่อท้ายชื่อโรงแรมแล้วค้นหาอีกครั้ง เวลา ช่วงการเดินทาง และราคาเป็นค่าประมาณ ก่อนออกเดินทางควรตรวจสอบข้อมูลล่าสุดจากเว็บไซต์ทางการและแผนที่")
+            ]
+        }
     }
 }
 
