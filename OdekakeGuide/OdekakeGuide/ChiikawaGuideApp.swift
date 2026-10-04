@@ -312,6 +312,13 @@ private struct PlannerView: View {
                     .onChange(of: journeyIndex) { _ in
                         withAnimation { proxy.scrollTo("currentStage", anchor: .top) }
                     }
+                    .onChange(of: hotelTravelKey) { _ in
+                        if selectedSearchedHotelVisible {
+                            DispatchQueue.main.async {
+                                withAnimation { proxy.scrollTo("selectedHotelTravel", anchor: .center) }
+                            }
+                        }
+                    }
                 }
                 .navigationTitle("Japan Day Planner")
                 .navigationBarTitleDisplayMode(.inline)
@@ -582,9 +589,15 @@ private struct PlannerView: View {
             Label(journeyText("chooseHotel"), systemImage: "bed.double.fill").font(.headline)
             ForEach(availableHotels) { hotel in
                 visibleChoice(hotel.names[language.index], selected: hotelChoice == hotel.id) { saveHotelValue(hotel.id) }
+                if hotelChoice == hotel.id {
+                    hotelTravelSummary.task(id: hotelTravelKey) { await updateHotelTravelTimes() }
+                }
             }
             if let hotel = selectedSuggestedHotel {
                 visibleChoice(hotel.name, selected: hotelChoice == "suggested") { saveHotelValue("suggested") }
+                if hotelChoice == "suggested" && !selectedSearchedHotelVisible {
+                    hotelTravelSummary.task(id: hotelTravelKey) { await updateHotelTravelTimes() }
+                }
             }
             visibleChoice(journeyText("ownHotel"), selected: hotelChoice == "custom") { saveHotelValue("custom") }
             if hotelChoice == "suggested", let hotel = selectedSuggestedHotel {
@@ -601,6 +614,9 @@ private struct PlannerView: View {
                 TextField(journeyText("hotelInput"), text: Binding(get: { customHotel }, set: { saveHotelValue($0, custom: true) }))
                     .textFieldStyle(.roundedBorder)
                 Text(journeyText("hotelInputNote")).font(.footnote).foregroundStyle(.secondary)
+                if !hotelQuery.isEmpty {
+                    hotelTravelSummary.task(id: hotelTravelKey) { await updateHotelTravelTimes() }
+                }
             } else if let hotel = chosenHotel {
                 Text(language == .ja ? hotel.addressJP : hotel.addressEN).font(.subheadline).foregroundStyle(.secondary)
                 if let url = URL(string: hotel.rateURL) { translatedGuideLink(extra("rate"), url: url) }
@@ -614,10 +630,6 @@ private struct PlannerView: View {
                         Text(extra("rateNote")).font(.footnote).foregroundStyle(.secondary)
                     }.padding(.top, 10)
                 }
-            }
-            if !hotelQuery.isEmpty {
-                hotelTravelSummary
-                    .task(id: hotelTravelKey) { await updateHotelTravelTimes() }
             }
             if !hotelSearching {
                 journeyAction(journeyText("findHotels"), systemImage: "magnifyingglass") { searchHotels() }
@@ -639,12 +651,21 @@ private struct PlannerView: View {
                     if let url = hotel.website.flatMap(URL.init(string:)) { translatedGuideLink(extra("rate"), url: url) }
                     if let phone = hotel.phone, let url = URL(string: "tel:\(phone)") { journeyLink("\(extra("call")) · \(phone)", url: url, systemImage: "phone") }
                     journeyAction(journeyText("chooseThisHotel"), systemImage: "checkmark.circle") { chooseSuggestedHotel(hotel) }
+                    if hotelChoice == "suggested" && selectedSuggestedHotel?.id == hotel.id {
+                        hotelTravelSummary
+                            .id("selectedHotelTravel")
+                            .task(id: hotelTravelKey) { await updateHotelTravelTimes() }
+                    }
                 }
                 .padding(12)
                 .background(Color(red: 0.15, green: 0.22, blue: 0.33), in: RoundedRectangle(cornerRadius: 10))
             }
             Text(journeyText("hotelChoiceNote")).font(.footnote).foregroundStyle(.secondary)
         }
+    }
+    private var selectedSearchedHotelVisible: Bool {
+        guard hotelChoice == "suggested", let selected = selectedSuggestedHotel else { return false }
+        return hotelResults.contains { $0.id == selected.id }
     }
     private func clearHotelSearch() {
         hotelSearchID = UUID()
