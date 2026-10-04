@@ -683,6 +683,10 @@ private struct PlannerView: View {
     private func searchHotels() {
         guard !hotelSearching else { return }
         let start = venueQuery(selectedVenue(0))
+        guard let prefecture = NationwideRoutes.prefectures.first(where: { $0.id == routePrefecture }) else {
+            hotelSearchError = true
+            return
+        }
         let token = UUID()
         hotelSearchID = token
         hotelSearching = true
@@ -694,7 +698,23 @@ private struct PlannerView: View {
                 anchorRequest.naturalLanguageQuery = start
                 let anchor = try await MKLocalSearch(request: anchorRequest).start()
                 guard hotelSearchID == token else { return }
-                guard let first = anchor.mapItems.first else {
+                var first = anchor.mapItems.first(where: { hotelPlace($0, isIn: prefecture) })
+                if first == nil {
+                    // A similarly named landmark elsewhere must never become the hotel search center.
+                    let areaRequest = MKLocalSearch.Request()
+                    areaRequest.naturalLanguageQuery = "\(prefecture.ja), Japan"
+                    let area = try await MKLocalSearch(request: areaRequest).start()
+                    guard hotelSearchID == token else { return }
+                    if let regionItem = area.mapItems.first(where: { hotelPlace($0, isIn: prefecture) }) {
+                        anchorRequest.region = MKCoordinateRegion(center: regionItem.placemark.coordinate,
+                                                                  latitudinalMeters: prefecture.id == "hokkaido" ? 600000 : 160000,
+                                                                  longitudinalMeters: prefecture.id == "hokkaido" ? 600000 : 160000)
+                        let nearbyAnchor = try await MKLocalSearch(request: anchorRequest).start()
+                        guard hotelSearchID == token else { return }
+                        first = nearbyAnchor.mapItems.first(where: { hotelPlace($0, isIn: prefecture) })
+                    }
+                }
+                guard let first else {
                     hotelSearching = false; hotelSearchError = true; return
                 }
                 let coordinate = first.placemark.coordinate
@@ -710,7 +730,8 @@ private struct PlannerView: View {
                 hotelResults = Array(response.mapItems.compactMap { item -> HotelSuggestion? in
                     let point = item.placemark.coordinate
                     let distance = center.distance(from: CLLocation(latitude: point.latitude, longitude: point.longitude))
-                    guard distance <= 2000, let name = item.name, !name.isEmpty else { return nil }
+                    guard distance <= 2000, hotelPlace(item, isIn: prefecture),
+                          let name = item.name, !name.isEmpty else { return nil }
                     let id = "\(name)|\(point.latitude)|\(point.longitude)"
                     guard seen.insert(id).inserted else { return nil }
                     return HotelSuggestion(id: id, name: name, address: item.placemark.title ?? name,
@@ -725,6 +746,17 @@ private struct PlannerView: View {
                 hotelSearchError = true
             }
         }
+    }
+    private func hotelPlace(_ item: MKMapItem, isIn prefecture: PrefectureOption) -> Bool {
+        guard let area = item.placemark.administrativeArea?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !area.isEmpty else { return false }
+        let japaneseName = prefecture.ja.replacingOccurrences(of: "都", with: "")
+            .replacingOccurrences(of: "道", with: "")
+            .replacingOccurrences(of: "府", with: "")
+            .replacingOccurrences(of: "県", with: "")
+        return area.localizedCaseInsensitiveContains(prefecture.en)
+            || area.contains(prefecture.ja)
+            || area == japaneseName
     }
     private func hotelTravelText(_ key: String) -> String {
         HotelTravelTranslations.ui[key]?[language.index] ?? key
