@@ -71,8 +71,8 @@ private struct PlannerView: View {
     @AppStorage("japanDay.language") private var languageCode = "ja"
     @State private var showingGuide = false
     @State private var instructionsLanguage: GuideLanguage?
-    @AppStorage("japanDay.hotels") private var savedHotels = "{}"
-    @AppStorage("japanDay.customHotels") private var savedCustomHotels = "{}"
+    @State private var savedHotels = "{}"
+    @State private var savedCustomHotels = "{}"
     @AppStorage("japanDay.dinnerArea") private var dinnerArea = "auto"
     @State private var journeyIndex = 0
     @State private var journeyCompleted = false
@@ -92,7 +92,7 @@ private struct PlannerView: View {
     @State private var hotelSearchID = UUID()
     @State private var hotelTravelMinutes: [String: Int] = [:]
     @State private var hotelTravelLoading = false
-    @AppStorage("japanDay.suggestedHotels") private var savedSuggestedHotels = "{}"
+    @State private var savedSuggestedHotels = "{}"
 
     private var language: GuideLanguage { GuideLanguage(rawValue: languageCode) ?? .ja }
     private func text(_ key: String) -> String { GuideTranslations.ui[key]?[language.index] ?? key }
@@ -207,12 +207,12 @@ private struct PlannerView: View {
     }
     private func selectPrefecture(_ value: String) {
         guard value != prefectureID else { return }
+        resetHotelSelection()
+        resetJourney()
         prefectureID = value
         if let first = guide.routes.first(where: { ($0.prefecture ?? NationwideRoutes.existingPrefectures[$0.id]) == value }) {
             routeID = first.id
         }
-        clearHotelSearch()
-        resetJourney()
     }
     private func label(_ japanese: String, _ english: String) -> String {
         language == .ja ? japanese : english
@@ -255,6 +255,10 @@ private struct PlannerView: View {
     }
 
     private func choose(_ choice: Int, at index: Int) {
+        if index == 0 && selectedIndex(index) != choice {
+            resetHotelSelection()
+            resetJourney()
+        }
         var all = selections
         var current = all[route.id] ?? Array(repeating: 0, count: route.stops.count)
         if current.count != route.stops.count { current = Array(repeating: 0, count: route.stops.count) }
@@ -334,7 +338,8 @@ private struct PlannerView: View {
                 .sheet(isPresented: Binding(get: { swapIndex != nil }, set: { if !$0 { swapIndex = nil } })) {
                     if let index = swapIndex { swapSheet(index) }
                 }
-                .onChange(of: routeID) { _ in clearHotelSearch(); resetJourney() }
+                .onChange(of: routeID) { _ in resetHotelSelection(); resetJourney() }
+                .onChange(of: selectedVenue(0).name) { _ in resetHotelSelection(); resetJourney() }
                 .onAppear {
                     let oldPrefecture = routePrefecture
                     if prefectureID != oldPrefecture {
@@ -384,6 +389,14 @@ private struct PlannerView: View {
         if custom { savedCustomHotels = string } else { savedHotels = string }
         resetJourney()
     }
+    private func resetHotelSelection() {
+        savedHotels = "{}"
+        savedCustomHotels = "{}"
+        savedSuggestedHotels = "{}"
+        hotelTravelMinutes = [:]
+        hotelTravelLoading = false
+        clearHotelSearch()
+    }
     private var availableHotels: [NearbyHotel] { TravelExtras.hotels[route.id] ?? [] }
     private var selectedSuggestedHotel: HotelSuggestion? {
         guard let data = savedSuggestedHotels.data(using: .utf8),
@@ -402,7 +415,7 @@ private struct PlannerView: View {
         let value = storedValues(savedHotels)[route.id] ?? ""
         if value == "custom" || availableHotels.contains(where: { $0.id == value }) { return value }
         if value == "suggested" && selectedSuggestedHotel != nil { return value }
-        return availableHotels.first?.id ?? "custom"
+        return ""
     }
     private var chosenHotel: NearbyHotel? { availableHotels.first(where: { $0.id == hotelChoice }) }
     private var customHotel: String { storedValues(savedCustomHotels)[route.id] ?? "" }
@@ -412,6 +425,7 @@ private struct PlannerView: View {
     private var hotelQuery: String {
         if let hotel = chosenHotel { return "\(hotel.names[0]), \(hotel.addressJP), Japan" }
         if hotelChoice == "suggested", let hotel = selectedSuggestedHotel { return hotel.query }
+        guard hotelChoice == "custom" else { return "" }
         let value = customHotel.trimmingCharacters(in: .whitespacesAndNewlines)
         let prefecture = NationwideRoutes.prefectures.first(where: { $0.id == routePrefecture })?.ja ?? cityQuery
         return value.isEmpty ? "" : "\(value), \(prefecture), Japan"
@@ -586,50 +600,14 @@ private struct PlannerView: View {
     }
     private var journeyHotelPicker: some View {
         journeyPanel {
-            Label(journeyText("chooseHotel"), systemImage: "bed.double.fill").font(.headline)
-            ForEach(availableHotels) { hotel in
-                visibleChoice(hotel.names[language.index], selected: hotelChoice == hotel.id) { saveHotelValue(hotel.id) }
-                if hotelChoice == hotel.id {
-                    hotelTravelSummary.task(id: hotelTravelKey) { await updateHotelTravelTimes() }
-                }
-            }
-            if let hotel = selectedSuggestedHotel {
-                visibleChoice(hotel.name, selected: hotelChoice == "suggested") { saveHotelValue("suggested") }
-                if hotelChoice == "suggested" && !selectedSearchedHotelVisible {
-                    hotelTravelSummary.task(id: hotelTravelKey) { await updateHotelTravelTimes() }
-                }
-            }
-            visibleChoice(journeyText("ownHotel"), selected: hotelChoice == "custom") { saveHotelValue("custom") }
-            if hotelChoice == "suggested", let hotel = selectedSuggestedHotel {
-                Text(hotel.address).font(.subheadline).foregroundStyle(.secondary)
-                if let url = hotel.website.flatMap(URL.init(string:)) {
-                    translatedGuideLink(extra("rate"), url: url)
-                }
-                if let url = locationURL(hotel.query) { journeyLink(extra("hotelMap"), url: url, systemImage: "mappin.and.ellipse") }
-                if let phone = hotel.phone, let url = URL(string: "tel:\(phone)") {
-                    journeyLink("\(extra("call")) · \(phone)", url: url, systemImage: "phone")
-                }
-                Text(extra("rateNote")).font(.footnote).foregroundStyle(.secondary)
-            } else if hotelChoice == "custom" {
-                TextField(journeyText("hotelInput"), text: Binding(get: { customHotel }, set: { saveHotelValue($0, custom: true) }))
-                    .textFieldStyle(.roundedBorder)
-                Text(journeyText("hotelInputNote")).font(.footnote).foregroundStyle(.secondary)
-                if !hotelQuery.isEmpty {
-                    hotelTravelSummary.task(id: hotelTravelKey) { await updateHotelTravelTimes() }
-                }
-            } else if let hotel = chosenHotel {
-                Text(language == .ja ? hotel.addressJP : hotel.addressEN).font(.subheadline).foregroundStyle(.secondary)
-                if let url = URL(string: hotel.rateURL) { translatedGuideLink(extra("rate"), url: url) }
-                if let url = locationURL(hotelQuery) { journeyLink(extra("hotelMap"), url: url, systemImage: "mappin.and.ellipse") }
-                VStack(alignment: .leading, spacing: 10) {
-                    VStack(alignment: .leading, spacing: 10) {
-                        if let url = URL(string: "tel:\(hotel.phone)") {
-                            journeyLink("\(extra("call")) · \(hotel.phoneDisplay)", url: url, systemImage: "phone")
-                        }
-                        if let url = URL(string: hotel.contactURL) { translatedGuideLink(extra("contact"), url: url) }
-                        Text(extra("rateNote")).font(.footnote).foregroundStyle(.secondary)
-                    }.padding(.top, 10)
-                }
+            Label(hotelTravelText("chooseNow"), systemImage: "bed.double.fill")
+                .font(.title3.bold()).foregroundStyle(journeyGold)
+            Text(routeText(route, 0)).font(.subheadline.bold())
+            Text("\(hotelTravelText("firstPlace")) · \(venueText(selectedVenue(0), 0))")
+                .font(.subheadline)
+            if hotelQuery.isEmpty {
+                Label(hotelTravelText("notChosen"), systemImage: "info.circle")
+                    .font(.subheadline).foregroundStyle(journeyGold)
             }
             if !hotelSearching {
                 journeyAction(journeyText("findHotels"), systemImage: "magnifyingglass") { searchHotels() }
@@ -650,8 +628,11 @@ private struct PlannerView: View {
                     if let url = locationURL(hotel.query) { journeyLink(extra("hotelMap"), url: url, systemImage: "mappin.and.ellipse") }
                     if let url = hotel.website.flatMap(URL.init(string:)) { translatedGuideLink(extra("rate"), url: url) }
                     if let phone = hotel.phone, let url = URL(string: "tel:\(phone)") { journeyLink("\(extra("call")) · \(phone)", url: url, systemImage: "phone") }
-                    journeyAction(journeyText("chooseThisHotel"), systemImage: "checkmark.circle") { chooseSuggestedHotel(hotel) }
-                    if hotelChoice == "suggested" && selectedSuggestedHotel?.id == hotel.id {
+                    let isSelected = hotelChoice == "suggested" && selectedSuggestedHotel?.id == hotel.id
+                    journeyAction(isSelected ? hotelTravelText("selectedHotel") : journeyText("chooseThisHotel"), systemImage: "checkmark.circle") {
+                        chooseSuggestedHotel(hotel)
+                    }
+                    if isSelected {
                         hotelTravelSummary
                             .id("selectedHotelTravel")
                             .task(id: hotelTravelKey) { await updateHotelTravelTimes() }
@@ -660,6 +641,29 @@ private struct PlannerView: View {
                 .padding(12)
                 .background(Color(red: 0.15, green: 0.22, blue: 0.33), in: RoundedRectangle(cornerRadius: 10))
             }
+            if hotelChoice == "suggested", let hotel = selectedSuggestedHotel, !selectedSearchedHotelVisible {
+                Text(hotelTravelText("selectedHotel")).font(.caption).foregroundStyle(journeyGold)
+                visibleChoice(hotel.name, selected: true) { saveHotelValue("suggested") }
+                hotelTravelSummary.task(id: hotelTravelKey) { await updateHotelTravelTimes() }
+                Text(hotel.address).font(.subheadline).foregroundStyle(.secondary)
+                if let url = hotel.website.flatMap(URL.init(string:)) { translatedGuideLink(extra("rate"), url: url) }
+                if let url = locationURL(hotel.query) { journeyLink(extra("hotelMap"), url: url, systemImage: "mappin.and.ellipse") }
+                if let phone = hotel.phone, let url = URL(string: "tel:\(phone)") {
+                    journeyLink("\(extra("call")) · \(phone)", url: url, systemImage: "phone")
+                }
+            }
+            Divider()
+            visibleChoice(journeyText("ownHotel"), selected: hotelChoice == "custom") { saveHotelValue("custom") }
+            if hotelChoice == "custom" {
+                TextField(journeyText("hotelInput"), text: Binding(get: { customHotel }, set: { saveHotelValue($0, custom: true) }))
+                    .textFieldStyle(.roundedBorder)
+                Text(journeyText("hotelInputNote")).font(.footnote).foregroundStyle(.secondary)
+                if !hotelQuery.isEmpty {
+                    hotelTravelSummary.task(id: hotelTravelKey) { await updateHotelTravelTimes() }
+                }
+            }
+            Text(hotelTravelText("afterChoosing"))
+                .font(.footnote).foregroundStyle(journeyGold)
             Text(journeyText("hotelChoiceNote")).font(.footnote).foregroundStyle(.secondary)
         }
     }
@@ -1252,13 +1256,13 @@ private struct PlannerView: View {
 
     private func selectCourse(_ item: DayRoute) {
         guard routeID != item.id else { return }
+        resetHotelSelection()
+        resetJourney()
         let pref = item.prefecture ?? NationwideRoutes.existingPrefectures[item.id] ?? "tokyo"
         prefectureID = pref
         regionID = NationwideRoutes.prefectures.first(where: { $0.id == pref })?.region ?? "kanto"
         routeID = item.id
         swapIndex = nil
-        clearHotelSearch()
-        resetJourney()
     }
 
     private func courseButton(_ item: DayRoute) -> some View {
@@ -1454,7 +1458,7 @@ private enum PlannerInstructions {
                 ("地図・移動経路を見る", "電車・バスなどの公共交通、徒歩、車の経路ボタンから、出発地と目的地の地図を開きます。地図はアプリ内で表示されます。公共交通のページでは乗車駅、乗り換え、所要時間などを確認してください。地図画面を閉じると旅程に戻ります。表示される時刻は目安なので、実際の出発時刻に合わせて経路を確認してください。"),
                 ("夕食とホテルへの帰り方", "夕食エリアは自動、ホテル周辺、最後の観光地周辺から選べます。自動では観光終了が18時より前ならホテル周辺、18時以降なら最後の観光地周辺を選びます。夕食検索ボタンで店を探し、店を選択してから経路を確認します。食後は選んだホテルへの帰り道を確認できます。"),
                 ("公式情報・翻訳・旅程共有", "観光地や店の公式情報ボタンで、営業時間・料金・チケット・予約条件を確認します。日本語以外ではリンク先の翻訳表示を優先しますが、翻訳できないページや固有名詞が元の言語で表示される場合があります。観光画面右上の共有ボタンで、旅程をメッセージやメモなどへ送れます。"),
-                ("保存と困ったとき", "選んだ言語、コース、出発時刻、観光地の選択、ホテル設定は端末に保存されます。検索した昼食・夕食の選択や旅の進行は、設定変更やアプリの再起動で再設定が必要になる場合があります。検索が出ない場合は通信を確認し、ホテル名に地域や住所を加えて再検索してください。予定時刻・移動時間・料金は目安です。出発前に公式情報と地図で最新の条件を確認してください。")
+                ("保存と困ったとき", "言語、コース、出発時刻、観光地の選択は端末に保存されます。ホテルは新しいコースや最初の観光地を選ぶたびに選び直し、アプリを開き直した場合も再入力します。検索した昼食・夕食や旅の進行も再設定が必要になる場合があります。検索が出ない場合は通信を確認し、ホテル名に地域や住所を加えて再検索してください。予定時刻・移動時間・料金は目安です。出発前に公式情報と地図で最新の条件を確認してください。")
             ]
         case .ko:
             return [
@@ -1467,7 +1471,7 @@ private enum PlannerInstructions {
                 ("지도와 이동 경로", "대중교통, 도보, 자동차 경로 버튼으로 출발지와 목적지의 지도를 엽니다. 지도는 앱 안에서 표시됩니다. 대중교통 페이지에서 승차역, 환승, 소요 시간 등을 확인하세요. 지도를 닫으면 일정으로 돌아갑니다. 예정 시간은 추정치이므로 실제 출발 시간에 맞춰 경로를 확인하세요."),
                 ("저녁과 호텔 복귀", "저녁 장소는 자동, 호텔 주변, 마지막 관광지 주변 중에서 고릅니다. 자동은 관광이 18시 전에 끝나면 호텔 주변, 18시부터는 마지막 관광지 주변을 선택합니다. 저녁 검색 버튼으로 식당을 찾고 선택한 뒤 경로를 확인하세요. 식사 후에는 선택한 호텔로 돌아가는 길을 확인할 수 있습니다."),
                 ("공식 정보, 번역, 공유", "관광지와 식당의 공식 정보 버튼으로 영업시간, 요금, 입장권, 예약 조건을 확인하세요. 일본어 이외의 언어에서는 번역 페이지를 우선 표시하지만 일부 페이지나 고유명사는 원래 언어로 나올 수 있습니다. 여행 화면 오른쪽 위 공유 버튼으로 일정을 메시지나 메모 등에 보낼 수 있습니다."),
-                ("저장 및 문제 해결", "선택한 언어, 코스, 출발 시간, 관광지 선택, 호텔 설정은 기기에 저장됩니다. 검색한 점심·저녁 선택과 여행 진행 단계는 설정 변경이나 앱 재시작 후 다시 설정해야 할 수 있습니다. 검색이 안 되면 인터넷 연결을 확인하고 호텔 이름에 지역이나 주소를 더해 다시 검색하세요. 시간, 이동 간격, 요금은 참고용입니다. 출발 전에 공식 정보와 지도에서 최신 조건을 확인하세요.")
+                ("저장 및 문제 해결", "언어, 코스, 출발 시간과 관광지 선택은 기기에 저장됩니다. 새 코스나 첫 관광지를 선택할 때마다 호텔을 다시 선택해야 하며 앱을 다시 열어도 호텔을 다시 입력해야 합니다. 검색한 점심·저녁과 여행 진행 단계도 다시 설정해야 할 수 있습니다. 검색이 안 되면 인터넷 연결을 확인하고 호텔 이름에 지역이나 주소를 더해 다시 검색하세요. 시간, 이동 간격, 요금은 참고용입니다. 출발 전에 공식 정보와 지도에서 최신 조건을 확인하세요.")
             ]
         case .zh:
             return [
@@ -1480,7 +1484,7 @@ private enum PlannerInstructions {
                 ("查看地图和交通路线", "点击公共交通、步行或驾车路线按钮，打开出发地与目的地的地图。地图在应用内显示。请在公共交通页面确认上车站、换乘和所需时间等信息。关闭地图后返回行程。预计时间仅供参考，请按实际出发时间确认路线。"),
                 ("晚餐和返回酒店", "晚餐区域可选自动、酒店附近或最后景点附近。自动模式下，观光在18点前结束时选择酒店附近，18点及之后选择最后景点附近。点击晚餐搜索，选定餐厅后查看路线。餐后可以查看返回所选酒店的路线。"),
                 ("官方信息、翻译和分享", "通过景点或餐厅的官方信息按钮确认营业时间、价格、门票和预订条件。使用日语以外的语言时，会优先打开翻译页面，但部分网页或专有名称可能仍显示原文。点击旅游页面右上角的分享按钮，可将行程发送到消息、备忘录等。"),
-                ("保存和问题处理", "所选语言、路线、出发时间、景点选择和酒店设置会保存在设备上。搜索得到的午餐、晚餐选择以及行程进度，在更改设置或重启应用后可能需要重新设置。搜索无结果时，请检查网络，并在酒店名后加上地区或地址再搜索。时间、交通间隔和价格仅供参考。出发前请通过官方信息和地图确认最新条件。")
+                ("保存和问题处理", "语言、路线、出发时间和景点选择会保存在设备上。每次更换路线或第一处景点，都需要重新选择酒店；重新打开应用后也需要重新输入酒店。搜索得到的午餐、晚餐和行程进度也可能需要重新设置。搜索无结果时，请检查网络，并在酒店名后加上地区或地址再搜索。时间、交通间隔和价格仅供参考。出发前请通过官方信息和地图确认最新条件。")
             ]
         case .en:
             return [
@@ -1493,7 +1497,7 @@ private enum PlannerInstructions {
                 ("Open maps and directions", "Use the public transport, walking or driving buttons to open a map between the origin and destination. Maps appear inside the app. Check boarding stations, transfers and travel times on the public transport page. Close the map to return to your itinerary. Planned times are estimates; check directions for your actual departure time."),
                 ("Plan dinner and return to your hotel", "Choose Auto, Near hotel or Near final stop for dinner. Auto chooses the hotel area when sightseeing ends before 18:00, and the final stop area from 18:00 onwards. Search for dinner, select a restaurant and check the directions. After dinner, view the route back to your selected hotel."),
                 ("Official details, translation and sharing", "Open official information for each attraction or restaurant to check hours, prices, tickets and reservation conditions. For languages other than Japanese, translated pages are preferred, but some pages and proper names may remain in their original language. Use the share button at the top right of the planner to send your itinerary to messages, notes or another app."),
-                ("Saved settings and troubleshooting", "Your language, route, start time, sightseeing choices and hotel settings are saved on your device. Lunch and dinner search selections and journey progress may need to be set again after settings change or the app restarts. If a search returns no results, check your connection and add an area or address to the hotel name before searching again. Times, transfer gaps and prices are estimates. Check current conditions using official information and maps before you leave.")
+                ("Saved settings and troubleshooting", "Your language, route, start time and sightseeing choices are saved on your device. Choose a hotel again whenever you change the route or first stop, and after reopening the app. Lunch and dinner search selections and journey progress may also need to be set again. If a search returns no results, check your connection and add an area or address to the hotel name before searching again. Times, transfer gaps and prices are estimates. Check current conditions using official information and maps before you leave.")
             ]
         case .th:
             return [
@@ -1506,7 +1510,7 @@ private enum PlannerInstructions {
                 ("ดูแผนที่และเส้นทาง", "กดปุ่มขนส่งสาธารณะ เดิน หรือรถยนต์ เพื่อเปิดแผนที่จากจุดเริ่มต้นไปยังจุดหมาย แผนที่แสดงภายในแอป ตรวจสอบสถานีขึ้นรถ จุดเปลี่ยนรถ และเวลาเดินทางในหน้าขนส่งสาธารณะ ปิดแผนที่เพื่อกลับไปยังแผนทริป เวลาเป็นค่าประมาณ ควรตรวจสอบเส้นทางตามเวลาออกเดินทางจริง"),
                 ("มื้อเย็นและการกลับโรงแรม", "เลือกพื้นที่มื้อเย็นแบบอัตโนมัติ ใกล้โรงแรม หรือใกล้สถานที่สุดท้าย แบบอัตโนมัติจะเลือกใกล้โรงแรมเมื่อเที่ยวเสร็จก่อน 18:00 และใกล้สถานที่สุดท้ายเมื่อเสร็จตั้งแต่ 18:00 เป็นต้นไป กดค้นหามื้อเย็น เลือกร้าน แล้วตรวจสอบเส้นทาง หลังรับประทานอาหารสามารถดูทางกลับโรงแรมที่เลือกไว้ได้"),
                 ("ข้อมูลทางการ คำแปล และการแชร์", "เปิดข้อมูลทางการของสถานที่หรือร้านอาหารเพื่อตรวจสอบเวลาเปิด ราคา ตั๋ว และเงื่อนไขการจอง เมื่อใช้ภาษาอื่นที่ไม่ใช่ญี่ปุ่น แอปจะเปิดหน้าคำแปลก่อน แต่บางหน้าหรือชื่อเฉพาะอาจยังเป็นภาษาต้นฉบับ กดปุ่มแชร์มุมขวาบนของหน้าวางแผนเพื่อส่งแผนทริปไปยังข้อความ โน้ต หรือแอปอื่น"),
-                ("การบันทึกและการแก้ปัญหา", "ภาษา เส้นทาง เวลาเริ่ม สถานที่ที่เลือก และการตั้งค่าโรงแรมจะบันทึกไว้ในอุปกรณ์ ร้านมื้อกลางวันและมื้อเย็นที่ค้นหาไว้ รวมถึงความคืบหน้าของทริป อาจต้องเลือกใหม่หลังเปลี่ยนการตั้งค่าหรือเปิดแอปใหม่ หากค้นหาไม่พบ ให้ตรวจสอบอินเทอร์เน็ตและเพิ่มพื้นที่หรือที่อยู่ต่อท้ายชื่อโรงแรมแล้วค้นหาอีกครั้ง เวลา ช่วงการเดินทาง และราคาเป็นค่าประมาณ ก่อนออกเดินทางควรตรวจสอบข้อมูลล่าสุดจากเว็บไซต์ทางการและแผนที่")
+                ("การบันทึกและการแก้ปัญหา", "ภาษา เส้นทาง เวลาเริ่ม และสถานที่เที่ยวที่เลือกจะบันทึกไว้ในอุปกรณ์ ต้องเลือกโรงแรมใหม่ทุกครั้งเมื่อเปลี่ยนเส้นทางหรือจุดเที่ยวแรก และเมื่อเปิดแอปใหม่ ร้านมื้อกลางวันและมื้อเย็นที่ค้นหา รวมถึงความคืบหน้าของทริป อาจต้องเลือกใหม่ หากค้นหาไม่พบ ให้ตรวจสอบอินเทอร์เน็ตและเพิ่มพื้นที่หรือที่อยู่ต่อท้ายชื่อโรงแรมแล้วค้นหาอีกครั้ง เวลา ช่วงการเดินทาง และราคาเป็นค่าประมาณ ก่อนออกเดินทางควรตรวจสอบข้อมูลล่าสุดจากเว็บไซต์ทางการและแผนที่")
             ]
         }
     }
@@ -1514,6 +1518,11 @@ private enum PlannerInstructions {
 
 private enum HotelTravelTranslations {
     static let ui: [String: [String]] = [
+        "chooseNow": ["次は宿泊するホテルを選ぶ", "다음 단계: 숙박할 호텔 선택", "下一步：选择入住酒店", "Next: choose your hotel", "ขั้นต่อไป: เลือกโรงแรมที่พัก"],
+        "firstPlace": ["最初の観光地", "첫 관광지", "第一处景点", "First sightseeing stop", "จุดเที่ยวแรก"],
+        "notChosen": ["ホテルはまだ選ばれていません。近くのホテルを探すか、自分のホテルを入力してください。", "아직 호텔을 선택하지 않았습니다. 주변 호텔을 찾거나 예약한 호텔을 입력하세요.", "尚未选择酒店。请搜索附近酒店或输入已预订的酒店。", "No hotel selected yet. Find one nearby or enter your booked hotel.", "ยังไม่ได้เลือกโรงแรม ค้นหาโรงแรมใกล้เคียงหรือระบุโรงแรมที่จองไว้"],
+        "selectedHotel": ["選択中のホテル", "선택한 호텔", "已选酒店", "Selected hotel", "โรงแรมที่เลือก"],
+        "afterChoosing": ["ホテルを選ぶと、その下に最初の観光地までの所要時間が表示されます。次は旅の順番へ進んでください。", "호텔을 고르면 바로 아래에 첫 관광지까지의 이동 시간이 표시됩니다. 다음에는 여행 순서를 확인하세요.", "选择酒店后，下方会显示到第一处景点的所需时间。接着查看行程顺序。", "Choose a hotel to see travel times to the first stop directly below it. Then follow the trip order.", "เลือกโรงแรมแล้วดูเวลาเดินทางไปยังจุดเที่ยวแรกด้านล่าง จากนั้นทำตามลำดับทริป"],
         "nearestFive": ["最初の観光地から近い順・5件まで（2km以内）", "첫 관광지에서 가까운 순 · 최대 5곳(2km 이내)", "距第一站由近到远，最多5家（2公里内）", "Nearest to the first stop · up to 5 within 2 km", "ใกล้จุดเที่ยวแรกที่สุด สูงสุด 5 แห่งในระยะ 2 กม."],
         "calculating": ["経路の所要時間を確認中…", "경로 소요 시간 확인 중…", "正在查询路线时间…", "Checking travel times…", "กำลังตรวจสอบเวลาเดินทาง…"],
         "transit": ["電車・バス", "전철·버스", "电车・公交", "Train / bus", "รถไฟ / รถบัส"],
