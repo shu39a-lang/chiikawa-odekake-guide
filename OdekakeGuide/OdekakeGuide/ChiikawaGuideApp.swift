@@ -731,16 +731,26 @@ private struct PlannerView: View {
         hotelSearching = false
         hotelSearchError = false
     }
-    // Pin the landmark that was formerly being resolved to central Yamaguchi.
-    // Coordinates are from the Nagato tourism association's area map.
+    // Towns and streets are not always indexed as a single Apple Maps POI.
+    // Use their actual local center, never the prefectural capital.
     private var pinnedFirstVenueCoordinate: CLLocationCoordinate2D? {
-        if selectedVenue(0).name == "Motonosumi Shrine" {
+        switch selectedVenue(0).name {
+        case "Motonosumi Shrine":
             return CLLocationCoordinate2D(latitude: 34.41965524340437, longitude: 131.06256008148193)
+        case "Nio port town":
+            return CLLocationCoordinate2D(latitude: 34.20401, longitude: 133.6369)
+        case "Ginzan Onsen town":
+            return CLLocationCoordinate2D(latitude: 38.5699, longitude: 140.5307)
+        case "Kawagoe Ichibangai":
+            return CLLocationCoordinate2D(latitude: 35.9235, longitude: 139.483333)
+        case "Kokusai Dori Naha":
+            return CLLocationCoordinate2D(latitude: 26.214756, longitude: 127.683636)
+        default:
+            return nil
         }
-        return nil
     }
     private func venueMapItem(_ venue: Venue, in prefecture: PrefectureOption) async throws -> MKMapItem? {
-        if venue.name == "Motonosumi Shrine", let coordinate = pinnedFirstVenueCoordinate {
+        if venue.name == selectedVenue(0).name, let coordinate = pinnedFirstVenueCoordinate {
             return MKMapItem(placemark: MKPlacemark(coordinate: coordinate))
         }
         let expected = FeaturedRoutes.names[venue.name]?[0]
@@ -750,23 +760,59 @@ private struct PlannerView: View {
         let request = MKLocalSearch.Request()
         request.naturalLanguageQuery = venueQuery(venue)
         request.resultTypes = .pointOfInterest
-        let result = try await MKLocalSearch(request: request).start()
         // A prefecture match alone also accepts its capital city. Require the
         // actual landmark name so a false search center is not presented as near.
         let needle = expected.folding(options: [.caseInsensitive, .widthInsensitive], locale: .current)
             .replacingOccurrences(of: " ", with: "")
-        return result.mapItems.first { item in
+        func matches(_ item: MKMapItem) -> Bool {
             let name = (item.name ?? "").folding(options: [.caseInsensitive, .widthInsensitive], locale: .current)
                 .replacingOccurrences(of: " ", with: "")
             // Do not accept a different station whose name merely contains the
             // requested one (for example 新山口駅 instead of 山口駅).
             let exact = name == needle
-            let qualified = ["(", "（", "・", "-", "駅前"].contains { name.hasPrefix(needle + $0) }
+            let qualified = ["(", "（", "・", "-", "商店街"].contains { name.hasPrefix(needle + $0) }
             return hotelPlace(item, isIn: prefecture) && (exact || qualified)
         }
+        if let result = try? await MKLocalSearch(request: request).start(),
+           let match = result.mapItems.first(where: matches) { return match }
+        // Streets and markets may be classified as addresses instead of POIs.
+        request.resultTypes = .address
+        return try? await MKLocalSearch(request: request).start().mapItems.first(where: matches)
     }
     private func firstVenueMapItem(in prefecture: PrefectureOption) async throws -> MKMapItem? {
         try await venueMapItem(selectedVenue(0), in: prefecture)
+    }
+    // Confirmed local stays keep area-based courses useful even when Apple Maps
+    // omits small inns or classifies them outside the hotel category.
+    private func verifiedFallbackHotel(near coordinate: CLLocationCoordinate2D) -> HotelSuggestion? {
+        let stay: (String, String, Double, Double, String?, String)?
+        switch selectedVenue(0).name {
+        case "Nio port town":
+            stay = ("夕波の宿 渡海屋", "香川県三豊市仁尾町仁尾丁1446-20",
+                    34.2053766, 133.63872, "09095538436", "https://www.fujita-suisan.co.jp/stay/")
+        case "Ginzan Onsen town":
+            stay = ("能登屋旅館", "山形県尾花沢市大字銀山新畑446",
+                    38.56939, 140.531525, "0237282327", "https://www.ginzanonsen.jp/yado/notoya.html")
+        case "Motonosumi Shrine":
+            stay = ("kitohana_YUYA", "山口県長門市油谷角山138-2",
+                    34.3831932, 131.0371874, nil, "https://kitohana.jp/")
+        case "Kawagoe Ichibangai":
+            stay = ("松村屋旅館", "埼玉県川越市元町1-1-11",
+                    35.924428, 139.485153, "0492220107", "https://coedomatsumuraya.com/")
+        case "Kokusai Dori Naha":
+            stay = ("ホテルパームロイヤルリゾート国際通り", "沖縄県那覇市牧志3-9-10",
+                    26.216499, 127.6898927, nil, "https://palmroyal.co.jp/")
+        default:
+            stay = nil
+        }
+        guard let stay else { return nil }
+        let distance = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
+            .distance(from: CLLocation(latitude: stay.2, longitude: stay.3))
+        guard distance < 12_000 else { return nil }
+        return HotelSuggestion(id: "verified|\(selectedVenue(0).name)", name: stay.0, address: stay.1,
+                               latitude: stay.2, longitude: stay.3, phone: stay.4, website: stay.5,
+                               distance: distance, anchorLatitude: coordinate.latitude,
+                               anchorLongitude: coordinate.longitude)
     }
     private func resolvedAnchorMapItem(_ query: String) async throws -> MKMapItem? {
         let parts = query.split(separator: ",")
@@ -810,6 +856,11 @@ private struct PlannerView: View {
                 let center = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
                 var seen = Set<String>()
                 var suggestions: [HotelSuggestion] = []
+                if let fallback = verifiedFallbackHotel(near: coordinate) {
+                    suggestions.append(fallback)
+                    seen.insert(fallback.name.folding(options: [.caseInsensitive, .widthInsensitive], locale: .current))
+                    hotelResults = [fallback]
+                }
                 // Keep cities local; widen the search only when fewer than three stays were found.
                 for radius in [2000.0, 5000.0, 10000.0, 25000.0, 50000.0] {
                     let poi = MKLocalPointsOfInterestRequest(center: coordinate, radius: radius)
@@ -845,7 +896,9 @@ private struct PlannerView: View {
                         let lodgingName = name.lowercased()
                         guard item.pointOfInterestCategory == .hotel || ["ホテル", "旅館", "民宿", "ペンション", "ゲストハウス", "宿", "hotel", "inn", "ryokan", "lodge", "guesthouse", "resort"]
                             .contains(where: { lodgingName.contains($0) }) else { continue }
-                        let id = "\(name.folding(options: [.caseInsensitive, .widthInsensitive], locale: .current))|\(Int(point.latitude * 10000))|\(Int(point.longitude * 10000))"
+                        let normalizedName = name.folding(options: [.caseInsensitive, .widthInsensitive], locale: .current)
+                        let id = "\(normalizedName)|\(Int(point.latitude * 10000))|\(Int(point.longitude * 10000))"
+                        guard !seen.contains(normalizedName) else { continue }
                         guard seen.insert(id).inserted else { continue }
                         suggestions.append(HotelSuggestion(id: id, name: name, address: item.placemark.title ?? name,
                                                            latitude: point.latitude, longitude: point.longitude,
