@@ -786,7 +786,7 @@ private struct PlannerView: View {
                     poi.pointOfInterestFilter = MKPointOfInterestFilter(including: [.hotel])
                     var nearbyItems: [MKMapItem] = []
                     do {
-                        nearbyItems += try await MKLocalSearch(pointsOfInterestRequest: poi).start().mapItems
+                        nearbyItems += try await MKLocalSearch(request: poi).start().mapItems
                         guard hotelSearchID == token else { return }
                     } catch {
                         guard hotelSearchID == token else { return }
