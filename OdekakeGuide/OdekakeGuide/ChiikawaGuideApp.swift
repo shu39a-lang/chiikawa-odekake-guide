@@ -444,10 +444,14 @@ private struct PlannerView: View {
         let value = storedValues(savedHotels)[route.id] ?? ""
         if value == "custom" || availableHotels.contains(where: { $0.id == value }) { return value }
         if value == "suggested", let selected = selectedSuggestedHotel {
-            if let actual = pinnedFirstVenueCoordinate {
-                let distance = CLLocation(latitude: actual.latitude, longitude: actual.longitude)
-                    .distance(from: CLLocation(latitude: selected.latitude, longitude: selected.longitude))
-                if distance > 50_000 { return "" }
+            // Hotels saved by an older search lack an anchor and may have been
+            // measured from a different city. Require a fresh search for them.
+            guard let anchorLatitude = selected.anchorLatitude,
+                  let anchorLongitude = selected.anchorLongitude else { return "" }
+            if let actual = pinnedFirstVenueCoordinate,
+               CLLocation(latitude: actual.latitude, longitude: actual.longitude)
+                .distance(from: CLLocation(latitude: anchorLatitude, longitude: anchorLongitude)) > 100 {
+                return ""
             }
             return value
         }
@@ -735,11 +739,10 @@ private struct PlannerView: View {
         }
         return nil
     }
-    private func firstVenueMapItem(in prefecture: PrefectureOption) async throws -> MKMapItem? {
-        if let coordinate = pinnedFirstVenueCoordinate {
+    private func venueMapItem(_ venue: Venue, in prefecture: PrefectureOption) async throws -> MKMapItem? {
+        if venue.name == "Motonosumi Shrine", let coordinate = pinnedFirstVenueCoordinate {
             return MKMapItem(placemark: MKPlacemark(coordinate: coordinate))
         }
-        let venue = selectedVenue(0)
         let expected = FeaturedRoutes.names[venue.name]?[0]
             ?? NationwideRoutes.japanesePlaces[venue.name]
             ?? GuideTranslations.venues[venue.name]?[0][0]
@@ -750,12 +753,39 @@ private struct PlannerView: View {
         let result = try await MKLocalSearch(request: request).start()
         // A prefecture match alone also accepts its capital city. Require the
         // actual landmark name so a false search center is not presented as near.
-        let needle = expected.replacingOccurrences(of: " ", with: "").lowercased()
+        let needle = expected.folding(options: [.caseInsensitive, .widthInsensitive], locale: .current)
+            .replacingOccurrences(of: " ", with: "")
         return result.mapItems.first { item in
-            let name = (item.name ?? "").replacingOccurrences(of: " ", with: "").lowercased()
-            return hotelPlace(item, isIn: prefecture) && !name.isEmpty &&
-                (name.contains(needle) || needle.contains(name) && name.count >= 4)
+            let name = (item.name ?? "").folding(options: [.caseInsensitive, .widthInsensitive], locale: .current)
+                .replacingOccurrences(of: " ", with: "")
+            // Do not accept a different station whose name merely contains the
+            // requested one (for example 新山口駅 instead of 山口駅).
+            let exact = name == needle
+            let qualified = ["(", "（", "・", "-", "駅前"].contains { name.hasPrefix(needle + $0) }
+            return hotelPlace(item, isIn: prefecture) && (exact || qualified)
         }
+    }
+    private func firstVenueMapItem(in prefecture: PrefectureOption) async throws -> MKMapItem? {
+        try await venueMapItem(selectedVenue(0), in: prefecture)
+    }
+    private func resolvedAnchorMapItem(_ query: String) async throws -> MKMapItem? {
+        let parts = query.split(separator: ",")
+        if parts.count == 2, let latitude = Double(parts[0]), let longitude = Double(parts[1]),
+           (-90...90).contains(latitude), (-180...180).contains(longitude) {
+            return MKMapItem(placemark: MKPlacemark(coordinate:
+                CLLocationCoordinate2D(latitude: latitude, longitude: longitude)))
+        }
+        if hotelChoice == "suggested", query == hotelQuery, let hotel = selectedSuggestedHotel {
+            return MKMapItem(placemark: MKPlacemark(coordinate:
+                CLLocationCoordinate2D(latitude: hotel.latitude, longitude: hotel.longitude)))
+        }
+        if let venue = route.stops.indices.map({ selectedVenue($0) }).first(where: { venueQuery($0) == query }),
+           let prefecture = NationwideRoutes.prefectures.first(where: { $0.id == routePrefecture }) {
+            return try await venueMapItem(venue, in: prefecture)
+        }
+        let request = MKLocalSearch.Request()
+        request.naturalLanguageQuery = query
+        return try await MKLocalSearch(request: request).start().mapItems.first
     }
     @MainActor
     private func searchHotels() {
@@ -808,7 +838,9 @@ private struct PlannerView: View {
                     for item in nearbyItems {
                         let point = item.placemark.coordinate
                         let distance = center.distance(from: CLLocation(latitude: point.latitude, longitude: point.longitude))
-                        guard distance <= radius, hotelPlace(item, isIn: prefecture),
+                        // A nearby hotel across a prefectural border is still nearby.
+                        // Distance from the verified landmark is the deciding filter.
+                        guard distance <= radius, item.placemark.isoCountryCode == nil || item.placemark.isoCountryCode == "JP",
                               let name = item.name, !name.isEmpty else { continue }
                         let lodgingName = name.lowercased()
                         guard item.pointOfInterestCategory == .hotel || ["ホテル", "旅館", "民宿", "ペンション", "ゲストハウス", "宿", "hotel", "inn", "ryokan", "lodge", "guesthouse", "resort"]
@@ -818,7 +850,8 @@ private struct PlannerView: View {
                         suggestions.append(HotelSuggestion(id: id, name: name, address: item.placemark.title ?? name,
                                                            latitude: point.latitude, longitude: point.longitude,
                                                            phone: item.phoneNumber, website: item.url?.absoluteString,
-                                                           distance: distance))
+                                                           distance: distance, anchorLatitude: coordinate.latitude,
+                                                           anchorLongitude: coordinate.longitude))
                     }
                     if suggestions.count >= 3 { break }
                 }
@@ -1101,11 +1134,9 @@ private struct PlannerView: View {
         lunchResults = []
         Task { @MainActor in
             do {
-                let anchorRequest = MKLocalSearch.Request()
-                anchorRequest.naturalLanguageQuery = anchor
-                let anchorResponse = try await MKLocalSearch(request: anchorRequest).start()
+                let first = try await resolvedAnchorMapItem(anchor)
                 guard lunchSearchID == token else { return }
-                guard let first = anchorResponse.mapItems.first else {
+                guard let first else {
                     lunchSearching = false; lunchSearchError = true; return
                 }
                 let coordinate = first.placemark.coordinate
@@ -1186,11 +1217,9 @@ private struct PlannerView: View {
         // Keep the previous selected restaurant until a new one is explicitly chosen.
         Task { @MainActor in
             do {
-                let anchorRequest = MKLocalSearch.Request()
-                anchorRequest.naturalLanguageQuery = anchor
-                let anchorResponse = try await MKLocalSearch(request: anchorRequest).start()
+                let centerItem = try await resolvedAnchorMapItem(anchor)
                 guard dinnerSearchID == token else { return }
-                guard let centerItem = anchorResponse.mapItems.first else {
+                guard let centerItem else {
                     dinnerSearchError = true; dinnerSearching = false; return
                 }
                 let coordinate = centerItem.placemark.coordinate
@@ -1299,23 +1328,8 @@ private struct PlannerView: View {
     private func updateRouteLegTimes(origin: String, destination: String, key: String) async {
         guard routeLegTimes[key] == nil else { return }
         do {
-            let start: MKMapItem?
-            if origin == hotelQuery, hotelChoice == "suggested", let hotel = selectedSuggestedHotel {
-                start = MKMapItem(placemark: MKPlacemark(coordinate: CLLocationCoordinate2D(latitude: hotel.latitude, longitude: hotel.longitude)))
-            } else {
-                let fromRequest = MKLocalSearch.Request()
-                fromRequest.naturalLanguageQuery = origin
-                start = try await MKLocalSearch(request: fromRequest).start().mapItems.first
-            }
-            let end: MKMapItem?
-            if destination == venueQuery(selectedVenue(0)),
-               let prefecture = NationwideRoutes.prefectures.first(where: { $0.id == routePrefecture }) {
-                end = try await firstVenueMapItem(in: prefecture)
-            } else {
-                let toRequest = MKLocalSearch.Request()
-                toRequest.naturalLanguageQuery = destination
-                end = try await MKLocalSearch(request: toRequest).start().mapItems.first
-            }
+            let start = try await resolvedAnchorMapItem(origin)
+            let end = try await resolvedAnchorMapItem(destination)
             guard !Task.isCancelled else { return }
             guard let start, let end else {
                 routeLegTimes[key] = [:]
@@ -2875,6 +2889,8 @@ private struct HotelSuggestion: Codable, Identifiable {
     let phone: String?
     let website: String?
     let distance: Double
+    let anchorLatitude: Double?
+    let anchorLongitude: Double?
     var query: String { "\(latitude),\(longitude)" }
 }
 
