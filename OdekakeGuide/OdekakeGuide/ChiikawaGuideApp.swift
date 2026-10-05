@@ -443,7 +443,14 @@ private struct PlannerView: View {
     private var hotelChoice: String {
         let value = storedValues(savedHotels)[route.id] ?? ""
         if value == "custom" || availableHotels.contains(where: { $0.id == value }) { return value }
-        if value == "suggested" && selectedSuggestedHotel != nil { return value }
+        if value == "suggested", let selected = selectedSuggestedHotel {
+            if let actual = pinnedFirstVenueCoordinate {
+                let distance = CLLocation(latitude: actual.latitude, longitude: actual.longitude)
+                    .distance(from: CLLocation(latitude: selected.latitude, longitude: selected.longitude))
+                if distance > 50_000 { return "" }
+            }
+            return value
+        }
         return ""
     }
     private var chosenHotel: NearbyHotel? { availableHotels.first(where: { $0.id == hotelChoice }) }
@@ -720,10 +727,39 @@ private struct PlannerView: View {
         hotelSearching = false
         hotelSearchError = false
     }
+    // Pin the landmark that was formerly being resolved to central Yamaguchi.
+    // Coordinates are from the Nagato tourism association's area map.
+    private var pinnedFirstVenueCoordinate: CLLocationCoordinate2D? {
+        if selectedVenue(0).name == "Motonosumi Shrine" {
+            return CLLocationCoordinate2D(latitude: 34.41965524340437, longitude: 131.06256008148193)
+        }
+        return nil
+    }
+    private func firstVenueMapItem(in prefecture: PrefectureOption) async throws -> MKMapItem? {
+        if let coordinate = pinnedFirstVenueCoordinate {
+            return MKMapItem(placemark: MKPlacemark(coordinate: coordinate))
+        }
+        let venue = selectedVenue(0)
+        let expected = FeaturedRoutes.names[venue.name]?[0]
+            ?? NationwideRoutes.japanesePlaces[venue.name]
+            ?? GuideTranslations.venues[venue.name]?[0][0]
+            ?? venue.name
+        let request = MKLocalSearch.Request()
+        request.naturalLanguageQuery = venueQuery(venue)
+        request.resultTypes = .pointOfInterest
+        let result = try await MKLocalSearch(request: request).start()
+        // A prefecture match alone also accepts its capital city. Require the
+        // actual landmark name so a false search center is not presented as near.
+        let needle = expected.replacingOccurrences(of: " ", with: "").lowercased()
+        return result.mapItems.first { item in
+            let name = (item.name ?? "").replacingOccurrences(of: " ", with: "").lowercased()
+            return hotelPlace(item, isIn: prefecture) && !name.isEmpty &&
+                (name.contains(needle) || needle.contains(name) && name.count >= 4)
+        }
+    }
     @MainActor
     private func searchHotels() {
         guard !hotelSearching else { return }
-        let start = venueQuery(selectedVenue(0))
         guard let prefecture = NationwideRoutes.prefectures.first(where: { $0.id == routePrefecture }) else {
             hotelSearchError = true
             return
@@ -735,26 +771,8 @@ private struct PlannerView: View {
         hotelResults = []
         Task { @MainActor in
             do {
-                let anchorRequest = MKLocalSearch.Request()
-                anchorRequest.naturalLanguageQuery = start
-                let anchor = try await MKLocalSearch(request: anchorRequest).start()
+                let first = try await firstVenueMapItem(in: prefecture)
                 guard hotelSearchID == token else { return }
-                var first = anchor.mapItems.first(where: { hotelPlace($0, isIn: prefecture) })
-                if first == nil {
-                    // A similarly named landmark elsewhere must never become the hotel search center.
-                    let areaRequest = MKLocalSearch.Request()
-                    areaRequest.naturalLanguageQuery = "\(prefecture.ja), Japan"
-                    let area = try await MKLocalSearch(request: areaRequest).start()
-                    guard hotelSearchID == token else { return }
-                    if let regionItem = area.mapItems.first(where: { hotelPlace($0, isIn: prefecture) }) {
-                        anchorRequest.region = MKCoordinateRegion(center: regionItem.placemark.coordinate,
-                                                                  latitudinalMeters: prefecture.id == "hokkaido" ? 600000 : 160000,
-                                                                  longitudinalMeters: prefecture.id == "hokkaido" ? 600000 : 160000)
-                        let nearbyAnchor = try await MKLocalSearch(request: anchorRequest).start()
-                        guard hotelSearchID == token else { return }
-                        first = nearbyAnchor.mapItems.first(where: { hotelPlace($0, isIn: prefecture) })
-                    }
-                }
                 guard let first else {
                     hotelSearching = false; hotelSearchError = true; return
                 }
@@ -764,7 +782,16 @@ private struct PlannerView: View {
                 var suggestions: [HotelSuggestion] = []
                 // Keep cities local; widen the search only when fewer than three stays were found.
                 for radius in [2000.0, 5000.0, 10000.0, 25000.0, 50000.0] {
-                    for term in ["ホテル", "旅館"] {
+                    let poi = MKLocalPointsOfInterestRequest(center: coordinate, radius: radius)
+                    poi.pointOfInterestFilter = MKPointOfInterestFilter(including: [.hotel])
+                    var nearbyItems: [MKMapItem] = []
+                    do {
+                        nearbyItems += try await MKLocalSearch(pointsOfInterestRequest: poi).start().mapItems
+                        guard hotelSearchID == token else { return }
+                    } catch {
+                        guard hotelSearchID == token else { return }
+                    }
+                    for term in ["ホテル", "旅館", "宿泊施設"] {
                         let request = MKLocalSearch.Request()
                         request.naturalLanguageQuery = term
                         request.resultTypes = .pointOfInterest
@@ -772,27 +799,26 @@ private struct PlannerView: View {
                                                             latitudinalMeters: radius * 2,
                                                             longitudinalMeters: radius * 2)
                         do {
-                            let response = try await MKLocalSearch(request: request).start()
+                            nearbyItems += try await MKLocalSearch(request: request).start().mapItems
                             guard hotelSearchID == token else { return }
-                            for item in response.mapItems {
-                                let point = item.placemark.coordinate
-                                let distance = center.distance(from: CLLocation(latitude: point.latitude, longitude: point.longitude))
-                                guard distance <= radius, hotelPlace(item, isIn: prefecture),
-                                      let name = item.name, !name.isEmpty else { continue }
-                                let lodgingName = name.lowercased()
-                                guard item.pointOfInterestCategory == .hotel || ["ホテル", "旅館", "宿", "hotel", "inn", "ryokan", "lodge"]
-                                    .contains(where: { lodgingName.contains($0) }) else { continue }
-                                let id = "\(name)|\(point.latitude)|\(point.longitude)"
-                                guard seen.insert(id).inserted else { continue }
-                                suggestions.append(HotelSuggestion(id: id, name: name, address: item.placemark.title ?? name,
-                                                                   latitude: point.latitude, longitude: point.longitude,
-                                                                   phone: item.phoneNumber, website: item.url?.absoluteString,
-                                                                   distance: distance))
-                            }
                         } catch {
                             guard hotelSearchID == token else { return }
                         }
-                        if suggestions.count >= 3 { break }
+                    }
+                    for item in nearbyItems {
+                        let point = item.placemark.coordinate
+                        let distance = center.distance(from: CLLocation(latitude: point.latitude, longitude: point.longitude))
+                        guard distance <= radius, hotelPlace(item, isIn: prefecture),
+                              let name = item.name, !name.isEmpty else { continue }
+                        let lodgingName = name.lowercased()
+                        guard item.pointOfInterestCategory == .hotel || ["ホテル", "旅館", "民宿", "ペンション", "ゲストハウス", "宿", "hotel", "inn", "ryokan", "lodge", "guesthouse", "resort"]
+                            .contains(where: { lodgingName.contains($0) }) else { continue }
+                        let id = "\(name.folding(options: [.caseInsensitive, .widthInsensitive], locale: .current))|\(Int(point.latitude * 10000))|\(Int(point.longitude * 10000))"
+                        guard seen.insert(id).inserted else { continue }
+                        suggestions.append(HotelSuggestion(id: id, name: name, address: item.placemark.title ?? name,
+                                                           latitude: point.latitude, longitude: point.longitude,
+                                                           phone: item.phoneNumber, website: item.url?.absoluteString,
+                                                           distance: distance))
                     }
                     if suggestions.count >= 3 { break }
                 }
@@ -875,9 +901,8 @@ private struct PlannerView: View {
                 }
                 origin = result
             }
-            let destinationRequest = MKLocalSearch.Request()
-            destinationRequest.naturalLanguageQuery = venueQuery(selectedVenue(0))
-            guard let destination = try await MKLocalSearch(request: destinationRequest).start().mapItems.first else {
+            guard let prefecture = NationwideRoutes.prefectures.first(where: { $0.id == routePrefecture }),
+                  let destination = try await firstVenueMapItem(in: prefecture) else {
                 if !Task.isCancelled { hotelTravelLoading = false }
                 return
             }
@@ -904,6 +929,11 @@ private struct PlannerView: View {
         request.departureDate = Date()
         guard let response = try? await MKDirections(request: request).calculateETA(),
               response.expectedTravelTime > 0 else { return nil }
+        let straight = CLLocation(latitude: origin.placemark.coordinate.latitude, longitude: origin.placemark.coordinate.longitude)
+            .distance(from: CLLocation(latitude: destination.placemark.coordinate.latitude,
+                                       longitude: destination.placemark.coordinate.longitude))
+        guard response.expectedTravelTime < 24 * 3600,
+              response.distance < max(25_000, straight * 8) else { return nil }
         return max(1, Int(ceil(response.expectedTravelTime / 60)))
     }
     private var journeyOverview: some View {
@@ -1269,14 +1299,25 @@ private struct PlannerView: View {
     private func updateRouteLegTimes(origin: String, destination: String, key: String) async {
         guard routeLegTimes[key] == nil else { return }
         do {
-            let fromRequest = MKLocalSearch.Request()
-            fromRequest.naturalLanguageQuery = origin
-            let toRequest = MKLocalSearch.Request()
-            toRequest.naturalLanguageQuery = destination
-            let from = try await MKLocalSearch(request: fromRequest).start()
-            let to = try await MKLocalSearch(request: toRequest).start()
+            let start: MKMapItem?
+            if origin == hotelQuery, hotelChoice == "suggested", let hotel = selectedSuggestedHotel {
+                start = MKMapItem(placemark: MKPlacemark(coordinate: CLLocationCoordinate2D(latitude: hotel.latitude, longitude: hotel.longitude)))
+            } else {
+                let fromRequest = MKLocalSearch.Request()
+                fromRequest.naturalLanguageQuery = origin
+                start = try await MKLocalSearch(request: fromRequest).start().mapItems.first
+            }
+            let end: MKMapItem?
+            if destination == venueQuery(selectedVenue(0)),
+               let prefecture = NationwideRoutes.prefectures.first(where: { $0.id == routePrefecture }) {
+                end = try await firstVenueMapItem(in: prefecture)
+            } else {
+                let toRequest = MKLocalSearch.Request()
+                toRequest.naturalLanguageQuery = destination
+                end = try await MKLocalSearch(request: toRequest).start().mapItems.first
+            }
             guard !Task.isCancelled else { return }
-            guard let start = from.mapItems.first, let end = to.mapItems.first else {
+            guard let start, let end else {
                 routeLegTimes[key] = [:]
                 return
             }
