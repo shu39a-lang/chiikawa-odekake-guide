@@ -5,6 +5,12 @@ import MapKit
 import CoreLocation
 import WebKit
 
+private struct TravelTime {
+    let minutes: Int
+    // True only for a distance-based fallback, never for a timetable result.
+    let isApproximate: Bool
+}
+
 private struct Venue: Decodable {
     let name: String
     let detail: String
@@ -91,10 +97,11 @@ private struct PlannerView: View {
     @State private var hotelSearching = false
     @State private var hotelSearchError = false
     @State private var hotelSearchID = UUID()
-    @State private var hotelTravelMinutes: [String: Int] = [:]
+    @State private var hotelTravelMinutes: [String: TravelTime] = [:]
     @State private var hotelTravelLoading = false
     @State private var savedSuggestedHotels = "{}"
-    @State private var routeLegTimes: [String: [String: Int]] = [:]
+    @State private var routeLegTimes: [String: [String: TravelTime]] = [:]
+    @State private var routeLegLoading: Set<String> = []
 
     private var language: GuideLanguage { GuideLanguage(rawValue: languageCode) ?? .ja }
     private func text(_ key: String) -> String { GuideTranslations.ui[key]?[language.index] ?? key }
@@ -734,7 +741,14 @@ private struct PlannerView: View {
     // Towns and streets are not always indexed as a single Apple Maps POI.
     // Use their actual local center, never the prefectural capital.
     private var pinnedFirstVenueCoordinate: CLLocationCoordinate2D? {
-        switch selectedVenue(0).name {
+        return pinnedVenueCoordinate(selectedVenue(0))
+    }
+    private func pinnedVenueCoordinate(_ venue: Venue) -> CLLocationCoordinate2D? {
+        switch venue.name {
+        case "Chichibugahama Beach":
+            // Beach access area, not a point offshore. Official tourist map:
+            // https://www.mitoyo-kanko.com/chichibugahama/
+            return CLLocationCoordinate2D(latitude: 34.189485, longitude: 133.648966)
         case "Motonosumi Shrine":
             return CLLocationCoordinate2D(latitude: 34.41965524340437, longitude: 131.06256008148193)
         case "Nio port town":
@@ -750,7 +764,7 @@ private struct PlannerView: View {
         }
     }
     private func venueMapItem(_ venue: Venue, in prefecture: PrefectureOption) async throws -> MKMapItem? {
-        if venue.name == selectedVenue(0).name, let coordinate = pinnedFirstVenueCoordinate {
+        if let coordinate = pinnedVenueCoordinate(venue) {
             return MKMapItem(placemark: MKPlacemark(coordinate: coordinate))
         }
         let expected = FeaturedRoutes.names[venue.name]?[0]
@@ -762,15 +776,19 @@ private struct PlannerView: View {
         request.resultTypes = .pointOfInterest
         // A prefecture match alone also accepts its capital city. Require the
         // actual landmark name so a false search center is not presented as near.
-        let needle = expected.folding(options: [.caseInsensitive, .widthInsensitive], locale: .current)
-            .replacingOccurrences(of: " ", with: "")
-        func matches(_ item: MKMapItem) -> Bool {
-            let name = (item.name ?? "").folding(options: [.caseInsensitive, .widthInsensitive], locale: .current)
+        func normalized(_ value: String) -> String {
+            value.folding(options: [.caseInsensitive, .widthInsensitive], locale: .current)
                 .replacingOccurrences(of: " ", with: "")
+                .replacingOccurrences(of: "ヶ", with: "ケ")
+        }
+        let needle = normalized(expected)
+        func matches(_ item: MKMapItem) -> Bool {
+            let name = normalized(item.name ?? "")
             // Do not accept a different station whose name merely contains the
             // requested one (for example 新山口駅 instead of 山口駅).
             let exact = name == needle
-            let qualified = ["(", "（", "・", "-", "商店街"].contains { name.hasPrefix(needle + $0) }
+            let qualified = ["(", "（", "・", "-", "商店街", "海水浴場", "海岸", "公園", "入口"]
+                .contains { name.hasPrefix(needle + $0) }
             return hotelPlace(item, isIn: prefecture) && (exact || qualified)
         }
         if let result = try? await MKLocalSearch(request: request).start(),
@@ -825,13 +843,31 @@ private struct PlannerView: View {
             return MKMapItem(placemark: MKPlacemark(coordinate:
                 CLLocationCoordinate2D(latitude: hotel.latitude, longitude: hotel.longitude)))
         }
+        if let place = lunchSelection, query == place.query {
+            return MKMapItem(placemark: MKPlacemark(coordinate:
+                CLLocationCoordinate2D(latitude: place.latitude, longitude: place.longitude)))
+        }
+        if let place = dinnerSelection, query == place.query {
+            return MKMapItem(placemark: MKPlacemark(coordinate:
+                CLLocationCoordinate2D(latitude: place.latitude, longitude: place.longitude)))
+        }
         if let venue = route.stops.indices.map({ selectedVenue($0) }).first(where: { venueQuery($0) == query }),
            let prefecture = NationwideRoutes.prefectures.first(where: { $0.id == routePrefecture }) {
             return try await venueMapItem(venue, in: prefecture)
         }
         let request = MKLocalSearch.Request()
         request.naturalLanguageQuery = query
-        return try await MKLocalSearch(request: request).start().mapItems.first
+        // Address results are valid endpoints too, not just indexed businesses.
+        request.resultTypes = [.address, .pointOfInterest]
+        for _ in 0..<2 {
+            guard !Task.isCancelled else { return nil }
+            if let response = try? await MKLocalSearch(request: request).start(),
+               let item = response.mapItems.first(where: {
+                   $0.placemark.isoCountryCode == "JP" && CLLocationCoordinate2DIsValid($0.placemark.coordinate)
+               }) { return item }
+            try? await Task.sleep(nanoseconds: 600_000_000)
+        }
+        return nil
     }
     @MainActor
     private func searchHotels() {
@@ -945,6 +981,13 @@ private struct PlannerView: View {
         return String(format: hotelTravelText("hoursAndMinutes"), locale: language.locale,
                       arguments: [hours, remainder])
     }
+    private func travelTimeText(_ time: TravelTime) -> String {
+        let duration = travelDurationText(time.minutes)
+        return time.isApproximate ? "\(hotelTravelText("approximate")) · \(duration)" : duration
+    }
+    private func travelFailureText(mode: String, missingPlace: Bool) -> String {
+        hotelTravelText(missingPlace ? "placeUnavailable" : mode == "transit" ? "transitUnavailable" : "unavailable")
+    }
     private var hotelTravelSummary: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("\(extra("toFirst")) · \(venueText(selectedVenue(0), 0))")
@@ -955,72 +998,94 @@ private struct PlannerView: View {
                     Text(hotelTravelText(mode))
                     Spacer(minLength: 8)
                     if let minutes = hotelTravelMinutes[mode] {
-                        Text(travelDurationText(minutes))
+                        Text(travelTimeText(minutes))
                             .fontWeight(.bold).monospacedDigit()
                     } else if !hotelTravelLoading {
-                        Text(hotelTravelText("unavailable")).foregroundStyle(.secondary)
+                        Text(travelFailureText(mode: mode, missingPlace: hotelTravelMinutes.isEmpty)).foregroundStyle(.secondary)
                     }
                 }.font(.subheadline)
             }
             Text(hotelTravelText("estimateNote"))
                 .font(.caption).foregroundStyle(.secondary)
+            if !hotelTravelLoading, hotelTravelMinutes.count < 3 || hotelTravelMinutes.values.contains(where: { $0.isApproximate }) {
+                Button(hotelTravelText("retry")) {
+                    Task { await updateHotelTravelTimes() }
+                }.font(.caption.bold()).foregroundStyle(PlannerTheme.cyan)
+            }
         }
         .padding(12)
         .background(PlannerTheme.raised, in: RoundedRectangle(cornerRadius: 12))
     }
     @MainActor
     private func updateHotelTravelTimes() async {
+        let requestKey = hotelTravelKey
         hotelTravelMinutes = [:]
         hotelTravelLoading = true
         do {
             // Pause while a manually entered hotel name is still being typed.
             try await Task.sleep(nanoseconds: 500_000_000)
-            let origin: MKMapItem
-            if hotelChoice == "suggested", let hotel = selectedSuggestedHotel {
-                origin = MKMapItem(placemark: MKPlacemark(coordinate: CLLocationCoordinate2D(latitude: hotel.latitude, longitude: hotel.longitude)))
-            } else {
-                let request = MKLocalSearch.Request()
-                request.naturalLanguageQuery = hotelQuery
-                guard let result = try await MKLocalSearch(request: request).start().mapItems.first else {
-                    if !Task.isCancelled { hotelTravelLoading = false }
-                    return
-                }
-                origin = result
+            guard let origin = try await resolvedAnchorMapItem(hotelQuery) else {
+                if !Task.isCancelled && requestKey == hotelTravelKey { hotelTravelLoading = false }
+                return
             }
             guard let prefecture = NationwideRoutes.prefectures.first(where: { $0.id == routePrefecture }),
                   let destination = try await firstVenueMapItem(in: prefecture) else {
-                if !Task.isCancelled { hotelTravelLoading = false }
+                if !Task.isCancelled && requestKey == hotelTravelKey { hotelTravelLoading = false }
                 return
             }
-            guard !Task.isCancelled else { return }
-            async let transit = travelMinutes(from: origin, to: destination, by: .transit)
-            async let walking = travelMinutes(from: origin, to: destination, by: .walking)
-            async let taxi = travelMinutes(from: origin, to: destination, by: .automobile)
-            let (t, w, a) = await (transit, walking, taxi)
-            guard !Task.isCancelled else { return }
-            if let t = t { hotelTravelMinutes["transit"] = t }
-            if let w = w { hotelTravelMinutes["walking"] = w }
-            if let a = a { hotelTravelMinutes["taxi"] = a }
+            guard !Task.isCancelled && requestKey == hotelTravelKey else { return }
+            // Avoid a three-request burst and show walking/driving before
+            // waiting for a rural transit lookup to finish.
+            if let w = await travelMinutes(from: origin, to: destination, by: .walking) {
+                guard !Task.isCancelled, requestKey == hotelTravelKey else { return }
+                hotelTravelMinutes["walking"] = w
+            }
+            if let a = await travelMinutes(from: origin, to: destination, by: .automobile) {
+                guard !Task.isCancelled, requestKey == hotelTravelKey else { return }
+                hotelTravelMinutes["taxi"] = a
+            }
+            if let t = await travelMinutes(from: origin, to: destination, by: .transit) {
+                guard !Task.isCancelled, requestKey == hotelTravelKey else { return }
+                hotelTravelMinutes["transit"] = t
+            }
+            guard !Task.isCancelled, requestKey == hotelTravelKey else { return }
             hotelTravelLoading = false
         } catch {
-            if !Task.isCancelled { hotelTravelLoading = false }
+            if !Task.isCancelled && requestKey == hotelTravelKey { hotelTravelLoading = false }
         }
     }
     private func travelMinutes(from origin: MKMapItem, to destination: MKMapItem,
-                               by transport: MKDirectionsTransportType) async -> Int? {
-        let request = MKDirections.Request()
-        request.source = origin
-        request.destination = destination
-        request.transportType = transport
-        request.departureDate = Date()
-        guard let response = try? await MKDirections(request: request).calculateETA(),
-              response.expectedTravelTime > 0 else { return nil }
-        let straight = CLLocation(latitude: origin.placemark.coordinate.latitude, longitude: origin.placemark.coordinate.longitude)
-            .distance(from: CLLocation(latitude: destination.placemark.coordinate.latitude,
-                                       longitude: destination.placemark.coordinate.longitude))
-        guard response.expectedTravelTime < 24 * 3600,
-              response.distance < max(25_000, straight * 8) else { return nil }
-        return max(1, Int(ceil(response.expectedTravelTime / 60)))
+                               by transport: MKDirectionsTransportType) async -> TravelTime? {
+        let start = origin.placemark.coordinate
+        let end = destination.placemark.coordinate
+        guard CLLocationCoordinate2DIsValid(start), CLLocationCoordinate2DIsValid(end) else { return nil }
+        let straight = CLLocation(latitude: start.latitude, longitude: start.longitude)
+            .distance(from: CLLocation(latitude: end.latitude, longitude: end.longitude))
+        // Retry transient failures. Do not discard valid long routes or detours
+        // across rivers, mountains and bridges by a blanket distance/time filter.
+        for attempt in 0..<2 {
+            guard !Task.isCancelled else { return nil }
+            let request = MKDirections.Request()
+            request.source = origin
+            request.destination = destination
+            request.transportType = transport
+            request.departureDate = Date()
+            if let response = try? await MKDirections(request: request).calculateETA(),
+               response.expectedTravelTime.isFinite, response.expectedTravelTime > 0,
+               response.expectedTravelTime / 60 < Double(Int.max),
+               response.transportType == transport {
+                return TravelTime(minutes: max(1, Int(ceil(response.expectedTravelTime / 60))),
+                                  isApproximate: false)
+            }
+            if attempt == 0 { try? await Task.sleep(nanoseconds: 700_000_000) }
+        }
+        guard !Task.isCancelled, transport == .walking || transport == .automobile else { return nil }
+        // A rough planning estimate only. This does not certify a walkable road,
+        // bridge/ferry connection or taxi availability, and excludes waiting.
+        let roadMetres = straight * 1.4
+        let metresPerMinute = transport == .walking ? 4000.0 / 60 : 25000.0 / 60
+        let minutes = max(1, Int(ceil(roadMetres / metresPerMinute)))
+        return TravelTime(minutes: minutes, isApproximate: true)
     }
     private var journeyOverview: some View {
         journeyPanel {
@@ -1313,7 +1378,7 @@ private struct PlannerView: View {
     private func venueQuery(_ venue: Venue) -> String {
         if venue.name.hasPrefix("Lunch near "), let place = lunchSelection { return place.query }
         // Japanese names avoid ambiguous translated or romanized businesses.
-        let localName = FeaturedRoutes.names[venue.name]?[0] ?? GuideTranslations.venues[venue.name]?[0][0] ?? NationwideRoutes.japanesePlaces[venue.name] ?? venue.name
+        let localName = FeaturedRoutes.names[venue.name]?[0] ?? NationwideRoutes.japanesePlaces[venue.name] ?? GuideTranslations.venues[venue.name]?[0][0] ?? venue.name
         let prefecture = NationwideRoutes.prefectures.first(where: { $0.id == routePrefecture })?.ja ?? "日本"
         return "\(localName), \(prefecture), Japan"
     }
@@ -1341,6 +1406,14 @@ private struct PlannerView: View {
             if let url = mapURL(origin: origin, destination: destination, mode: "driving") {
                 timedRouteLink(extra("driveRoute"), url: url, systemImage: "car.fill", key: key, mode: "taxi", canEstimate: origin?.isEmpty == false)
             }
+            Text(hotelTravelText("estimateNote")).font(.caption).foregroundStyle(.secondary)
+            if let origin, !origin.isEmpty, !routeLegLoading.contains(key), let times = routeLegTimes[key],
+               times.count < 3 || times.values.contains(where: { $0.isApproximate }) {
+                Button(hotelTravelText("retry")) {
+                    routeLegTimes[key] = nil
+                    Task { await updateRouteLegTimes(origin: origin, destination: destination, key: key) }
+                }.font(.caption.bold()).foregroundStyle(PlannerTheme.cyan)
+            }
         }
         .task(id: key) {
             guard let origin, !origin.isEmpty else { return }
@@ -1361,10 +1434,12 @@ private struct PlannerView: View {
                     .background(accent.opacity(0.15), in: Circle())
                 Text(title).frame(maxWidth: .infinity, alignment: .leading)
                 if let minutes = routeLegTimes[key]?[mode] {
-                    Text(travelDurationText(minutes))
-                        .monospacedDigit().fixedSize()
+                    Text(travelTimeText(minutes))
+                        .monospacedDigit().fixedSize(horizontal: false, vertical: true).multilineTextAlignment(.trailing)
+                } else if routeLegLoading.contains(key) {
+                    ProgressView().tint(accent)
                 } else if routeLegTimes[key] != nil {
-                    Text(hotelTravelText("unavailable")).font(.caption).multilineTextAlignment(.trailing)
+                    Text(travelFailureText(mode: mode, missingPlace: routeLegTimes[key]?.isEmpty == true)).font(.caption).multilineTextAlignment(.trailing)
                 } else if canEstimate {
                     ProgressView().tint(accent)
                 }
@@ -1379,7 +1454,9 @@ private struct PlannerView: View {
     }
     @MainActor
     private func updateRouteLegTimes(origin: String, destination: String, key: String) async {
-        guard routeLegTimes[key] == nil else { return }
+        guard routeLegTimes[key] == nil, !routeLegLoading.contains(key) else { return }
+        routeLegLoading.insert(key)
+        defer { routeLegLoading.remove(key) }
         do {
             let start = try await resolvedAnchorMapItem(origin)
             let end = try await resolvedAnchorMapItem(destination)
@@ -1388,16 +1465,14 @@ private struct PlannerView: View {
                 routeLegTimes[key] = [:]
                 return
             }
-            async let transit = travelMinutes(from: start, to: end, by: .transit)
-            async let walking = travelMinutes(from: start, to: end, by: .walking)
-            async let taxi = travelMinutes(from: start, to: end, by: .automobile)
-            let (t, w, a) = await (transit, walking, taxi)
-            guard !Task.isCancelled else { return }
-            var times: [String: Int] = [:]
-            if let t { times["transit"] = t }
-            if let w { times["walking"] = w }
-            if let a { times["taxi"] = a }
-            routeLegTimes[key] = times
+            routeLegTimes[key] = [:]
+            for (mode, transport) in [("walking", MKDirectionsTransportType.walking),
+                                      ("taxi", MKDirectionsTransportType.automobile),
+                                      ("transit", MKDirectionsTransportType.transit)] {
+                let time = await travelMinutes(from: start, to: end, by: transport)
+                guard !Task.isCancelled else { routeLegTimes[key] = nil; return }
+                if let time { routeLegTimes[key]?[mode] = time }
+            }
         } catch {
             if !Task.isCancelled { routeLegTimes[key] = [:] }
         }
@@ -1874,8 +1949,12 @@ private enum HotelTravelTranslations {
         "minutes": ["約%d分", "약 %d분", "约%d分钟", "About %d min", "ประมาณ %d นาที"],
         "hours": ["約%d時間", "약 %d시간", "约%d小时", "About %d hr", "ประมาณ %d ชม."],
         "hoursAndMinutes": ["約%d時間%d分", "약 %d시간 %d분", "约%d小时%d分钟", "About %d hr %d min", "ประมาณ %d ชม. %d นาที"],
+        "approximate": ["概算", "대략", "粗略估算", "Rough estimate", "คำนวณคร่าว ๆ"],
+        "retry": ["所要時間を再検索", "소요 시간 다시 검색", "重新查询时间", "Retry travel times", "ค้นหาเวลาอีกครั้ง"],
+        "placeUnavailable": ["場所を確認できません・地図で確認", "위치 확인 필요 · 지도 확인", "地点未确认，请查看地图", "Location unresolved · check map", "ยังระบุตำแหน่งไม่ได้ ดูแผนที่"],
+        "transitUnavailable": ["運行・時刻未確認・乗換を確認", "운행·시간 미확인 · 환승 확인", "班次时间未确认，请查询换乘", "Timetable unconfirmed · check transit", "ยังยืนยันตารางรถไม่ได้ ดูการต่อรถ"],
         "unavailable": ["経路を取得できません", "경로를 가져올 수 없음", "无法获取路线", "Route unavailable", "ไม่พบเส้นทาง"],
-        "estimateNote": ["現在の経路による目安です。電車の待ち時間・道路状況は出発時に確認してください。", "현재 경로 기준 예상 시간입니다. 열차 대기 시간과 도로 상황은 출발할 때 확인하세요.", "按当前路线估算。请在出发时确认等车时间与路况。", "Current route estimates. Check train waits and traffic when you leave.", "เป็นเวลาโดยประมาณตามเส้นทางปัจจุบัน โปรดตรวจสอบเวลารอรถและสภาพจราจรก่อนออกเดินทาง"]
+        "estimateNote": ["「概算」は距離に基づく参考時間です。通行できる道・橋・フェリー・坂道・渋滞・タクシー待ちは反映しません。実際の道順と運行は地図で確認してください。", "‘대략’은 거리 기준 참고 시간입니다. 통행 가능 여부·다리·페리·경사·정체·택시 대기는 반영하지 않습니다. 실제 경로와 운행은 지도에서 확인하세요.", "‘粗略估算’为距离推算的参考时间，不反映道路通行、桥梁、渡轮、坡道、拥堵及出租车等待。请在地图确认实际路线与班次。", "Rough estimates are distance-based guidance. They do not confirm passable roads, bridges, ferries, slopes, traffic or taxi waits. Check actual directions and services on the map.", "ค่าคร่าว ๆ คำนวณจากระยะทาง ไม่ยืนยันถนน สะพาน เรือ ทางลาด รถติด หรือเวลารอแท็กซี่ โปรดตรวจเส้นทางจริงและตารางรถในแผนที่"]
     ]
 }
 
