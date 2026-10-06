@@ -1809,6 +1809,15 @@ private struct PlannerView: View {
             Label(featuredText("featured"), systemImage: "sparkles").font(.headline).foregroundStyle(journeyGold)
             Text(featuredText("featuredNote")).font(.caption).foregroundStyle(.secondary)
             ForEach(FeaturedRoutes.routes) { item in courseButton(item) }
+            NavigationLink {
+                OriginalCourseView(language: language)
+            } label: {
+                Label(OriginalCourseText.get("open", language), systemImage: "square.and.pencil")
+                    .font(.headline).frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(16)
+                    .background(PlannerTheme.cyan, in: RoundedRectangle(cornerRadius: 16))
+                    .foregroundStyle(.black)
+            }
             Divider()
             Text(journeyText("region")).font(.headline)
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 105), spacing: 8)], spacing: 8) {
@@ -3190,6 +3199,319 @@ private enum FeaturedRoutes {
     }()
 }
 
+
+private enum OriginalCourseText {
+    private static let strings: [String: [String]] = [
+        "open": ["オリジナルコースを作る", "나만의 코스 만들기", "创建原创路线", "Create my own itinerary", "สร้างเส้นทางของฉัน"],
+        "intro": ["ホテルと行き先を入力し、順番と滞在時間を調整してください。入力内容はこの端末に保存されます。", "호텔과 목적지를 입력하고 순서와 체류 시간을 조정하세요. 이 기기에 저장됩니다.", "输入酒店和目的地，调整顺序与停留时间。内容保存在此设备。", "Enter your hotel and stops, then adjust their order and visit times. Saved on this device.", "ป้อนโรงแรมและสถานที่ แล้วปรับลำดับและเวลาพัก ข้อมูลบันทึกในเครื่องนี้"],
+        "hotel": ["ホテル", "호텔", "酒店", "Hotel", "โรงแรม"],
+        "sight": ["観光", "관광", "观光", "Sightseeing", "เที่ยวชม"],
+        "lunch": ["昼食", "점심", "午餐", "Lunch", "อาหารกลางวัน"],
+        "dinner": ["夕食", "저녁", "晚餐", "Dinner", "อาหารเย็น"],
+        "place": ["ホテル名・店名・観光地名を入力", "호텔·식당·관광지 이름 입력", "输入酒店、餐厅或景点名称", "Enter a hotel, restaurant or attraction", "ป้อนชื่อโรงแรม ร้านอาหาร หรือสถานที่"],
+        "map": ["地図で場所を確認", "지도에서 장소 확인", "在地图中确认地点", "Check place on map", "ตรวจสอบสถานที่บนแผนที่"],
+        "candidate": ["検索候補を選んで場所を確定", "검색 결과에서 장소 선택", "从搜索结果选择地点", "Select the correct search result", "เลือกสถานที่จากผลการค้นหา"],
+        "unresolved": ["場所を確認できません。名前に住所・市区町村を加えてください。", "장소를 찾지 못했습니다. 주소나 지역을 추가하세요.", "无法确认地点，请添加地址或城市。", "Place not found. Add an address or city.", "ไม่พบสถานที่ กรุณาเพิ่มที่อยู่หรือเมือง"],
+        "duration": ["滞在", "체류", "停留", "Visit", "พัก"],
+        "arrival": ["予定", "예정", "计划", "Planned", "กำหนด"],
+        "add": ["行き先を追加", "장소 추가", "添加地点", "Add a stop", "เพิ่มสถานที่"],
+        "remove": ["削除", "삭제", "删除", "Remove", "ลบ"],
+        "up": ["上へ", "위로", "上移", "Move up", "เลื่อนขึ้น"],
+        "down": ["下へ", "아래로", "下移", "Move down", "เลื่อนลง"],
+        "walk": ["徒歩", "도보", "步行", "Walk", "เดิน"],
+        "taxi": ["車・タクシー", "차·택시", "汽车·出租车", "Car / taxi", "รถ/แท็กซี่"],
+        "transit": ["電車・バス", "전철·버스", "铁路·巴士", "Transit", "ขนส่งสาธารณะ"],
+        "approx": ["概算", "추정", "估算", "estimate", "ประมาณ"],
+        "minutes": ["分", "분", "分钟", "min", "นาที"],
+        "route": ["経路を開く", "경로 열기", "打开路线", "Open directions", "เปิดเส้นทาง"],
+        "timeNote": ["時刻は到着の目安です。移動時間は地図の経路を優先し、取得できない徒歩・車は直線距離から概算します。交通機関の時刻・道路事情は地図で確認してください。", "도착 시각은 예상입니다. 도보와 차량은 경로가 없을 때 직선 거리로 추정합니다. 교통 시간표는 지도에서 확인하세요.", "到达时间为参考。步行及驾车无路线时按直线距离估算。请在地图核对班次与路况。", "Arrival times are estimates. Walking and driving fall back to straight-line distance when routing fails. Check services and traffic on the map.", "เวลาเป็นการประมาณ หากไม่พบเส้นทางเดินหรือรถจะคำนวณจากระยะตรง ตรวจสอบตารางเดินรถในแผนที่"],
+        "return": ["ホテルへ戻る", "호텔로 돌아가기", "返回酒店", "Return to hotel", "กลับโรงแรม"],
+        "choose": ["昼食・夕食の枠も観光に変更できます。時刻は15分ずつ調整できます。", "점심·저녁도 관광으로 변경할 수 있습니다. 시간은 15분씩 조정할 수 있습니다.", "午餐和晚餐时段也可改为观光，时间可按15分钟调整。", "Lunch and dinner slots can be sightseeing instead. Adjust times in 15-minute steps.", "ช่วงมื้ออาหารเปลี่ยนเป็นเที่ยวชมได้ ปรับเวลาทีละ 15 นาที"]
+    ]
+    static func get(_ key: String, _ language: GuideLanguage) -> String { strings[key]?[language.index] ?? key }
+}
+
+private struct OriginalStop: Codable, Equatable, Identifiable {
+    var id = UUID()
+    var kind: String
+    var name = ""
+    var address = ""
+    var latitude: Double?
+    var longitude: Double?
+    var target: Int
+    var duration: Int
+    var mode = "walking"
+    static var initial: [OriginalStop] {
+        [OriginalStop(kind: "hotel", target: 540, duration: 0),
+         OriginalStop(kind: "sight", target: 600, duration: 75),
+         OriginalStop(kind: "lunch", target: 720, duration: 60),
+         OriginalStop(kind: "sight", target: 840, duration: 75),
+         OriginalStop(kind: "dinner", target: 1080, duration: 75),
+         OriginalStop(kind: "return", target: 1200, duration: 0)]
+    }
+    init(kind: String, target: Int, duration: Int) {
+        self.kind = kind; self.target = target; self.duration = duration
+    }
+}
+
+private struct OriginalPlace: Identifiable {
+    var id: String { "\(latitude),\(longitude)" }
+    let name: String
+    let address: String
+    let latitude: Double
+    let longitude: Double
+}
+
+private struct OriginalCourseView: View {
+    let language: GuideLanguage
+    @AppStorage("japanDay.originalCourse.v1") private var savedCourse = ""
+    @State private var stops = OriginalStop.initial
+    @State private var loaded = false
+    @State private var candidates: [UUID: [OriginalPlace]] = [:]
+    @State private var times: [String: [String: TravelTime]] = [:]
+
+    private func t(_ key: String) -> String { OriginalCourseText.get(key, language) }
+    private func clock(_ minutes: Int) -> String {
+        String(format: "%02d:%02d", (minutes / 60) % 24, minutes % 60)
+    }
+    private var searchKey: String { stops.map { "\($0.id):\($0.name)" }.joined(separator: "|") }
+    private var routeKey: String {
+        stops.map { "\($0.id):\($0.latitude ?? 0):\($0.longitude ?? 0)" }.joined(separator: "|")
+    }
+    private func legKey(_ index: Int) -> String {
+        "\(stops[index - 1].id)|\(stops[index].id)"
+    }
+    private func placeQuery(_ stop: OriginalStop) -> String {
+        if let latitude = stop.latitude, let longitude = stop.longitude { return "\(latitude),\(longitude)" }
+        return stop.address.isEmpty ? stop.name : "\(stop.name), \(stop.address)"
+    }
+    private func url(_ query: String) -> URL? {
+        var parts = URLComponents(string: "https://www.google.com/maps/search/")
+        parts?.queryItems = [URLQueryItem(name: "api", value: "1"), URLQueryItem(name: "query", value: query)]
+        return parts?.url
+    }
+    private func directions(_ index: Int, mode: String) -> URL? {
+        var parts = URLComponents(string: "https://www.google.com/maps/dir/")
+        parts?.queryItems = [URLQueryItem(name: "api", value: "1"),
+                             URLQueryItem(name: "origin", value: placeQuery(stops[index - 1])),
+                             URLQueryItem(name: "destination", value: placeQuery(stops[index])),
+                             URLQueryItem(name: "travelmode", value: mode == "taxi" ? "driving" : mode)]
+        return parts?.url
+    }
+    private func estimatedTime(_ index: Int, mode: String) -> TravelTime? {
+        guard index > 0, let a = stops[index - 1].latitude, let b = stops[index - 1].longitude,
+              let c = stops[index].latitude, let d = stops[index].longitude else { return nil }
+        if let exact = times[legKey(index)]?[mode] { return exact }
+        guard mode != "transit" else { return nil }
+        let distance = CLLocation(latitude: a, longitude: b).distance(from: CLLocation(latitude: c, longitude: d))
+        return TravelTime(minutes: max(3, Int(ceil(distance * 1.35 / (mode == "taxi" ? 400 : 75)))), isApproximate: true)
+    }
+    private func arrival(_ index: Int) -> Int {
+        guard index > 0 else { return stops[0].target }
+        let previous = arrival(index - 1) + stops[index - 1].duration
+        let mode = stops[index].mode
+        let travel = estimatedTime(index, mode: mode)?.minutes ?? estimatedTime(index, mode: "walking")?.minutes ?? 0
+        return max(stops[index].target, previous + travel)
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                Text(t("intro")).font(.subheadline)
+                Text(t("choose")).font(.caption).foregroundStyle(.secondary)
+                ForEach(stops.indices, id: \.self) { index in
+                    stopCard(index)
+                    if index + 1 < stops.count { transfer(index + 1) }
+                }
+                Button {
+                    stops.insert(OriginalStop(kind: "sight", target: min(1425, stops[stops.count - 2].target + 90), duration: 60), at: stops.count - 1)
+                } label: { Label(t("add"), systemImage: "plus.circle.fill").frame(maxWidth: .infinity).padding(14) }
+                    .background(PlannerTheme.cyan.opacity(0.18), in: RoundedRectangle(cornerRadius: 14))
+                Text(t("timeNote")).font(.caption).foregroundStyle(.secondary)
+            }.padding()
+        }
+        .background(PlannerTheme.background)
+        .navigationTitle(t("open"))
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear {
+            guard !loaded else { return }
+            loaded = true
+            if let data = savedCourse.data(using: .utf8), let decoded = try? JSONDecoder().decode([OriginalStop].self, from: data),
+               decoded.count >= 2, decoded.first?.kind == "hotel", decoded.last?.kind == "return" { stops = decoded }
+        }
+        .onChange(of: stops) { updated in
+            if loaded, let data = try? JSONEncoder().encode(updated), let value = String(data: data, encoding: .utf8) { savedCourse = value }
+        }
+        .task(id: searchKey) { await searchPlaces() }
+        .task(id: routeKey) { await calculateRoutes() }
+    }
+
+    private func stopCard(_ index: Int) -> some View {
+        let item = stops[index]
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text(item.kind == "return" ? t("return") : t(item.kind)).font(.headline)
+                Spacer()
+                Text(clock(arrival(index))).font(.headline.monospacedDigit()).foregroundStyle(PlannerTheme.cyan)
+            }
+            if index > 0 && index < stops.count - 1 {
+                Picker(t("choose"), selection: binding(index, \.kind)) {
+                    Text(t("sight")).tag("sight")
+                    Text(t("lunch")).tag("lunch")
+                    Text(t("dinner")).tag("dinner")
+                }.pickerStyle(.segmented)
+            }
+            if item.kind != "return" {
+                TextField(t("place"), text: Binding(get: { stops[index].name }, set: { value in
+                    stops[index].name = value
+                    stops[index].address = ""
+                    stops[index].latitude = nil
+                    stops[index].longitude = nil
+                    candidates[item.id] = nil
+                }))
+                    .textInputAutocapitalization(.words).submitLabel(.search)
+                    .padding(12).background(PlannerTheme.background, in: RoundedRectangle(cornerRadius: 12))
+            } else if stops[0].name.isEmpty {
+                Text(t("hotel")).foregroundStyle(.secondary)
+            } else {
+                Text(stops[0].name)
+            }
+            if !item.name.isEmpty {
+                if let link = url(placeQuery(item)) { Link(destination: link) { Label(t("map"), systemImage: "map") } }
+                if let options = candidates[item.id], !options.isEmpty {
+                    Text(t("candidate")).font(.caption).foregroundStyle(.secondary)
+                    ForEach(options) { place in
+                        Button {
+                            stops[index].address = place.address
+                            stops[index].latitude = place.latitude
+                            stops[index].longitude = place.longitude
+                        } label: {
+                            HStack { Image(systemName: item.latitude == place.latitude && item.longitude == place.longitude ? "checkmark.circle.fill" : "circle")
+                                VStack(alignment: .leading) { Text(place.name); Text(place.address).font(.caption).foregroundStyle(.secondary) }
+                            }.frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
+                } else if item.latitude == nil { Text(t("unresolved")).font(.caption).foregroundStyle(.secondary) }
+            }
+            HStack {
+                Text(t("arrival"))
+                Button("−15") { stops[index].target = max(0, stops[index].target - 15) }
+                Text(clock(item.target)).monospacedDigit()
+                Button("+15") { stops[index].target = min(1425, stops[index].target + 15) }
+                Spacer()
+            }.font(.subheadline)
+            if item.kind == "lunch" || item.kind == "dinner" {
+                HStack(spacing: 7) {
+                    ForEach(item.kind == "lunch" ? [660, 720, 780, 840] : [1020, 1080, 1140], id: \.self) { value in
+                        Button(clock(value)) { stops[index].target = value }
+                            .buttonStyle(.bordered)
+                            .tint(item.target == value ? PlannerTheme.cyan : .gray)
+                    }
+                }.font(.caption)
+            }
+            if index > 0 && index < stops.count - 1 {
+                HStack {
+                    Text("\(t("duration")) \(item.duration)\(t("minutes"))")
+                    Button("−15") { stops[index].duration = max(15, stops[index].duration - 15) }
+                    Button("+15") { stops[index].duration = min(240, stops[index].duration + 15) }
+                    Spacer()
+                }.font(.subheadline)
+                HStack {
+                    if index > 1 { Button(t("up")) { stops.swapAt(index, index - 1) } }
+                    if index < stops.count - 2 { Button(t("down")) { stops.swapAt(index, index + 1) } }
+                    Spacer()
+                    Button(t("remove"), role: .destructive) { stops.remove(at: index) }
+                }.font(.caption)
+            }
+        }.padding(14).frame(maxWidth: .infinity, alignment: .leading)
+            .background(PlannerTheme.surface, in: RoundedRectangle(cornerRadius: 18))
+    }
+    private func binding(_ index: Int, _ keyPath: WritableKeyPath<OriginalStop, String>) -> Binding<String> {
+        Binding(get: { stops[index][keyPath: keyPath] }, set: { stops[index][keyPath: keyPath] = $0 })
+    }
+    private func transfer(_ index: Int) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Image(systemName: "arrow.down")
+                Picker(t("route"), selection: binding(index, \.mode)) {
+                    Text(t("walk")).tag("walking")
+                    Text(t("taxi")).tag("taxi")
+                    if times[legKey(index)]?["transit"] != nil { Text(t("transit")).tag("transit") }
+                }.pickerStyle(.menu)
+                Spacer()
+            }
+            ForEach(["walking", "taxi", "transit"], id: \.self) { mode in
+                if let duration = estimatedTime(index, mode: mode), let link = directions(index, mode: mode),
+                   !stops[index - 1].name.isEmpty && !stops[index].name.isEmpty {
+                    Link(destination: link) {
+                        HStack {
+                            Image(systemName: mode == "walking" ? "figure.walk" : mode == "taxi" ? "car.fill" : "tram.fill")
+                            Text(t(mode == "walking" ? "walk" : mode))
+                            Spacer()
+                            Text("\(duration.isApproximate ? t("approx") + " " : "")\(duration.minutes)\(t("minutes"))")
+                            Image(systemName: "arrow.up.right")
+                        }.font(.subheadline)
+                    }
+                }
+            }
+            if estimatedTime(index, mode: "walking") == nil {
+                Text(t("unresolved")).font(.caption).foregroundStyle(.secondary)
+            }
+        }.padding(.horizontal, 14)
+    }
+
+    private func searchPlaces() async {
+        try? await Task.sleep(nanoseconds: 450_000_000)
+        guard !Task.isCancelled else { return }
+        if let last = stops.indices.last, stops[last].kind == "return", stops[0].name.isEmpty {
+            stops[last].name = ""; stops[last].address = ""; stops[last].latitude = nil; stops[last].longitude = nil
+        }
+        for item in stops where item.kind != "return" && !item.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            guard !Task.isCancelled else { return }
+            if item.latitude != nil && candidates[item.id] != nil { continue }
+            let request = MKLocalSearch.Request()
+            request.naturalLanguageQuery = item.name
+            guard let response = try? await MKLocalSearch(request: request).start(), !Task.isCancelled else { continue }
+            let found: [OriginalPlace] = Array(response.mapItems.prefix(4)).compactMap { result in
+                guard let name = result.name else { return nil }
+                let point = result.placemark.coordinate
+                return OriginalPlace(name: name, address: result.placemark.title ?? name, latitude: point.latitude, longitude: point.longitude)
+            }
+            guard let i = stops.firstIndex(where: { $0.id == item.id && $0.name == item.name }) else { continue }
+            candidates[item.id] = found
+            if let first = found.first, stops[i].latitude == nil {
+                stops[i].latitude = first.latitude; stops[i].longitude = first.longitude; stops[i].address = first.address
+            }
+        }
+        if let last = stops.indices.last, stops[last].kind == "return", stops[0].latitude != nil {
+            stops[last].name = stops[0].name
+            stops[last].address = stops[0].address
+            stops[last].latitude = stops[0].latitude
+            stops[last].longitude = stops[0].longitude
+        }
+    }
+    private func calculateRoutes() async {
+        times = [:]
+        let snapshot = stops
+        guard snapshot.count > 1 else { return }
+        for index in 1..<snapshot.count {
+            guard !Task.isCancelled else { return }
+            let from = snapshot[index - 1], to = snapshot[index]
+            guard let a = from.latitude, let b = from.longitude, let c = to.latitude, let d = to.longitude else { continue }
+            let key = "\(from.id)|\(to.id)"
+            for mode in ["walking", "taxi", "transit"] {
+                guard !Task.isCancelled else { return }
+                let request = MKDirections.Request()
+                request.source = MKMapItem(placemark: MKPlacemark(coordinate: CLLocationCoordinate2D(latitude: a, longitude: b)))
+                request.destination = MKMapItem(placemark: MKPlacemark(coordinate: CLLocationCoordinate2D(latitude: c, longitude: d)))
+                request.transportType = mode == "walking" ? .walking : mode == "taxi" ? .automobile : .transit
+                if let route = (try? await MKDirections(request: request).calculate())?.routes.first, !Task.isCancelled {
+                    times[key, default: [:]][mode] = TravelTime(minutes: max(1, Int(ceil(route.expectedTravelTime / 60))), isApproximate: false)
+                }
+            }
+        }
+    }
+}
 
 private struct PlannerMapRequest: Identifiable {
     let id = UUID()
