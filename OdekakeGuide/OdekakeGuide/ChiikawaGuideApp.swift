@@ -1809,15 +1809,7 @@ private struct PlannerView: View {
             Label(featuredText("featured"), systemImage: "sparkles").font(.headline).foregroundStyle(journeyGold)
             Text(featuredText("featuredNote")).font(.caption).foregroundStyle(.secondary)
             ForEach(FeaturedRoutes.routes) { item in courseButton(item) }
-            NavigationLink {
-                OriginalCourseView(language: language)
-            } label: {
-                Label(OriginalCourseText.get("open", language), systemImage: "square.and.pencil")
-                    .font(.headline).frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(16)
-                    .background(PlannerTheme.cyan, in: RoundedRectangle(cornerRadius: 16))
-                    .foregroundStyle(.black)
-            }
+            originalCourseEntry
             Divider()
             Text(journeyText("region")).font(.headline)
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 105), spacing: 8)], spacing: 8) {
@@ -1849,6 +1841,46 @@ private struct PlannerView: View {
             }
         }
         .padding(14).background(journeySurface, in: RoundedRectangle(cornerRadius: 22))
+    }
+
+    private var originalCourseEntry: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            NavigationLink {
+                OriginalCourseView(language: language)
+            } label: {
+                HStack(spacing: 13) {
+                    Image(systemName: "mappin.and.ellipse")
+                        .font(.system(size: 28, weight: .bold))
+                        .frame(width: 57, height: 57)
+                        .background(Color(red: 0.96, green: 0.66, blue: 0.15), in: Circle())
+                        .overlay(Circle().stroke(.white.opacity(0.65), lineWidth: 1.5))
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text(OriginalCourseText.get("open", language))
+                            .font(.system(size: 20, weight: .heavy))
+                            .lineLimit(2).minimumScaleFactor(0.78)
+                        Text(OriginalCourseText.get("tagline", language))
+                            .font(.caption2.bold())
+                            .foregroundStyle(Color(red: 1.0, green: 0.91, blue: 0.68))
+                            .padding(.horizontal, 9).padding(.vertical, 4)
+                            .background(Color(red: 0.14, green: 0.20, blue: 0.25), in: RoundedRectangle(cornerRadius: 6))
+                    }.frame(maxWidth: .infinity, alignment: .leading)
+                    Image(systemName: "chevron.right").font(.headline.bold())
+                }
+                .foregroundStyle(Color(red: 0.10, green: 0.14, blue: 0.18))
+                .padding(.horizontal, 17).padding(.vertical, 18)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(LinearGradient(colors: [Color(red: 1, green: 0.82, blue: 0.42), Color(red: 0.93, green: 0.66, blue: 0.21)], startPoint: .leading, endPoint: .trailing), in: RoundedRectangle(cornerRadius: 22))
+                .overlay(RoundedRectangle(cornerRadius: 22).stroke(Color(red: 1, green: 0.92, blue: 0.68), lineWidth: 2))
+            }
+            Text(OriginalCourseText.get("entryNote", language))
+                .font(.subheadline)
+                .foregroundStyle(Color(red: 0.84, green: 0.88, blue: 0.90))
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(13)
+                .background(Color(red: 0.12, green: 0.13, blue: 0.13), in: RoundedRectangle(cornerRadius: 12))
+                .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color(red: 0.38, green: 0.32, blue: 0.20), lineWidth: 1))
+        }
+        .padding(.vertical, 3)
     }
 
     private func stopCard(_ index: Int) -> some View {
@@ -3203,6 +3235,8 @@ private enum FeaturedRoutes {
 private enum OriginalCourseText {
     private static let strings: [String: [String]] = [
         "open": ["オリジナルコースを作る", "나만의 코스 만들기", "创建原创路线", "Create my own itinerary", "สร้างเส้นทางของฉัน"],
+        "tagline": ["自分だけの旅へ", "나만의 여행으로", "开启专属旅程", "Your own journey", "ทริปในแบบของคุณ"],
+        "entryNote": ["行きたい場所だけを選んで、観光・食事・ホテルを自由に組み立てられます。", "가고 싶은 곳만 골라 관광·식사·호텔을 자유롭게 구성할 수 있습니다.", "只选想去的地方，自由安排景点、餐饮与酒店。", "Choose only the places you want, and arrange sights, meals and your hotel freely.", "เลือกเฉพาะสถานที่ที่อยากไป แล้วจัดที่เที่ยว อาหาร และโรงแรมได้อย่างอิสระ"],
         "intro": ["ホテルと行き先を入力し、順番と滞在時間を調整してください。入力内容はこの端末に保存されます。", "호텔과 목적지를 입력하고 순서와 체류 시간을 조정하세요. 이 기기에 저장됩니다.", "输入酒店和目的地，调整顺序与停留时间。内容保存在此设备。", "Enter your hotel and stops, then adjust their order and visit times. Saved on this device.", "ป้อนโรงแรมและสถานที่ แล้วปรับลำดับและเวลาพัก ข้อมูลบันทึกในเครื่องนี้"],
         "hotel": ["ホテル", "호텔", "酒店", "Hotel", "โรงแรม"],
         "sight": ["観光", "관광", "观光", "Sightseeing", "เที่ยวชม"],
