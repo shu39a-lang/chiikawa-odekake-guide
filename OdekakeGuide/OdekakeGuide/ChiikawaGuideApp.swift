@@ -3226,7 +3226,16 @@ private enum OriginalCourseText {
         "route": ["経路を開く", "경로 열기", "打开路线", "Open directions", "เปิดเส้นทาง"],
         "timeNote": ["時刻は到着の目安です。移動時間は地図の経路を優先し、取得できない徒歩・車は直線距離から概算します。交通機関の時刻・道路事情は地図で確認してください。", "도착 시각은 예상입니다. 도보와 차량은 경로가 없을 때 직선 거리로 추정합니다. 교통 시간표는 지도에서 확인하세요.", "到达时间为参考。步行及驾车无路线时按直线距离估算。请在地图核对班次与路况。", "Arrival times are estimates. Walking and driving fall back to straight-line distance when routing fails. Check services and traffic on the map.", "เวลาเป็นการประมาณ หากไม่พบเส้นทางเดินหรือรถจะคำนวณจากระยะตรง ตรวจสอบตารางเดินรถในแผนที่"],
         "return": ["ホテルへ戻る", "호텔로 돌아가기", "返回酒店", "Return to hotel", "กลับโรงแรม"],
-        "choose": ["昼食・夕食の枠も観光に変更できます。時刻は15分ずつ調整できます。", "점심·저녁도 관광으로 변경할 수 있습니다. 시간은 15분씩 조정할 수 있습니다.", "午餐和晚餐时段也可改为观光，时间可按15分钟调整。", "Lunch and dinner slots can be sightseeing instead. Adjust times in 15-minute steps.", "ช่วงมื้ออาหารเปลี่ยนเป็นเที่ยวชมได้ ปรับเวลาทีละ 15 นาที"]
+        "choose": ["昼食・夕食の枠も観光に変更できます。時刻は15分ずつ調整できます。", "점심·저녁도 관광으로 변경할 수 있습니다. 시간은 15분씩 조정할 수 있습니다.", "午餐和晚餐时段也可改为观光，时间可按15分钟调整。", "Lunch and dinner slots can be sightseeing instead. Adjust times in 15-minute steps.", "ช่วงมื้ออาหารเปลี่ยนเป็นเที่ยวชมได้ ปรับเวลาทีละ 15 นาที"],
+        "nearSight": ["近くの観光地", "근처 관광지", "附近景点", "Nearby sights", "ที่เที่ยวใกล้เคียง"],
+        "nearLunch": ["近くで昼食", "근처 점심", "附近午餐", "Lunch nearby", "อาหารกลางวันใกล้ๆ"],
+        "nearDinner": ["近くで夕食", "근처 저녁", "附近晚餐", "Dinner nearby", "อาหารเย็นใกล้ๆ"],
+        "nearbyHint": ["この場所を起点に近くを検索", "이 장소 근처 검색", "以此地点搜索附近", "Search around this stop", "ค้นหาใกล้สถานที่นี้"],
+        "searching": ["近くの場所を検索中…", "근처 장소 검색 중…", "正在搜索附近地点…", "Searching nearby…", "กำลังค้นหาสถานที่ใกล้เคียง…"],
+        "nearEmpty": ["近くに候補が見つかりませんでした。地名を詳しく入力するか、地図で確認してください。", "근처 장소를 찾지 못했습니다. 장소 이름을 자세히 입력하세요.", "附近没有找到候选地点。请补充详细地址。", "No nearby results. Add a more precise place name or check the map.", "ไม่พบสถานที่ใกล้เคียง โปรดระบุชื่อให้ชัดเจนขึ้น"],
+        "nearSelect": ["この場所をコースに追加", "이 장소를 코스에 추가", "将此地点加入路线", "Add to itinerary", "เพิ่มในแผนเที่ยว"],
+        "nearNeedsPlace": ["先にこの場所の検索候補を選んでください。", "먼저 이 장소의 검색 결과를 선택하세요.", "请先选择此地点的搜索结果。", "Select this stop's place first.", "เลือกสถานที่นี้จากผลค้นหาก่อน"],
+        "nearMeters": ["約%d m", "약 %d m", "约%d米", "about %d m", "ประมาณ %d ม."]
     ]
     static func get(_ key: String, _ language: GuideLanguage) -> String { strings[key]?[language.index] ?? key }
 }
@@ -3262,6 +3271,12 @@ private struct OriginalPlace: Identifiable {
     let longitude: Double
 }
 
+private struct OriginalNearbyPlace: Identifiable {
+    var id: String { place.id }
+    let place: OriginalPlace
+    let distance: Int
+}
+
 private struct OriginalCourseView: View {
     let language: GuideLanguage
     @AppStorage("japanDay.originalCourse.v1") private var savedCourse = ""
@@ -3269,6 +3284,12 @@ private struct OriginalCourseView: View {
     @State private var loaded = false
     @State private var candidates: [UUID: [OriginalPlace]] = [:]
     @State private var times: [String: [String: TravelTime]] = [:]
+    @State private var nearbyAnchor: UUID?
+    @State private var nearbyKind = "sight"
+    @State private var nearbyResults: [OriginalNearbyPlace] = []
+    @State private var nearbySearching = false
+    @State private var nearbyError: String?
+    @State private var nearbySearchID = UUID()
 
     private func t(_ key: String) -> String { OriginalCourseText.get(key, language) }
     private func clock(_ minutes: Int) -> String {
@@ -3368,6 +3389,7 @@ private struct OriginalCourseView: View {
                     stops[index].latitude = nil
                     stops[index].longitude = nil
                     candidates[item.id] = nil
+                    if nearbyAnchor == item.id { nearbyAnchor = nil; nearbySearchID = UUID() }
                 }))
                     .textInputAutocapitalization(.words).submitLabel(.search)
                     .padding(12).background(PlannerTheme.background, in: RoundedRectangle(cornerRadius: 12))
@@ -3393,6 +3415,7 @@ private struct OriginalCourseView: View {
                     }
                 } else if item.latitude == nil { Text(t("unresolved")).font(.caption).foregroundStyle(.secondary) }
             }
+            if item.kind != "return" { nearbyControls(index) }
             HStack {
                 Text(t("arrival"))
                 Button("−15") { stops[index].target = max(0, stops[index].target - 15) }
@@ -3428,6 +3451,113 @@ private struct OriginalCourseView: View {
     }
     private func binding(_ index: Int, _ keyPath: WritableKeyPath<OriginalStop, String>) -> Binding<String> {
         Binding(get: { stops[index][keyPath: keyPath] }, set: { stops[index][keyPath: keyPath] = $0 })
+    }
+    private func nearbyControls(_ index: Int) -> some View {
+        let item = stops[index]
+        return VStack(alignment: .leading, spacing: 9) {
+            Text(t("nearbyHint")).font(.caption).foregroundStyle(.secondary)
+            HStack(spacing: 6) {
+                ForEach(["sight", "lunch", "dinner"], id: \.self) { kind in
+                    Button {
+                        searchNearby(from: index, kind: kind)
+                    } label: {
+                        Text(t(kind == "sight" ? "nearSight" : kind == "lunch" ? "nearLunch" : "nearDinner"))
+                            .font(.caption.bold()).frame(maxWidth: .infinity).multilineTextAlignment(.center)
+                            .padding(.vertical, 9)
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(kind == "sight" ? PlannerTheme.cyan : PlannerTheme.amber)
+                }
+            }
+            if nearbyAnchor == item.id {
+                if nearbySearching { ProgressView(t("searching")).font(.caption) }
+                if let nearbyError { Text(t(nearbyError)).font(.caption).foregroundStyle(.secondary) }
+                if !nearbyResults.isEmpty {
+                    Text(t(nearbyKind == "sight" ? "nearSight" : nearbyKind == "lunch" ? "nearLunch" : "nearDinner"))
+                        .font(.subheadline.bold())
+                    ForEach(nearbyResults) { result in
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text(result.place.name).font(.subheadline.bold())
+                            Text(result.place.address).font(.caption).foregroundStyle(.secondary)
+                            Text(String(format: t("nearMeters"), result.distance)).font(.caption)
+                            HStack {
+                                Button(t("nearSelect")) { selectNearby(result, after: item.id) }
+                                    .font(.caption.bold())
+                                Spacer()
+                                if let link = url("\(result.place.latitude),\(result.place.longitude)") {
+                                    Link(destination: link) { Label(t("map"), systemImage: "map") }.font(.caption)
+                                }
+                            }
+                        }.padding(9).frame(maxWidth: .infinity, alignment: .leading)
+                            .background(PlannerTheme.background, in: RoundedRectangle(cornerRadius: 10))
+                    }
+                }
+            }
+        }
+    }
+    private func searchNearby(from index: Int, kind: String) {
+        let anchor = stops[index]
+        let token = UUID()
+        nearbySearchID = token
+        nearbyAnchor = anchor.id
+        nearbyKind = kind
+        nearbyResults = []
+        nearbyError = nil
+        guard let latitude = anchor.latitude, let longitude = anchor.longitude else {
+            nearbySearching = false
+            nearbyError = "nearNeedsPlace"
+            return
+        }
+        nearbySearching = true
+        Task {
+            let coordinate = CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
+            let center = CLLocation(latitude: latitude, longitude: longitude)
+            var found: [String: OriginalNearbyPlace] = [:]
+            let queries = kind == "sight" ? ["観光名所", "博物館", "公園"] : ["レストラン", "食堂"]
+            for query in queries {
+                guard nearbySearchID == token else { return }
+                let request = MKLocalSearch.Request()
+                request.naturalLanguageQuery = query
+                request.resultTypes = .pointOfInterest
+                request.region = MKCoordinateRegion(center: coordinate, latitudinalMeters: 7000, longitudinalMeters: 7000)
+                if kind != "sight" {
+                    request.pointOfInterestFilter = MKPointOfInterestFilter(including: [.restaurant])
+                }
+                guard let response = try? await MKLocalSearch(request: request).start() else { continue }
+                guard nearbySearchID == token else { return }
+                for mapItem in response.mapItems {
+                    guard let name = mapItem.name, !name.isEmpty else { continue }
+                    let point = mapItem.placemark.coordinate
+                    let distance = center.distance(from: CLLocation(latitude: point.latitude, longitude: point.longitude))
+                    guard distance >= 30, distance <= 5000 else { continue }
+                    let place = OriginalPlace(name: name, address: mapItem.placemark.title ?? name,
+                                              latitude: point.latitude, longitude: point.longitude)
+                    found[place.id] = OriginalNearbyPlace(place: place, distance: Int(distance.rounded()))
+                }
+            }
+            guard nearbySearchID == token else { return }
+            nearbyResults = Array(found.values.sorted { $0.distance < $1.distance }.prefix(8))
+            nearbySearching = false
+            if nearbyResults.isEmpty { nearbyError = "nearEmpty" }
+        }
+    }
+    private func selectNearby(_ result: OriginalNearbyPlace, after anchorID: UUID) {
+        guard let index = stops.firstIndex(where: { $0.id == anchorID }) else { return }
+        let kind = nearbyKind
+        if kind != "sight", let emptyIndex = stops.indices.first(where: { $0 > index && stops[$0].kind == kind && stops[$0].name.isEmpty }) {
+            stops.remove(at: emptyIndex)
+        }
+        let minimum = kind == "dinner" ? 1020 : kind == "lunch" ? 660 : 0
+        var next = OriginalStop(kind: kind, target: min(1425, max(minimum, arrival(index) + stops[index].duration + 15)),
+                                duration: kind == "sight" ? 60 : 75)
+        next.name = result.place.name
+        next.address = result.place.address
+        next.latitude = result.place.latitude
+        next.longitude = result.place.longitude
+        stops.insert(next, at: index + 1)
+        nearbySearchID = UUID()
+        nearbyAnchor = nil
+        nearbyResults = []
     }
     private func transfer(_ index: Int) -> some View {
         VStack(alignment: .leading, spacing: 8) {
