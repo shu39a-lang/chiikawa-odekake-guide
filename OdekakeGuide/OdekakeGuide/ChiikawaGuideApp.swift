@@ -750,6 +750,14 @@ private struct PlannerView: View {
     }
     private func pinnedVenueCoordinate(_ venue: Venue) -> CLLocationCoordinate2D? {
         switch venue.name {
+        case "Omotesando Tokyo":
+            // Published street reference point at the Aoyama-dori end.
+            // https://en.wikipedia.org/wiki/Omotesand%C5%8D
+            return CLLocationCoordinate2D(latitude: 35.66513, longitude: 139.71248)
+        case "Hachiko Square Shibuya":
+            // Statue in the square, not a different Hachiko landmark in Tokyo.
+            // https://en.wikipedia.org/wiki/Statue_of_Hachik%C5%8D
+            return CLLocationCoordinate2D(latitude: 35.659056, longitude: 139.700583)
         case "Takachiho Shrine":
             // Kokugakuin University shrine database, WGS84 location.
             return CLLocationCoordinate2D(latitude: 32.706639, longitude: 131.302306)
@@ -815,10 +823,39 @@ private struct PlannerView: View {
                        "箕面駅前商店街": "箕面駅", "箕面滝道入口": "箕面公園",
                        "高千穂峡の遊歩道": "高千穂峡", "真名井の滝の展望場所": "真名井の滝",
                        "龍宮の潮吹の展望場所": "龍宮の潮吹", "白銀公園入口": "白銀公園"]
+        // Display labels are not necessarily names indexed by the map provider.
+        // Search known local aliases, the original name and bundled map query.
+        let mapAliases: [String: [String]] = [
+            "ハチ公前広場": ["忠犬ハチ公像", "ハチ公像", "ハチ公広場", "Hachiko Statue"],
+            "表参道": ["表参道通り", "Omotesando"],
+            "渋谷スクランブル交差点": ["渋谷駅前交差点", "Shibuya Scramble Crossing"],
+            "道頓堀": ["Dotonbori"],
+            "祇園の路地": ["祇園", "Gion"],
+            "嵯峨鳥居本町並み保存地区": ["嵯峨鳥居本伝統的建造物群保存地区"]
+        ]
         var names = [expected]
         if let alias = aliases[expected] { names.append(alias) }
-        let requests = names.map { "\($0), \(prefecture.ja), Japan" } + names.map { "\($0), Japan" }
+        names += mapAliases[expected] ?? []
+        names.append(venue.name)
+        if let components = URLComponents(string: venue.url),
+           components.host?.contains("google.") == true,
+           let query = components.queryItems?.first(where: { $0.name == "query" })?.value {
+            let local = query.replacingOccurrences(of: prefecture.ja, with: "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !local.isEmpty { names.append(local) }
+        }
+        var seen = Set<String>()
+        names = names.filter { seen.insert(normalizedPlaceName($0)).inserted }
+        let requests = names.map { "\($0), \(prefecture.ja), Japan" }
         let needles = names.map(normalizedPlaceName)
+        func matchesName(_ value: String) -> Bool {
+            let label = normalizedPlaceName(value)
+            return needles.contains { needle in
+                label == needle || label.hasPrefix(needle + "(") || label.hasPrefix(needle + "（")
+                    || label.hasPrefix(needle + "入口")
+                    || (needle.count >= 4 && label.contains(needle) && !needle.hasSuffix("駅"))
+            }
+        }
         for query in requests {
             guard !Task.isCancelled else { return nil }
             let request = MKLocalSearch.Request()
@@ -829,13 +866,10 @@ private struct PlannerView: View {
                     let point = item.placemark.coordinate
                     guard CLLocationCoordinate2DIsValid(point), point.latitude != 0,
                           item.placemark.isoCountryCode == nil || item.placemark.isoCountryCode == "JP" else { return false }
-                    let label = normalizedPlaceName(item.name ?? "")
-                    return hotelPlace(item, isIn: prefecture) && needles.contains { needle in
-                        label == needle || label.hasPrefix(needle + "(") || label.hasPrefix(needle + "入口")
-                            || (needle.count >= 4 && label.contains(needle) && !needle.hasSuffix("駅"))
-                    }
+                    return hotelPlace(item, isIn: prefecture) && matchesName(item.name ?? "")
                 }
-                if let item = candidates.first {
+                let exact = candidates.first { needles.contains(normalizedPlaceName($0.name ?? "")) }
+                if let item = exact ?? candidates.first {
                     resolvedPlaceCache[cacheKey] = item
                     return item
                 }
@@ -849,12 +883,29 @@ private struct PlannerView: View {
                let mark = marks.first(where: { mark in
                    guard let point = mark.location?.coordinate, CLLocationCoordinate2DIsValid(point) else { return false }
                    let item = MKMapItem(placemark: MKPlacemark(placemark: mark))
-                   return hotelPlace(item, isIn: prefecture) && normalizedPlaceName(mark.name ?? "").contains(normalizedPlaceName(name))
+                   return hotelPlace(item, isIn: prefecture) && matchesName(mark.name ?? "")
                }) {
                 let item = MKMapItem(placemark: MKPlacemark(placemark: mark))
                 resolvedPlaceCache[cacheKey] = item
                 return item
             }
+        }
+        let publishedAddresses = [
+            // GO TOKYO official listing: https://www.gotokyo.org/jp/spot/86/index.html
+            "Hachiko Square Shibuya": "東京都渋谷区道玄坂2-1"
+        ]
+        if let address = publishedAddresses[venue.name], !Task.isCancelled,
+           let marks = try? await CLGeocoder().geocodeAddressString(address, in: nil,
+                                      preferredLocale: Locale(identifier: "ja_JP")),
+           let mark = marks.first(where: { mark in
+               guard let point = mark.location?.coordinate,
+                     CLLocationCoordinate2DIsValid(point) else { return false }
+               return hotelPlace(MKMapItem(placemark: MKPlacemark(placemark: mark)), isIn: prefecture)
+           }) {
+            let item = MKMapItem(placemark: MKPlacemark(placemark: mark))
+            item.name = expected
+            resolvedPlaceCache[cacheKey] = item
+            return item
         }
         return nil
     }
@@ -916,7 +967,7 @@ private struct PlannerView: View {
             return MKMapItem(placemark: MKPlacemark(coordinate:
                 CLLocationCoordinate2D(latitude: place.latitude, longitude: place.longitude)))
         }
-        if let venue = route.stops.indices.map({ selectedVenue($0) }).first(where: { venueQuery($0) == query }),
+        if let venue = route.stops.flatMap({ $0.choices }).first(where: { venueQuery($0) == query }),
            let prefecture = NationwideRoutes.prefectures.first(where: { $0.id == routePrefecture }) {
             return try await venueMapItem(venue, in: prefecture)
         }
@@ -1486,6 +1537,10 @@ private struct PlannerView: View {
     }
     private func venueQuery(_ venue: Venue) -> String {
         if venue.name.hasPrefix("Lunch near "), let place = lunchSelection { return place.query }
+        if ["Omotesando Tokyo", "Hachiko Square Shibuya"].contains(venue.name),
+           let point = pinnedVenueCoordinate(venue) {
+            return "\(point.latitude),\(point.longitude)"
+        }
         // Japanese names avoid ambiguous translated or romanized businesses.
         let localName = FeaturedRoutes.names[venue.name]?[0] ?? NationwideRoutes.japanesePlaces[venue.name] ?? GuideTranslations.venues[venue.name]?[0][0] ?? venue.name
         let prefecture = NationwideRoutes.prefectures.first(where: { $0.id == routePrefecture })?.ja ?? "日本"
@@ -1518,6 +1573,15 @@ private struct PlannerView: View {
                 timedRouteLink(extra("driveRoute"), url: url, systemImage: "car.fill", key: key, mode: "taxi", canEstimate: origin?.isEmpty == false)
             }
             Text(hotelTravelText("estimateNote")).font(.caption).foregroundStyle(.secondary)
+            if let omotesando = route.stops.flatMap({ $0.choices }).first(where: { $0.name == "Omotesando Tokyo" }),
+               origin == venueQuery(omotesando) || destination == venueQuery(omotesando) {
+                Text(["表参道は青山通り側の地点を基準に計算しています。",
+                      "오모테산도는 아오야마 거리 쪽 지점을 기준으로 계산합니다.",
+                      "表参道以青山通路口一侧为计算基准。",
+                      "Omotesando times use the Aoyama-dori end of the street.",
+                      "เวลาของโอโมเตะซันโดคำนวณจากฝั่งถนนอาโอยามะ"][language.index])
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             if let origin, !origin.isEmpty, !routeLegLoading.contains(key), let times = routeLegTimes[key],
                times.count < 3 || times.values.contains(where: { $0.isApproximate }) {
                 Button(hotelTravelText("retry")) {
@@ -1577,7 +1641,10 @@ private struct PlannerView: View {
             return
         }
         routeLegLoading.insert(key)
-        defer { routeLegLoading.remove(key) }
+        defer {
+            routeLegLoading.remove(key)
+            if Task.isCancelled { routeLegTimes[key] = nil }
+        }
         do {
             let start = try await resolvedAnchorMapItem(origin)
             let end = try await resolvedAnchorMapItem(destination)
