@@ -1856,8 +1856,10 @@ private struct PlannerView: View {
                         .overlay(Circle().stroke(.white.opacity(0.65), lineWidth: 1.5))
                     VStack(alignment: .leading, spacing: 5) {
                         Text(OriginalCourseText.get("open", language))
-                            .font(.system(size: 20, weight: .heavy))
-                            .lineLimit(2).minimumScaleFactor(0.78)
+                            .font(.system(size: 18, weight: .heavy))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.5)
+                            .allowsTightening(true)
                         Text(OriginalCourseText.get("tagline", language))
                             .font(.caption2.bold())
                             .foregroundStyle(Color(red: 1.0, green: 0.91, blue: 0.68))
