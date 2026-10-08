@@ -228,7 +228,7 @@ private struct PlannerView: View {
                 Text(text("tagline")).font(.headline).foregroundStyle(.white)
                 PlannerTravelBanner().frame(height: 170)
                     .clipShape(RoundedRectangle(cornerRadius: 22))
-                originalCourseEntry
+                featuredHomeEntry
                 Button {
                     showingGuide = true
                 } label: {
@@ -237,6 +237,7 @@ private struct PlannerView: View {
                         .padding(18).frame(maxWidth: .infinity)
                         .background(PlannerTheme.surface, in: RoundedRectangle(cornerRadius: 18))
                 }.buttonStyle(.plain)
+                originalCourseEntry
             }
             .padding(20).frame(maxWidth: 650, alignment: .leading)
             .frame(maxWidth: .infinity)
@@ -1953,13 +1954,13 @@ private struct PlannerView: View {
             } label: {
                 HStack(spacing: 13) {
                     Image(systemName: "mappin.and.ellipse")
-                        .font(.system(size: 28, weight: .bold))
-                        .frame(width: 57, height: 57)
+                        .font(.system(size: 22, weight: .bold))
+                        .frame(width: 44, height: 44)
                         .background(Color(red: 0.96, green: 0.66, blue: 0.15), in: Circle())
                         .overlay(Circle().stroke(.white.opacity(0.65), lineWidth: 1.5))
                     VStack(alignment: .leading, spacing: 5) {
                         Text(OriginalCourseText.get("open", language))
-                            .font(.system(size: 18, weight: .heavy))
+                            .font(.system(size: 16, weight: .heavy))
                             .lineLimit(1)
                             .minimumScaleFactor(0.5)
                             .allowsTightening(true)
@@ -1972,10 +1973,10 @@ private struct PlannerView: View {
                     Image(systemName: "chevron.right").font(.headline.bold())
                 }
                 .foregroundStyle(Color(red: 0.10, green: 0.14, blue: 0.18))
-                .padding(.horizontal, 17).padding(.vertical, 18)
+                .padding(.horizontal, 14).padding(.vertical, 12)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(LinearGradient(colors: [Color(red: 1, green: 0.82, blue: 0.42), Color(red: 0.93, green: 0.66, blue: 0.21)], startPoint: .leading, endPoint: .trailing), in: RoundedRectangle(cornerRadius: 22))
-                .overlay(RoundedRectangle(cornerRadius: 22).stroke(Color(red: 1, green: 0.92, blue: 0.68), lineWidth: 2))
+                .background(LinearGradient(colors: [Color(red: 1, green: 0.82, blue: 0.42), Color(red: 0.93, green: 0.66, blue: 0.21)], startPoint: .leading, endPoint: .trailing), in: RoundedRectangle(cornerRadius: 18))
+                .overlay(RoundedRectangle(cornerRadius: 18).stroke(Color(red: 1, green: 0.92, blue: 0.68), lineWidth: 1.5))
             }
             Text(OriginalCourseText.get("entryNote", language))
                 .font(.subheadline)
@@ -1986,6 +1987,63 @@ private struct PlannerView: View {
                 .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color(red: 0.38, green: 0.32, blue: 0.20), lineWidth: 1))
         }
         .padding(.vertical, 3)
+    }
+
+    private var featuredHomeEntry: some View {
+        Button {
+            showingGuide = true
+        } label: {
+            HStack(spacing: 14) {
+                ZStack {
+                    Circle()
+                        .fill(Color.white.opacity(0.18))
+                        .frame(width: 58, height: 58)
+                    Image(systemName: "sparkles")
+                        .font(.system(size: 28, weight: .bold))
+                        .foregroundStyle(.white)
+                }
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(featuredHomeTitle)
+                        .font(.system(size: 20, weight: .heavy))
+                        .foregroundStyle(.white)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text(featuredHomeNote)
+                        .font(.caption.bold())
+                        .foregroundStyle(.white.opacity(0.9))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right.circle.fill")
+                    .font(.title2)
+                    .foregroundStyle(.white.opacity(0.95))
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                LinearGradient(
+                    colors: [
+                        Color(red: 0.96, green: 0.38, blue: 0.12),
+                        Color(red: 0.76, green: 0.12, blue: 0.38),
+                        Color(red: 0.35, green: 0.12, blue: 0.62)
+                    ],
+                    startPoint: .leading,
+                    endPoint: .trailing
+                ),
+                in: RoundedRectangle(cornerRadius: 22)
+            )
+            .overlay(RoundedRectangle(cornerRadius: 22).stroke(Color.white.opacity(0.72), lineWidth: 1.5))
+            .shadow(color: Color(red: 0.85, green: 0.18, blue: 0.35).opacity(0.42), radius: 10, y: 5)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var featuredHomeTitle: String {
+        ["厳選観光コース", "엄선 관광 코스", "精选观光路线", "Selected Japan Tours", "เส้นทางท่องเที่ยวคัดสรร"][language.index]
+    }
+
+    private var featuredHomeNote: String {
+        ["SNSで注目のコースをすぐに選べます", "SNS에서 주목받는 코스를 바로 선택하세요", "立即选择社交媒体热门路线", "Choose a social-media favorite", "เลือกเส้นทางยอดนิยมจากโซเชียลได้ทันที"][language.index]
     }
 
     private func stopCard(_ index: Int) -> some View {
