@@ -144,7 +144,7 @@ private struct PlannerView: View {
     // UI preview only: additional languages require complete translation packs.
     // Keep the five existing translation indices unchanged.
     private var languageSelectionTitle: String {
-        ["国・言語を選ぶ / Language", "국가·언어 선택 / Language", "选择国家和语言 / Language", "Country / Language", "เลือกประเทศ / ภาษา"][language.index]
+        ["ja":"国・言語を選ぶ", "ko":"국가·언어 선택", "zh":"选择国家和语言", "zht":"選擇國家和語言", "en":"Country / Language", "th":"เลือกประเทศ / ภาษา", "fr":"Pays / langue", "de":"Land / Sprache", "es":"País / idioma", "it":"Paese / lingua", "pt":"País / idioma", "hi":"देश / भाषा", "vi":"Quốc gia / ngôn ngữ", "id":"Negara / bahasa", "ms":"Negara / bahasa", "fil":"Bansa / wika", "ru":"Страна / язык", "nl":"Land / taal", "tr":"Ülke / dil", "pl":"Kraj / język", "ar":"الدولة / اللغة", "my":"နိုင်ငံ / ဘာသာ", "ne":"देश / भाषा", "si":"රට / භාෂාව", "km":"ប្រទេស / ភាសា", "he":"מדינה / שפה", "uk":"Країна / мова"][language.rawValue] ?? "Country / Language"
     }
     private var languageSelectionButton: some View {
         Button { showingLanguageSelection = true } label: {
@@ -605,6 +605,7 @@ private struct PlannerView: View {
         case .zh: return "zh-CN"
         case .en: return "en"
         case .th: return "th"
+        default: return language.webLanguageCode
         }
     }
     private func translatedGuideURL(_ original: URL) -> URL? {
@@ -2060,31 +2061,184 @@ private extension Collection {
     subscript(safe index: Index) -> Element? { indices.contains(index) ? self[index] : nil }
 }
 
-// Language order: Japanese, Korean, simplified Chinese, English, Thai.
+// Language and country options follow the supplied visitor ranking.
 private enum GuideLanguage: String, CaseIterable, Identifiable {
-    case ja, ko, zh, en, th
+    case ja, ko, zh, zht, en, th, fil, vi, id, ms, fr, de, hi, it, es, ru, nl, pt, sv, mn, ar, tr, pl, my, ne, si, da, fi, no, km, he, cs, el, ro, hu, bn, ur, uk, hr
     var id: String { rawValue }
-    var index: Int { Self.allCases.firstIndex(of: self) ?? 0 }
+    var index: Int {
+        switch self { case .ja: return 0; case .ko: return 1; case .zh: return 2; case .en: return 3; case .th: return 4; case .zht: return 2; default: return 3 }
+    }
     var title: String {
-        switch self {
-        case .ja: return "日本語"
-        case .ko: return "한국어"
-        case .zh: return "中文"
-        case .en: return "English"
-        case .th: return "ไทย"
-        }
+        [
+        "ja": "日本語",
+        "ko": "한국어",
+        "zh": "简体中文",
+        "zht": "繁體中文",
+        "en": "English",
+        "th": "ภาษาไทย",
+        "fil": "Filipino",
+        "vi": "Tiếng Việt",
+        "id": "Bahasa Indonesia",
+        "ms": "Bahasa Melayu",
+        "fr": "Français",
+        "de": "Deutsch",
+        "hi": "हिन्दी",
+        "it": "Italiano",
+        "es": "Español",
+        "ru": "Русский",
+        "nl": "Nederlands",
+        "pt": "Português",
+        "sv": "Svenska",
+        "mn": "Монгол",
+        "ar": "العربية",
+        "tr": "Türkçe",
+        "pl": "Polski",
+        "my": "မြန်မာဘာသာ",
+        "ne": "नेपाली",
+        "si": "සිංහල",
+        "da": "Dansk",
+        "fi": "Suomi",
+        "no": "Norsk",
+        "km": "ខ្មែរ",
+        "he": "עברית",
+        "cs": "Čeština",
+        "el": "Ελληνικά",
+        "ro": "Română",
+        "hu": "Magyar",
+        "bn": "বাংলা",
+        "ur": "اردو",
+        "uk": "Українська",
+        "hr": "Hrvatski",
+    ][rawValue] ?? rawValue
     }
     var countryTitle: String {
-        switch self {
-        case .ja: return "🇯🇵 日本"
-        case .ko: return "🇰🇷 한국"
-        case .zh: return "🇨🇳 中国"
-        case .en: return "🇺🇸 USA"
-        case .th: return "🇹🇭 ไทย"
-        }
+        [
+        "ja": "🇯🇵 日本",
+        "ko": "🇰🇷 한국",
+        "zh": "🇨🇳 中国",
+        "zht": "🇹🇼 台灣",
+        "en": "🇺🇸 USA",
+        "th": "🇹🇭 ไทย",
+        "fil": "🇵🇭 Pilipinas",
+        "vi": "🇻🇳 Việt Nam",
+        "id": "🇮🇩 Indonesia",
+        "ms": "🇲🇾 Malaysia",
+        "fr": "🇫🇷 France",
+        "de": "🇩🇪 Deutschland",
+        "hi": "🇮🇳 भारत",
+        "it": "🇮🇹 Italia",
+        "es": "🇪🇸 España",
+        "ru": "🇷🇺 Россия",
+        "nl": "🇳🇱 Nederland",
+        "pt": "🇧🇷 Brasil",
+        "sv": "🇸🇪 Sverige",
+        "mn": "🇲🇳 Монгол",
+        "ar": "🇦🇪 الإمارات",
+        "tr": "🇹🇷 Türkiye",
+        "pl": "🇵🇱 Polska",
+        "my": "🇲🇲 မြန်မာ",
+        "ne": "🇳🇵 नेपाल",
+        "si": "🇱🇰 ශ්‍රී ලංකාව",
+        "da": "🇩🇰 Danmark",
+        "fi": "🇫🇮 Suomi",
+        "no": "🇳🇴 Norge",
+        "km": "🇰🇭 កម្ពុជា",
+        "he": "🇮🇱 ישראל",
+        "cs": "🇨🇿 Česko",
+        "el": "🇬🇷 Ελλάδα",
+        "ro": "🇷🇴 România",
+        "hu": "🇭🇺 Magyarország",
+        "bn": "🇧🇩 বাংলাদেশ",
+        "ur": "🇵🇰 پاکستان",
+        "uk": "🇺🇦 Україна",
+        "hr": "🇭🇷 Hrvatska",
+    ][rawValue] ?? rawValue
     }
     var locale: Locale {
-        Locale(identifier: ["ja_JP", "ko_KR", "zh_CN", "en_US", "th_TH"][index])
+        [
+        "ja": "ja_JP",
+        "ko": "ko_KR",
+        "zh": "zh_CN",
+        "zht": "zh_TW",
+        "en": "en_US",
+        "th": "th_TH",
+        "fil": "fil_PH",
+        "vi": "vi_VN",
+        "id": "id_ID",
+        "ms": "ms_MY",
+        "fr": "fr_FR",
+        "de": "de_DE",
+        "hi": "hi_IN",
+        "it": "it_IT",
+        "es": "es_ES",
+        "ru": "ru_RU",
+        "nl": "nl_NL",
+        "pt": "pt_BR",
+        "sv": "sv_SE",
+        "mn": "mn_MN",
+        "ar": "ar_AE",
+        "tr": "tr_TR",
+        "pl": "pl_PL",
+        "my": "my_MM",
+        "ne": "ne_NP",
+        "si": "si_LK",
+        "da": "da_DK",
+        "fi": "fi_FI",
+        "no": "nb_NO",
+        "km": "km_KH",
+        "he": "he_IL",
+        "cs": "cs_CZ",
+        "el": "el_GR",
+        "ro": "ro_RO",
+        "hu": "hu_HU",
+        "bn": "bn_BD",
+        "ur": "ur_PK",
+        "uk": "uk_UA",
+        "hr": "hr_HR",
+    ][rawValue].map(Locale.init) ?? Locale(identifier: "en_US")
+    }
+    var webLanguageCode: String {
+        [
+        "ja": "ja",
+        "ko": "ko",
+        "zh": "zh-CN",
+        "zht": "zh-TW",
+        "en": "en",
+        "th": "th",
+        "fil": "tl",
+        "vi": "vi",
+        "id": "id",
+        "ms": "ms",
+        "fr": "fr",
+        "de": "de",
+        "hi": "hi",
+        "it": "it",
+        "es": "es",
+        "ru": "ru",
+        "nl": "nl",
+        "pt": "pt",
+        "sv": "sv",
+        "mn": "mn",
+        "ar": "ar",
+        "tr": "tr",
+        "pl": "pl",
+        "my": "my",
+        "ne": "ne",
+        "si": "si",
+        "da": "da",
+        "fi": "fi",
+        "no": "no",
+        "km": "km",
+        "he": "he",
+        "cs": "cs",
+        "el": "el",
+        "ro": "ro",
+        "hu": "hu",
+        "bn": "bn",
+        "ur": "ur",
+        "uk": "uk",
+        "hr": "hr",
+    ][rawValue] ?? "en"
     }
 }
 
@@ -2135,10 +2289,10 @@ private struct PlannerInstructionsView: View {
 
 private enum PlannerInstructions {
     static func buttonTitle(_ language: GuideLanguage) -> String {
-        ["使い方", "사용 방법", "使用说明", "User guide", "วิธีใช้งาน"][language.index]
+        ["ja":"使い方", "ko":"사용 방법", "zh":"使用指南", "zht":"使用指南", "en":"Guide", "th":"คู่มือ", "fr":"Guide", "de":"Anleitung", "es":"Guía", "it":"Guida", "pt":"Guia", "hi":"मार्गदर्शिका", "vi":"Hướng dẫn", "id":"Panduan", "ms":"Panduan", "fil":"Gabay", "ru":"Инструкция", "nl":"Handleiding", "tr":"Kılavuz", "pl":"Instrukcja", "ar":"دليل", "my":"လမ်းညွှန်", "ne":"मार्गदर्शन", "si":"මාර්ගෝපදේශය", "km":"មគ្គុទេសក៍", "he":"מדריך", "uk":"Посібник"][language.rawValue] ?? "Guide"
     }
     static func closeTitle(_ language: GuideLanguage) -> String {
-        ["閉じる", "닫기", "关闭", "Close", "ปิด"][language.index]
+        ["ja":"閉じる", "ko":"닫기", "zh":"关闭", "zht":"關閉", "en":"Close", "th":"ปิด", "fr":"Fermer", "de":"Schließen", "es":"Cerrar", "it":"Chiudi", "pt":"Fechar", "hi":"बंद करें", "vi":"Đóng", "id":"Tutup", "ms":"Tutup", "fil":"Isara", "ru":"Закрыть", "nl":"Sluiten", "tr":"Kapat", "pl":"Zamknij", "ar":"إغلاق", "my":"ပိတ်ရန်", "ne":"बन्द", "si":"වසන්න", "km":"បិទ", "he":"סגירה", "uk":"Закрити"][language.rawValue] ?? "Close"
     }
     static func sections(_ language: GuideLanguage) -> [(String, String)] {
         switch language {
@@ -2207,6 +2361,8 @@ private enum PlannerInstructions {
                 ("ข้อมูลทางการ คำแปล และการแชร์", "เปิดข้อมูลทางการของสถานที่หรือร้านอาหารเพื่อตรวจสอบเวลาเปิด ราคา ตั๋ว และเงื่อนไขการจอง เมื่อใช้ภาษาอื่นที่ไม่ใช่ญี่ปุ่น แอปจะเปิดหน้าคำแปลก่อน แต่บางหน้าหรือชื่อเฉพาะอาจยังเป็นภาษาต้นฉบับ กดปุ่มแชร์มุมขวาบนของหน้าวางแผนเพื่อส่งแผนทริปไปยังข้อความ โน้ต หรือแอปอื่น"),
                 ("การบันทึกและการแก้ปัญหา", "ภาษา เส้นทาง เวลาเริ่ม และสถานที่เที่ยวที่เลือกจะบันทึกไว้ในอุปกรณ์ ต้องเลือกโรงแรมใหม่ทุกครั้งเมื่อเปลี่ยนเส้นทางหรือจุดเที่ยวแรก และเมื่อเปิดแอปใหม่ ร้านมื้อกลางวันและมื้อเย็นที่ค้นหา รวมถึงความคืบหน้าของทริป อาจต้องเลือกใหม่ หากค้นหาไม่พบ ให้ตรวจสอบอินเทอร์เน็ตและเพิ่มพื้นที่หรือที่อยู่ต่อท้ายชื่อโรงแรมแล้วค้นหาอีกครั้ง เวลา ช่วงการเดินทาง และราคาเป็นค่าประมาณ ก่อนออกเดินทางควรตรวจสอบข้อมูลล่าสุดจากเว็บไซต์ทางการและแผนที่")
             ]
+        default:
+            return sections(.en)
         }
     }
 }
