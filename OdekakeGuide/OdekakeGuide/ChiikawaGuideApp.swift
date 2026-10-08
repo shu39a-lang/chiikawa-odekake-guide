@@ -1,3 +1,5 @@
+// DESIGN PREVIEW — NOT the requested complete multilingual release.
+// Existing five languages only; no new language is silently mapped to English.
 import SwiftUI
 import UIKit
 import Foundation
@@ -77,6 +79,8 @@ private struct PlannerView: View {
     @State private var presentedMap: PlannerMapRequest?
     @AppStorage("japanDay.language") private var languageCode = "ja"
     @State private var showingGuide = false
+    @State private var showingLanguageSelection = false
+    @State private var selectionInstructionsLanguage: GuideLanguage?
     @State private var instructionsLanguage: GuideLanguage?
     @State private var savedHotels = "{}"
     @State private var savedCustomHotels = "{}"
@@ -137,84 +141,106 @@ private struct PlannerView: View {
         guard let last = route.stops.indices.last else { return time(startMinutes) }
         return time(startOfStop(last) + duration(route.stops[last], venue: selectedVenue(last)))
     }
+    // UI preview only: additional languages require complete translation packs.
+    // Keep the five existing translation indices unchanged.
+    private var languageSelectionTitle: String {
+        ["国・言語を選ぶ / Language", "국가·언어 선택 / Language", "选择国家和语言 / Language", "Country / Language", "เลือกประเทศ / ภาษา"][language.index]
+    }
+    private var languageSelectionButton: some View {
+        Button { showingLanguageSelection = true } label: {
+            HStack(spacing: 12) {
+                Image(systemName: "globe").font(.title2)
+                Text(languageSelectionTitle).font(.headline.bold())
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.down").font(.headline)
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 18).padding(.vertical, 16)
+            .frame(maxWidth: .infinity, minHeight: 60)
+            .background(LinearGradient(colors: [Color(red: 0.43, green: 0.10, blue: 0.80), Color(red: 0.04, green: 0.25, blue: 0.77), Color(red: 0.0, green: 0.43, blue: 0.40)], startPoint: .leading, endPoint: .trailing), in: RoundedRectangle(cornerRadius: 18))
+            .overlay(RoundedRectangle(cornerRadius: 18).stroke(Color.cyan.opacity(0.65), lineWidth: 1.5))
+            .shadow(color: .cyan.opacity(0.16), radius: 8)
+        }.buttonStyle(.plain)
+    }
     private func languageChoice(_ item: GuideLanguage) -> some View {
-        let accent = PlannerTheme.accent(item.index)
-        return VStack(spacing: 10) {
+        HStack(alignment: .center, spacing: 6) {
             Button {
                 swapIndex = nil
                 languageCode = item.rawValue
                 showingGuide = true
+                showingLanguageSelection = false
             } label: {
-                Text(item.title)
-                    .font(.headline.bold()).minimumScaleFactor(0.75).lineLimit(1)
-                    .padding(8).frame(maxWidth: .infinity).aspectRatio(1, contentMode: .fit)
-                    .foregroundStyle(.white)
-                    .background(accent.opacity(language == item ? 0.32 : 0.13), in: Circle())
-                    .overlay(Circle().stroke(accent, lineWidth: language == item ? 3 : 2))
-                    .overlay(alignment: .bottomTrailing) {
-                        if language == item {
-                            Image(systemName: "checkmark")
-                                .font(.caption.bold()).foregroundStyle(.black)
-                                .frame(width: 26, height: 26).background(accent, in: Circle())
-                                .accessibilityHidden(true)
-                        }
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(item.countryTitle).font(.subheadline.bold())
+                    Text(item.title).font(.caption).foregroundStyle(.white.opacity(0.8))
+                    if language == item {
+                        Image(systemName: "checkmark.circle.fill").foregroundStyle(PlannerTheme.amber)
                     }
-                    .contentShape(Circle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityAddTraits(language == item ? [.isSelected] : [])
-            Button { instructionsLanguage = item } label: {
-                VStack(spacing: 5) {
-                    Image(systemName: "book.closed.fill")
-                        .font(.body).foregroundStyle(accent)
-                        .frame(width: 40, height: 40)
-                        .background(PlannerTheme.surface, in: Circle())
-                        .overlay(Circle().stroke(accent.opacity(0.45), lineWidth: 1))
-                    Text(PlannerInstructions.buttonTitle(item))
-                        .font(.caption).foregroundStyle(.white)
-                        .multilineTextAlignment(.center)
-                        .fixedSize(horizontal: false, vertical: true)
-                }.frame(maxWidth: .infinity, minHeight: 64)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("\(item.title) · \(PlannerInstructions.buttonTitle(item))")
+                }
+                .foregroundStyle(.white)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, minHeight: 54, alignment: .leading)
+                .contentShape(Rectangle())
+            }.buttonStyle(.plain)
+                .accessibilityLabel("\(item.countryTitle) · \(item.title)")
+                .accessibilityAddTraits(language == item ? [.isSelected] : [])
+            Button { selectionInstructionsLanguage = item } label: {
+                Text(PlannerInstructions.buttonTitle(item))
+                    .font(.caption.weight(.semibold)).underline()
+                    .foregroundStyle(PlannerTheme.amber)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(minWidth: 44, minHeight: 44)
+            }.buttonStyle(.plain)
         }
+        .padding(10).frame(maxWidth: .infinity, minHeight: 86)
+        .background(PlannerTheme.surface, in: RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(language == item ? PlannerTheme.amber : Color.white.opacity(0.18), lineWidth: language == item ? 2 : 1))
     }
-    private var languageButtons: some View {
-        LazyVGrid(columns: [GridItem(.adaptive(minimum: 96, maximum: 150), spacing: 16)], alignment: .center, spacing: 22) {
-            ForEach(GuideLanguage.allCases) { item in languageChoice(item) }
-        }
+    private var languageSelectionSheet: some View {
+        NavigationStack {
+            ScrollView {
+                LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)], spacing: 10) {
+                    ForEach(GuideLanguage.allCases) { item in languageChoice(item) }
+                }.padding(14)
+            }
+            .background(PlannerTheme.background)
+            .navigationTitle(languageSelectionTitle)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button(PlannerInstructions.closeTitle(language)) { showingLanguageSelection = false }
+                }
+            }
+            .sheet(item: $selectionInstructionsLanguage) { item in
+                PlannerInstructionsView(language: item)
+            }
+        }.preferredColorScheme(.dark)
     }
     private var languageHome: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
-                VStack(alignment: .leading, spacing: 14) {
-                    HStack(alignment: .top, spacing: 12) {
-                        Text("Japan\nDay Planner").font(.largeTitle.bold())
-                            .fixedSize(horizontal: false, vertical: true)
-                        Spacer(minLength: 0)
-                        Image(systemName: "globe.asia.australia.fill")
-                            .font(.system(size: 38)).foregroundStyle(PlannerTheme.cyan)
-                            .padding(10).background(PlannerTheme.cyan.opacity(0.12), in: Circle())
-                    }
-                    Text(text("tagline")).font(.subheadline.bold()).foregroundStyle(.white)
-                    PlannerTravelBanner().frame(height: 170)
-                        .clipShape(RoundedRectangle(cornerRadius: 22))
-                }
-                VStack(alignment: .leading, spacing: 6) {
-                    ForEach(GuideLanguage.allCases) { item in
-                        Text(GuideTranslations.ui["welcome"]?[item.index] ?? item.title)
-                            .font(item == language ? .headline : .caption)
-                            .foregroundStyle(item == language ? Color.white : Color.white.opacity(0.72))
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-                languageButtons
+            VStack(alignment: .leading, spacing: 22) {
+                Text("Japan Day Planner").font(.largeTitle.bold()).foregroundStyle(.white)
+                languageSelectionButton
+                Text(language.title).font(.subheadline).foregroundStyle(.white.opacity(0.8))
+                Text(text("tagline")).font(.headline).foregroundStyle(.white)
+                PlannerTravelBanner().frame(height: 170)
+                    .clipShape(RoundedRectangle(cornerRadius: 22))
+                originalCourseEntry
+                Button {
+                    showingGuide = true
+                } label: {
+                    Label(text("route"), systemImage: "map.fill")
+                        .font(.headline).foregroundStyle(.white)
+                        .padding(18).frame(maxWidth: .infinity)
+                        .background(PlannerTheme.surface, in: RoundedRectangle(cornerRadius: 18))
+                }.buttonStyle(.plain)
             }
-            .padding(22).frame(maxWidth: 650, alignment: .leading)
+            .padding(20).frame(maxWidth: 650, alignment: .leading)
             .frame(maxWidth: .infinity)
-        }
-        .background(PlannerTheme.background)
+        }.background(PlannerTheme.background)
     }
 
     private var route: DayRoute { guide.routes.first(where: { $0.id == routeID }) ?? guide.routes[0] }
@@ -392,6 +418,7 @@ private struct PlannerView: View {
                 languageHome
             }
         }
+        .sheet(isPresented: $showingLanguageSelection) { languageSelectionSheet }
         .sheet(item: $presentedMap) { request in
             PlannerMapScreen(request: request, language: language)
         }
@@ -1861,6 +1888,7 @@ private struct PlannerView: View {
 
     private var plannerHeading: some View {
         VStack(alignment: .leading, spacing: 12) {
+            languageSelectionButton
             Text(text("headline")).font(.title.bold()).foregroundStyle(.white)
                 .fixedSize(horizontal: false, vertical: true)
             PlannerTravelBanner().frame(height: 120).clipShape(RoundedRectangle(cornerRadius: 22))
@@ -2044,6 +2072,15 @@ private enum GuideLanguage: String, CaseIterable, Identifiable {
         case .zh: return "中文"
         case .en: return "English"
         case .th: return "ไทย"
+        }
+    }
+    var countryTitle: String {
+        switch self {
+        case .ja: return "🇯🇵 日本"
+        case .ko: return "🇰🇷 한국"
+        case .zh: return "🇨🇳 中国"
+        case .en: return "🇺🇸 USA"
+        case .th: return "🇹🇭 ไทย"
         }
     }
     var locale: Locale {
