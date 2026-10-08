@@ -750,6 +750,12 @@ private struct PlannerView: View {
     }
     private func pinnedVenueCoordinate(_ venue: Venue) -> CLLocationCoordinate2D? {
         switch venue.name {
+        case "Meiji Jingu Shrine":
+            // Fixed entrance-area coordinate for reliable route calculations.
+            return CLLocationCoordinate2D(latitude: 35.669868, longitude: 139.702255)
+        case "Takeshita Street":
+            // Fixed street reference point near the Harajuku/Takeshita entrance.
+            return CLLocationCoordinate2D(latitude: 35.67125, longitude: 139.70481)
         case "Omotesando Tokyo":
             // Published street reference point at the Aoyama-dori end.
             // https://en.wikipedia.org/wiki/Omotesand%C5%8D
@@ -1537,8 +1543,9 @@ private struct PlannerView: View {
     }
     private func venueQuery(_ venue: Venue) -> String {
         if venue.name.hasPrefix("Lunch near "), let place = lunchSelection { return place.query }
-        if ["Omotesando Tokyo", "Hachiko Square Shibuya"].contains(venue.name),
-           let point = pinnedVenueCoordinate(venue) {
+        // Use fixed coordinates for known streets, squares and major sites.
+        // This avoids a transient MapKit name-search failure hiding route times.
+        if let point = pinnedVenueCoordinate(venue) {
             return "\(point.latitude),\(point.longitude)"
         }
         // Japanese names avoid ambiguous translated or romanized businesses.
