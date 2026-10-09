@@ -11,6 +11,55 @@ private struct TravelTime {
     let minutes: Int
     // True only for a distance-based fallback, never for a timetable result.
     let isApproximate: Bool
+    var routeMetres: Double? = nil
+    var straightMetres: Double? = nil
+
+    static func rough(from: CLLocationCoordinate2D, to: CLLocationCoordinate2D,
+                      by mode: MKDirectionsTransportType) -> TravelTime? {
+        guard CLLocationCoordinate2DIsValid(from), CLLocationCoordinate2DIsValid(to),
+              mode == .walking || mode == .automobile else { return nil }
+        let straight = CLLocation(latitude: from.latitude, longitude: from.longitude)
+            .distance(from: CLLocation(latitude: to.latitude, longitude: to.longitude))
+        guard straight.isFinite else { return nil }
+        // Coarse planning guidance, never a measured route or a claim of access.
+        let minutes = max(5, Int(ceil(straight * 1.4 / (mode == .walking ? 4000.0 / 60 : 25000.0 / 60) / 5)) * 5)
+        return TravelTime(minutes: minutes, isApproximate: true, straightMetres: straight)
+    }
+}
+
+@MainActor
+private enum RouteMeasurements {
+    private static var cache: [String: (Date, TravelTime)] = [:]
+
+    static func fetch(from origin: MKMapItem, to destination: MKMapItem,
+                      by mode: MKDirectionsTransportType) async -> TravelTime? {
+        let a = origin.placemark.coordinate, b = destination.placemark.coordinate
+        guard CLLocationCoordinate2DIsValid(a), CLLocationCoordinate2DIsValid(b), !Task.isCancelled else { return nil }
+        let key = "\(a.latitude),\(a.longitude)>\(b.latitude),\(b.longitude)|\(mode.rawValue)"
+        if let (date, value) = cache[key], Date().timeIntervalSince(date) < 300 { return value }
+        let request = MKDirections.Request()
+        request.source = origin; request.destination = destination
+        request.transportType = mode; request.departureDate = Date()
+        request.requestsAlternateRoutes = true
+        let directions = MKDirections(request: request)
+        let timeout = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 12_000_000_000)
+            if !Task.isCancelled { directions.cancel() }
+        }
+        defer { timeout.cancel() }
+        let response = try? await directions.calculate()
+        guard !Task.isCancelled,
+              let route = response?.routes.filter({
+                  $0.distance.isFinite && $0.distance >= 0 &&
+                  $0.expectedTravelTime.isFinite && $0.expectedTravelTime > 0 &&
+                  $0.expectedTravelTime / 60 < Double(Int.max)
+              }).min(by: { $0.expectedTravelTime < $1.expectedTravelTime }) else { return nil }
+        let value = TravelTime(minutes: max(1, Int(ceil(route.expectedTravelTime / 60))),
+                               isApproximate: false, routeMetres: route.distance)
+        if cache.count > 300 { cache.removeAll() }
+        cache[key] = (Date(), value)
+        return value
+    }
 }
 
 private struct Venue: Decodable {
@@ -99,6 +148,21 @@ private struct PlannerView: View {
     @State private var lunchSearchID = UUID()
     @State private var resolvedPlaceCache: [String: MKMapItem] = [:]
     @State private var hotelResults: [HotelSuggestion] = []
+    @State private var hotelWalkingTimes: [String: TravelTime] = [:]
+    @State private var hotelSortByWalking = true
+
+    private var sortedHotelResults: [HotelSuggestion] {
+        hotelResults.sorted { a, b in
+            if hotelSortByWalking {
+                let x = hotelWalkingTimes[a.id]?.routeMetres
+                let y = hotelWalkingTimes[b.id]?.routeMetres
+                if let x, let y, x != y { return x < y }
+                if (x != nil) != (y != nil) { return x != nil }
+            }
+            if a.distance != b.distance { return a.distance < b.distance }
+            return a.id < b.id
+        }
+    }
     @State private var hotelSearching = false
     @State private var hotelSearchError = false
     @State private var hotelSearchID = UUID()
@@ -711,7 +775,13 @@ private struct PlannerView: View {
                 Text(hotelTravelText(hotelResults.contains(where: { $0.distance < 0 }) ? "registeredStay" : "nearestFive"))
                     .font(.caption).foregroundStyle(.secondary)
             }
-            ForEach(hotelResults) { hotel in
+            if hotelResults.contains(where: { $0.distance >= 0 }) {
+                Picker(hotelTravelText("sortHotels"), selection: $hotelSortByWalking) {
+                    Text(hotelTravelText("walkSort")).tag(true)
+                    Text(hotelTravelText("straightDistance")).tag(false)
+                }.pickerStyle(.segmented)
+            }
+            ForEach(sortedHotelResults) { hotel in
                 VStack(alignment: .leading, spacing: 10) {
                     Text(hotel.name).font(.headline)
                     Text(hotel.address).font(.subheadline).foregroundStyle(.secondary)
@@ -719,6 +789,15 @@ private struct PlannerView: View {
                         Text(String(format: journeyText("distance"), locale: language.locale, arguments: [Int(hotel.distance.rounded())])).font(.caption).foregroundStyle(.secondary)
                     } else {
                         Text(hotelTravelText("registeredStay")).font(.caption).foregroundStyle(.secondary)
+                    }
+                    if hotel.distance >= 0 {
+                        if let value = hotelWalkingTimes[hotel.id] {
+                            Text("\(hotelTravelText("walking")) · \(travelTimeText(value))")
+                                .font(.subheadline.bold()).fixedSize(horizontal: false, vertical: true)
+                        } else {
+                            Text(hotelTravelText(hotelSearching ? "checkingRoute" : "walkUnconfirmed"))
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
                     }
                     if let url = locationURL(hotel.query) { journeyLink(extra("hotelMap"), url: url, systemImage: "mappin.and.ellipse") }
                     if let url = hotel.website.flatMap(URL.init(string:)) { translatedGuideLink(extra("rate"), url: url) }
@@ -1141,6 +1220,7 @@ private struct PlannerView: View {
         hotelSearchError = false
         // Publish real registered stays before any network lookup. Keep them
         // on every error path instead of clearing the screen.
+        hotelWalkingTimes = [:]
         hotelResults = registeredHotels()
         Task { @MainActor in
             do {
@@ -1166,7 +1246,7 @@ private struct PlannerView: View {
                         hotelResults = suggestions
                     }
                 }
-                // Keep cities local; widen the search only when fewer than three stays were found.
+                // Search multiple lodging categories before expanding. Do not stop at three results.
                 for radius in [2000.0, 5000.0, 10000.0, 25000.0, 50000.0] {
                     let poi = MKLocalPointsOfInterestRequest(center: coordinate, radius: radius)
                     poi.pointOfInterestFilter = MKPointOfInterestFilter(including: [.hotel])
@@ -1177,7 +1257,9 @@ private struct PlannerView: View {
                     } catch {
                         guard hotelSearchID == token else { return }
                     }
-                    for term in ["ホテル", "旅館", "宿泊施設"] {
+                    for term in ["ホテル", "旅館", "民宿", "ゲストハウス", "宿坊", "山荘", "ペンション"] {
+                        try? await Task.sleep(nanoseconds: 250_000_000)
+                        guard hotelSearchID == token, !Task.isCancelled else { return }
                         let request = MKLocalSearch.Request()
                         request.naturalLanguageQuery = term
                         request.resultTypes = [.address, .pointOfInterest]
@@ -1196,14 +1278,19 @@ private struct PlannerView: View {
                         let distance = center.distance(from: CLLocation(latitude: point.latitude, longitude: point.longitude))
                         // A nearby hotel across a prefectural border is still nearby.
                         // Distance from the verified landmark is the deciding filter.
-                        guard distance <= radius, item.placemark.isoCountryCode == nil || item.placemark.isoCountryCode == "JP",
+                        guard CLLocationCoordinate2DIsValid(point), distance.isFinite, distance <= radius, item.placemark.isoCountryCode == nil || item.placemark.isoCountryCode == "JP",
                               let name = item.name, !name.isEmpty else { continue }
                         let lodgingName = name.lowercased()
-                        guard item.pointOfInterestCategory == .hotel || ["ホテル", "旅館", "民宿", "ペンション", "ゲストハウス", "宿", "hotel", "inn", "ryokan", "lodge", "guesthouse", "resort"]
+                        guard item.pointOfInterestCategory == .hotel || ["ホテル", "旅館", "民宿", "ペンション", "ゲストハウス", "宿坊", "山荘", "ロッジ", "ホテル", "hotel", " inn", "ryokan", "lodge", "guesthouse", "resort"]
                             .contains(where: { lodgingName.contains($0) }) else { continue }
                         let normalizedName = name.folding(options: [.caseInsensitive, .widthInsensitive], locale: .current)
                         let id = "\(normalizedName)|\(Int(point.latitude * 10000))|\(Int(point.longitude * 10000))"
-                        guard !seen.contains(normalizedName) else { continue }
+                        guard !suggestions.contains(where: { existing in
+                            let sameName = normalizedPlaceName(existing.name) == normalizedPlaceName(name)
+                            let nearby = CLLocation(latitude: existing.latitude, longitude: existing.longitude)
+                                .distance(from: CLLocation(latitude: point.latitude, longitude: point.longitude)) < 150
+                            return sameName && nearby
+                        }) else { continue }
                         guard seen.insert(id).inserted else { continue }
                         suggestions.append(HotelSuggestion(id: id, name: name, address: item.placemark.title ?? name,
                                                            latitude: point.latitude, longitude: point.longitude,
@@ -1211,10 +1298,21 @@ private struct PlannerView: View {
                                                            distance: distance, anchorLatitude: coordinate.latitude,
                                                            anchorLongitude: coordinate.longitude))
                     }
-                    if suggestions.count >= 3 { break }
+                    if suggestions.count >= 8 { break }
                 }
                 if !suggestions.isEmpty {
-                    hotelResults = Array(suggestions.sorted { $0.distance < $1.distance }.prefix(5))
+                    hotelResults = Array(suggestions.sorted { $0.distance < $1.distance }.prefix(8))
+                    // Keep every candidate visible even if its walking route is unavailable.
+                    let candidates = hotelResults
+                    for hotel in candidates {
+                        guard hotelSearchID == token, !Task.isCancelled else { return }
+                        let origin = MKMapItem(placemark: MKPlacemark(coordinate:
+                            CLLocationCoordinate2D(latitude: hotel.latitude, longitude: hotel.longitude)))
+                        let value = await RouteMeasurements.fetch(from: origin, to: first, by: .walking)
+                        guard hotelSearchID == token, !Task.isCancelled else { return }
+                        if let value { hotelWalkingTimes[hotel.id] = value }
+                        try? await Task.sleep(nanoseconds: 400_000_000)
+                    }
                 }
                 hotelSearching = false
                 hotelSearchError = hotelResults.isEmpty
@@ -1254,7 +1352,11 @@ private struct PlannerView: View {
     }
     private func travelTimeText(_ time: TravelTime) -> String {
         let duration = travelDurationText(time.minutes)
-        return time.isApproximate ? "\(hotelTravelText("approximate")) · \(duration)" : duration
+        let label = hotelTravelText(time.isApproximate ? "approximate" : "routeEstimate")
+        let metres = time.routeMetres ?? time.straightMetres
+        let distance = metres.map { String(format: "%.1f km", locale: language.locale, $0 / 1000) }
+        let basis = time.routeMetres == nil ? hotelTravelText("straightDistance") : hotelTravelText("routeDistance")
+        return "\(label) · \(duration)" + (distance.map { " · \(basis) \($0)" } ?? "")
     }
     private func travelFailureText(mode: String, missingPlace: Bool) -> String {
         hotelTravelText(missingPlace ? "placeUnavailable" : mode == "transit" ? "transitUnavailable" : "unavailable")
@@ -1328,46 +1430,16 @@ private struct PlannerView: View {
         }
     }
     private func planningTimes(from origin: MKMapItem, to destination: MKMapItem) -> [String: TravelTime] {
-        let start = origin.placemark.coordinate, end = destination.placemark.coordinate
-        guard CLLocationCoordinate2DIsValid(start), CLLocationCoordinate2DIsValid(end) else { return [:] }
-        let metres = CLLocation(latitude: start.latitude, longitude: start.longitude)
-            .distance(from: CLLocation(latitude: end.latitude, longitude: end.longitude)) * 1.4
-        guard metres.isFinite else { return [:] }
-        return ["walking": TravelTime(minutes: max(1, Int(ceil(metres / (4000.0 / 60)))), isApproximate: true),
-                "taxi": TravelTime(minutes: max(1, Int(ceil(metres / (25000.0 / 60)))), isApproximate: true)]
+        var result: [String: TravelTime] = [:]
+        result["walking"] = TravelTime.rough(from: origin.placemark.coordinate, to: destination.placemark.coordinate, by: .walking)
+        result["taxi"] = TravelTime.rough(from: origin.placemark.coordinate, to: destination.placemark.coordinate, by: .automobile)
+        return result
     }
     private func travelMinutes(from origin: MKMapItem, to destination: MKMapItem,
                                by transport: MKDirectionsTransportType) async -> TravelTime? {
-        let start = origin.placemark.coordinate
-        let end = destination.placemark.coordinate
-        guard CLLocationCoordinate2DIsValid(start), CLLocationCoordinate2DIsValid(end) else { return nil }
-        let straight = CLLocation(latitude: start.latitude, longitude: start.longitude)
-            .distance(from: CLLocation(latitude: end.latitude, longitude: end.longitude))
-        // Retry transient failures. Do not discard valid long routes or detours
-        // across rivers, mountains and bridges by a blanket distance/time filter.
-        for attempt in 0..<2 {
-            guard !Task.isCancelled else { return nil }
-            let request = MKDirections.Request()
-            request.source = origin
-            request.destination = destination
-            request.transportType = transport
-            request.departureDate = Date()
-            request.requestsAlternateRoutes = true
-            if let response = try? await MKDirections(request: request).calculate(),
-               let seconds = response.routes.map({ $0.expectedTravelTime }).filter({ $0.isFinite && $0 > 0 }).min(),
-               seconds / 60 < Double(Int.max) {
-                return TravelTime(minutes: max(1, Int(ceil(seconds / 60))),
-                                  isApproximate: false)
-            }
-            if attempt == 0 { try? await Task.sleep(nanoseconds: 700_000_000) }
-        }
-        guard !Task.isCancelled, transport == .walking || transport == .automobile else { return nil }
-        // A rough planning estimate only. This does not certify a walkable road,
-        // bridge/ferry connection or taxi availability, and excludes waiting.
-        let roadMetres = straight * 1.4
-        let metresPerMinute = transport == .walking ? 4000.0 / 60 : 25000.0 / 60
-        let minutes = max(1, Int(ceil(roadMetres / metresPerMinute)))
-        return TravelTime(minutes: minutes, isApproximate: true)
+        if let measured = await RouteMeasurements.fetch(from: origin, to: destination, by: transport) { return measured }
+        guard !Task.isCancelled else { return nil }
+        return TravelTime.rough(from: origin.placemark.coordinate, to: destination.placemark.coordinate, by: transport)
     }
     private var journeyOverview: some View {
         journeyPanel {
@@ -2522,7 +2594,14 @@ private enum HotelTravelTranslations {
         "notChosen": ["ホテルはまだ選ばれていません。近くのホテルを探すか、自分のホテルを入力してください。", "아직 호텔을 선택하지 않았습니다. 주변 호텔을 찾거나 예약한 호텔을 입력하세요.", "尚未选择酒店。请搜索附近酒店或输入已预订的酒店。", "No hotel selected yet. Find one nearby or enter your booked hotel.", "ยังไม่ได้เลือกโรงแรม ค้นหาโรงแรมใกล้เคียงหรือระบุโรงแรมที่จองไว้"],
         "selectedHotel": ["選択中のホテル", "선택한 호텔", "已选酒店", "Selected hotel", "โรงแรมที่เลือก"],
         "afterChoosing": ["ホテルを選ぶと、その下に最初の観光地までの所要時間が表示されます。次は旅の順番へ進んでください。", "호텔을 고르면 바로 아래에 첫 관광지까지의 이동 시간이 표시됩니다. 다음에는 여행 순서를 확인하세요.", "选择酒店后，下方会显示到第一处景点的所需时间。接着查看行程顺序。", "Choose a hotel to see travel times to the first stop directly below it. Then follow the trip order.", "เลือกโรงแรมแล้วดูเวลาเดินทางไปยังจุดเที่ยวแรกด้านล่าง จากนั้นทำตามลำดับทริป"],
-        "nearestFive": ["最初の観光地から近い順・最大5件（少ない地域では検索範囲を拡大）", "첫 관광지에서 가까운 순 · 최대 5곳(결과가 적으면 범위 확대)", "距第一站由近到远，最多5家（数量较少时扩大范围）", "Nearest to the first stop · up to 5 (wider search where needed)", "ใกล้จุดเที่ยวแรกที่สุด สูงสุด 5 แห่ง (ขยายพื้นที่หากพบน้อย)"],
+        "sortHotels": ["ホテルの並べ方", "숙소 정렬", "住宿排序", "Sort stays", "เรียงที่พัก"],
+        "walkSort": ["徒歩経路が近い順", "도보 경로 거리순", "步行路线距离", "Walking route distance", "ระยะทางเดิน"],
+        "straightDistance": ["直線距離", "직선거리", "直线距离", "Straight-line distance", "ระยะทางเส้นตรง"],
+        "routeDistance": ["経路距離", "경로 거리", "路线距离", "Route distance", "ระยะทางตามเส้นทาง"],
+        "routeEstimate": ["経路の予測", "경로 예상", "路线预计", "Route estimate", "เวลาคาดการณ์ตามเส้นทาง"],
+        "checkingRoute": ["徒歩経路を確認中…", "도보 경로 확인 중…", "正在确认步行路线…", "Checking walking route…", "กำลังตรวจทางเดิน…"],
+        "walkUnconfirmed": ["徒歩経路は未確認・地図で確認", "도보 경로 미확인 · 지도에서 확인", "步行路线未确认，请查看地图", "Walking route unconfirmed · check map", "ยังไม่ยืนยันทางเดิน โปรดตรวจแผนที่"],
+        "nearestFive": ["最初の観光地周辺の候補・最大8件。徒歩順は経路を確認できた宿を優先し、未確認の宿は後に表示。全宿泊施設の網羅・空室は保証しません。", "첫 관광지 주변 후보 최대 8곳. 도보순은 경로 확인 숙소 우선, 미확인은 뒤에 표시. 모든 숙소·빈방을 보장하지 않습니다.", "第一站周边最多8家候选。步行排序优先已确认路线，未确认的列在后面。不保证涵盖所有住宿或有空房。", "Up to 8 nearby candidates. Walking order lists confirmed routes first, unconfirmed stays after them. Coverage and vacancies are not guaranteed.", "ที่พักใกล้จุดแรกสูงสุด 8 แห่ง เรียงเดินโดยแสดงเส้นทางที่ตรวจได้ก่อน ที่ยังตรวจไม่ได้อยู่ท้าย ไม่รับรองว่าครบทุกแห่งหรือมีห้องว่าง"],
         "calculating": ["経路の所要時間を確認中…", "경로 소요 시간 확인 중…", "正在查询路线时间…", "Checking travel times…", "กำลังตรวจสอบเวลาเดินทาง…"],
         "transit": ["電車・バス", "전철·버스", "电车・公交", "Train / bus", "รถไฟ / รถบัส"],
         "walking": ["徒歩", "도보", "步行", "Walking", "เดิน"],
@@ -2535,7 +2614,7 @@ private enum HotelTravelTranslations {
         "placeUnavailable": ["場所を確認できません・地図で確認", "위치 확인 필요 · 지도 확인", "地点未确认，请查看地图", "Location unresolved · check map", "ยังระบุตำแหน่งไม่ได้ ดูแผนที่"],
         "transitUnavailable": ["運行・時刻未確認・乗換を確認", "운행·시간 미확인 · 환승 확인", "班次时间未确认，请查询换乘", "Timetable unconfirmed · check transit", "ยังยืนยันตารางรถไม่ได้ ดูการต่อรถ"],
         "unavailable": ["経路を取得できません", "경로를 가져올 수 없음", "无法获取路线", "Route unavailable", "ไม่พบเส้นทาง"],
-        "estimateNote": ["「概算」は距離に基づく参考時間です。通行できる道・橋・フェリー・坂道・渋滞・タクシー待ちは反映しません。実際の道順と運行は地図で確認してください。", "‘대략’은 거리 기준 참고 시간입니다. 통행 가능 여부·다리·페리·경사·정체·택시 대기는 반영하지 않습니다. 실제 경로와 운행은 지도에서 확인하세요.", "‘粗略估算’为距离推算的参考时间，不反映道路通行、桥梁、渡轮、坡道、拥堵及出租车等待。请在地图确认实际路线与班次。", "Rough estimates are distance-based guidance. They do not confirm passable roads, bridges, ferries, slopes, traffic or taxi waits. Check actual directions and services on the map.", "ค่าคร่าว ๆ คำนวณจากระยะทาง ไม่ยืนยันถนน สะพาน เรือ ทางลาด รถติด หรือเวลารอแท็กซี่ โปรดตรวจเส้นทางจริงและตารางรถในแผนที่"]
+        "estimateNote": ["「経路の予測」は地図サービスの経路距離と予測時間です。出発時刻・坂道・通行規制などで変わります。「概算」は直線距離からの粗い目安で、道路のつながりを確認していません。電車・バスは取得できた運行情報のみ表示します。宿坊などは利用条件も確認してください。", "경로 예상은 지도 서비스의 거리·시간입니다. 출발 시각·경사·통제로 달라집니다. 대략은 직선거리 기반으로 도로 연결을 확인하지 않았습니다. 대중교통은 확인된 정보만 표시합니다. 사찰 숙박 등의 이용 조건도 확인하세요.", "路线预计采用地图服务的路线距离及时间，会受出发时间、坡道及通行限制影响。粗略估算基于直线距离，未确认道路连通。公交仅显示取得的运行信息。寺院等住宿请确认使用条件。", "Route estimates use map-service distances and times; departure time, slopes and closures can affect them. Rough estimates use straight-line distance and do not confirm road access. Transit is shown only when returned by the service. Check conditions for temple and other restricted lodging.", "เวลาคาดการณ์ใช้ระยะและเวลาจากแผนที่ อาจเปลี่ยนตามเวลาออก ทางลาด และการปิดทาง ค่าคร่าว ๆ ใช้ระยะเส้นตรง ไม่ยืนยันถนนเชื่อมต่อ ขนส่งสาธารณะแสดงเฉพาะข้อมูลที่ได้รับ โปรดตรวจเงื่อนไขที่พักวัดและที่พักอื่น"]
     ]
 }
 
@@ -3772,8 +3851,9 @@ private struct OriginalCourseView: View {
               let c = stops[index].latitude, let d = stops[index].longitude else { return nil }
         if let exact = times[legKey(index)]?[mode] { return exact }
         guard mode != "transit" else { return nil }
-        let distance = CLLocation(latitude: a, longitude: b).distance(from: CLLocation(latitude: c, longitude: d))
-        return TravelTime(minutes: max(3, Int(ceil(distance * 1.35 / (mode == "taxi" ? 400 : 75)))), isApproximate: true)
+        return TravelTime.rough(from: CLLocationCoordinate2D(latitude: a, longitude: b),
+                                to: CLLocationCoordinate2D(latitude: c, longitude: d),
+                                by: mode == "taxi" ? .automobile : .walking)
     }
     private func arrival(_ index: Int) -> Int {
         guard index > 0 else { return stops[0].target }
@@ -4026,7 +4106,12 @@ private struct OriginalCourseView: View {
                             Image(systemName: mode == "walking" ? "figure.walk" : mode == "taxi" ? "car.fill" : "tram.fill")
                             Text(t(mode == "walking" ? "walk" : mode))
                             Spacer()
-                            Text("\(duration.isApproximate ? t("approx") + " " : "")\(duration.minutes)\(t("minutes"))")
+                            VStack(alignment: .trailing, spacing: 4) {
+                            Text("\(HotelTravelTranslations.ui[duration.isApproximate ? "approximate" : "routeEstimate"]?[language.index] ?? "") · \(duration.minutes)\(t("minutes"))")
+                            if let metres = duration.routeMetres ?? duration.straightMetres {
+                                Text("\(HotelTravelTranslations.ui[duration.routeMetres == nil ? "straightDistance" : "routeDistance"]?[language.index] ?? "") " + String(format: "%.1f km", locale: language.locale, metres / 1000)).font(.caption)
+                            }
+                            }.fixedSize(horizontal: false, vertical: true)
                             Image(systemName: "arrow.up.right")
                         }.font(.subheadline)
                     }
@@ -4083,8 +4168,10 @@ private struct OriginalCourseView: View {
                 request.source = MKMapItem(placemark: MKPlacemark(coordinate: CLLocationCoordinate2D(latitude: a, longitude: b)))
                 request.destination = MKMapItem(placemark: MKPlacemark(coordinate: CLLocationCoordinate2D(latitude: c, longitude: d)))
                 request.transportType = mode == "walking" ? .walking : mode == "taxi" ? .automobile : .transit
-                if let route = (try? await MKDirections(request: request).calculate())?.routes.first, !Task.isCancelled {
-                    times[key, default: [:]][mode] = TravelTime(minutes: max(1, Int(ceil(route.expectedTravelTime / 60))), isApproximate: false)
+                if let origin = request.source, let destination = request.destination,
+                   let value = await RouteMeasurements.fetch(from: origin, to: destination, by: request.transportType),
+                   !Task.isCancelled {
+                    times[key, default: [:]][mode] = value
                 }
             }
         }
