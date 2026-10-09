@@ -22,7 +22,10 @@ private struct TravelTime {
             .distance(from: CLLocation(latitude: to.latitude, longitude: to.longitude))
         guard straight.isFinite else { return nil }
         // Coarse planning guidance, never a measured route or a claim of access.
-        let minutes = max(5, Int(ceil(straight * 1.4 / (mode == .walking ? 4000.0 / 60 : 25000.0 / 60) / 5)) * 5)
+        let metresPerMinute: Double = mode == .walking ? (4000.0 / 60.0) : (25000.0 / 60.0)
+        let roughMinutes = straight * 1.4 / metresPerMinute
+        let roundedMinutes = Int(ceil(roughMinutes / 5.0)) * 5
+        let minutes = max(5, roundedMinutes)
         return TravelTime(minutes: minutes, isApproximate: true, straightMetres: straight)
     }
 }
