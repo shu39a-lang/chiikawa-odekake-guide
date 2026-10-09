@@ -747,6 +747,7 @@ private struct PlannerView: View {
                 .frame(width: 38, height: 38)
                 .background(accent.opacity(0.16), in: Circle())
             Text(title).font(.subheadline.bold()).fixedSize(horizontal: false, vertical: true)
+                .multilineTextAlignment(.leading)
             Spacer(minLength: 0)
             Image(systemName: "chevron.right").font(.caption.bold()).accessibilityHidden(true)
         }
@@ -1355,14 +1356,39 @@ private struct PlannerView: View {
     }
     private func travelTimeText(_ time: TravelTime) -> String {
         let duration = travelDurationText(time.minutes)
-        let label = hotelTravelText(time.isApproximate ? "approximate" : "routeEstimate")
-        let metres = time.routeMetres ?? time.straightMetres
-        let distance = metres.map { String(format: "%.1f km", locale: language.locale, $0 / 1000) }
-        let basis = time.routeMetres == nil ? hotelTravelText("straightDistance") : hotelTravelText("routeDistance")
-        return "\(label) · \(duration)" + (distance.map { " · \(basis) \($0)" } ?? "")
+        return time.isApproximate ? "\(hotelTravelText("approximate")) · \(duration)" : duration
     }
     private func travelFailureText(mode: String, missingPlace: Bool) -> String {
         hotelTravelText(missingPlace ? "placeUnavailable" : mode == "transit" ? "transitUnavailable" : "unavailable")
+    }
+    private var travelEstimateDetails: some View {
+        DisclosureGroup(hotelTravelText("timeDetails")) {
+            Text(hotelTravelText("estimateNote"))
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .font(.caption)
+        .tint(PlannerTheme.cyan)
+    }
+    private func hotelTravelRow(_ mode: String) -> some View {
+        let value = hotelTravelMinutes[mode]
+        let detail = value.map(travelTimeText) ?? (hotelTravelLoading ? "" : travelFailureText(mode: mode, missingPlace: hotelTravelMinutes.isEmpty))
+        return ViewThatFits(in: .horizontal) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                Text(hotelTravelText(mode)).fixedSize()
+                Spacer(minLength: 8)
+                Text(detail).fontWeight(value == nil ? .regular : .bold)
+                    .foregroundStyle(value == nil ? Color.secondary : Color.primary)
+                    .monospacedDigit().fixedSize()
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                Text(hotelTravelText(mode))
+                Text(detail).fontWeight(value == nil ? .regular : .bold)
+                    .foregroundStyle(value == nil ? Color.secondary : Color.primary)
+                    .monospacedDigit().fixedSize(horizontal: false, vertical: true)
+            }.frame(maxWidth: .infinity, alignment: .leading)
+        }.font(.subheadline)
     }
     private var hotelTravelSummary: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -1370,19 +1396,9 @@ private struct PlannerView: View {
                 .font(.subheadline.bold()).foregroundStyle(journeyGold)
             if hotelTravelLoading { ProgressView(hotelTravelText("calculating")) }
             ForEach(["transit", "walking", "taxi"], id: \.self) { mode in
-                HStack {
-                    Text(hotelTravelText(mode))
-                    Spacer(minLength: 8)
-                    if let minutes = hotelTravelMinutes[mode] {
-                        Text(travelTimeText(minutes))
-                            .fontWeight(.bold).monospacedDigit()
-                    } else if !hotelTravelLoading {
-                        Text(travelFailureText(mode: mode, missingPlace: hotelTravelMinutes.isEmpty)).foregroundStyle(.secondary)
-                    }
-                }.font(.subheadline)
+                hotelTravelRow(mode)
             }
-            Text(hotelTravelText("estimateNote"))
-                .font(.caption).foregroundStyle(.secondary)
+            travelEstimateDetails
             if !hotelTravelLoading, hotelTravelMinutes.count < 3 || hotelTravelMinutes.values.contains(where: { $0.isApproximate }) {
                 Button(hotelTravelText("retry")) {
                     Task { await updateHotelTravelTimes() }
@@ -1770,7 +1786,7 @@ private struct PlannerView: View {
             if !internalWalk, let url = mapURL(origin: origin, destination: destination, mode: "driving") {
                 timedRouteLink(extra("driveRoute"), url: url, systemImage: "car.fill", key: key, mode: "taxi", canEstimate: origin?.isEmpty == false)
             }
-            Text(hotelTravelText("estimateNote")).font(.caption).foregroundStyle(.secondary)
+            travelEstimateDetails
             if let omotesando = route.stops.flatMap({ $0.choices }).first(where: { $0.name == "Omotesando Tokyo" }),
                origin == venueQuery(omotesando) || destination == venueQuery(omotesando) {
                 Text(["表参道は青山通り側の地点を基準に計算しています。",
@@ -2615,9 +2631,10 @@ private enum HotelTravelTranslations {
         "approximate": ["概算", "대략", "粗略估算", "Rough estimate", "คำนวณคร่าว ๆ"],
         "retry": ["所要時間を再検索", "소요 시간 다시 검색", "重新查询时间", "Retry travel times", "ค้นหาเวลาอีกครั้ง"],
         "placeUnavailable": ["場所を確認できません・地図で確認", "위치 확인 필요 · 지도 확인", "地点未确认，请查看地图", "Location unresolved · check map", "ยังระบุตำแหน่งไม่ได้ ดูแผนที่"],
-        "transitUnavailable": ["運行・時刻未確認・乗換を確認", "운행·시간 미확인 · 환승 확인", "班次时间未确认，请查询换乘", "Timetable unconfirmed · check transit", "ยังยืนยันตารางรถไม่ได้ ดูการต่อรถ"],
+        "transitUnavailable": ["時刻未確認", "시간 미확인", "时刻未确认", "Time unconfirmed", "ยังไม่ยืนยันเวลา"],
+        "timeDetails": ["時間表示について", "소요 시간 안내", "关于时间显示", "About travel times", "เกี่ยวกับเวลาเดินทาง"],
         "unavailable": ["経路を取得できません", "경로를 가져올 수 없음", "无法获取路线", "Route unavailable", "ไม่พบเส้นทาง"],
-        "estimateNote": ["「経路の予測」は地図サービスの経路距離と予測時間です。出発時刻・坂道・通行規制などで変わります。「概算」は直線距離からの粗い目安で、道路のつながりを確認していません。電車・バスは取得できた運行情報のみ表示します。宿坊などは利用条件も確認してください。", "경로 예상은 지도 서비스의 거리·시간입니다. 출발 시각·경사·통제로 달라집니다. 대략은 직선거리 기반으로 도로 연결을 확인하지 않았습니다. 대중교통은 확인된 정보만 표시합니다. 사찰 숙박 등의 이용 조건도 확인하세요.", "路线预计采用地图服务的路线距离及时间，会受出发时间、坡道及通行限制影响。粗略估算基于直线距离，未确认道路连通。公交仅显示取得的运行信息。寺院等住宿请确认使用条件。", "Route estimates use map-service distances and times; departure time, slopes and closures can affect them. Rough estimates use straight-line distance and do not confirm road access. Transit is shown only when returned by the service. Check conditions for temple and other restricted lodging.", "เวลาคาดการณ์ใช้ระยะและเวลาจากแผนที่ อาจเปลี่ยนตามเวลาออก ทางลาด และการปิดทาง ค่าคร่าว ๆ ใช้ระยะเส้นตรง ไม่ยืนยันถนนเชื่อมต่อ ขนส่งสาธารณะแสดงเฉพาะข้อมูลที่ได้รับ โปรดตรวจเงื่อนไขที่พักวัดและที่พักอื่น"]
+        "estimateNote": ["「概算」は距離に基づく参考時間です。通行できる道・橋・フェリー・坂道・渋滞・タクシー待ちは反映しません。実際の道順と運行は地図で確認してください。", "‘대략’은 거리 기준 참고 시간입니다. 통행 가능 여부·다리·페리·경사·정체·택시 대기는 반영하지 않습니다. 실제 경로와 운행은 지도에서 확인하세요.", "‘粗略估算’为距离推算的参考时间，不反映道路通行、桥梁、渡轮、坡道、拥堵及出租车等待。请在地图确认实际路线与班次。", "Rough estimates are distance-based guidance. They do not confirm passable roads, bridges, ferries, slopes, traffic or taxi waits. Check actual directions and services on the map.", "ค่าคร่าว ๆ คำนวณจากระยะทาง ไม่ยืนยันถนน สะพาน เรือ ทางลาด รถติด หรือเวลารอแท็กซี่ โปรดตรวจเส้นทางจริงและตารางรถในแผนที่"]
     ]
 }
 
