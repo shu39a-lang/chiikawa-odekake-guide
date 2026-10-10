@@ -524,6 +524,8 @@ private struct PlannerView: View {
                 .sheet(isPresented: Binding(get: { swapIndex != nil }, set: { if !$0 { swapIndex = nil } })) {
                     if let index = swapIndex { swapSheet(index) }
                 }
+                .task(id: coordinatePreparationKey) { await prepareCourseCoordinates() }
+                .task(id: hotelPreparationKey) { await prepareHotelCoordinates() }
                 .onChange(of: routeID) { _ in resetHotelSelection(); resetJourney() }
                 .onChange(of: selectedVenue(0).name) { _ in resetHotelSelection(); resetJourney() }
                 .onAppear {
@@ -596,6 +598,8 @@ private struct PlannerView: View {
         if let data = try? JSONEncoder().encode(values), let string = String(data: data, encoding: .utf8) {
             savedSuggestedHotels = string
             saveHotelValue("suggested")
+            displayedHotelTimeKey = hotelTravelKey
+            hotelTravelMinutes = immediateTimes(origin: hotelQuery, destination: venueQuery(selectedVenue(0)))
         }
     }
     private var hotelChoice: String {
@@ -832,24 +836,13 @@ private struct PlannerView: View {
             }
             if hotelSearchError { Text(journeyText("hotelsUnavailable")).font(.footnote) }
             if !hotelResults.isEmpty {
-                Text(hotelTravelText(hotelResults.contains(where: { $0.distance < 0 }) ? "registeredStay" : "nearestFive"))
+                Text(hotelTravelText(hotelResults.contains(where: { $0.id.hasPrefix("registered|") }) ? "registeredStay" : "nearestFive"))
                     .font(.caption).foregroundStyle(.secondary)
-            }
-            if hotelResults.contains(where: { $0.distance >= 0 }) {
-                Picker(hotelTravelText("sortHotels"), selection: $hotelSortByWalking) {
-                    Text(hotelTravelText("walkSort")).tag(true)
-                    Text(hotelTravelText("straightDistance")).tag(false)
-                }.pickerStyle(.segmented)
             }
             ForEach(sortedHotelResults) { hotel in
                 VStack(alignment: .leading, spacing: 10) {
                     Text(hotel.name).font(.headline)
                     Text(hotel.address).font(.subheadline).foregroundStyle(.secondary)
-                    if hotel.distance >= 0 {
-                        Text(String(format: journeyText("distance"), locale: language.locale, arguments: [Int(hotel.distance.rounded())])).font(.caption).foregroundStyle(.secondary)
-                    } else {
-                        Text(hotelTravelText("registeredStay")).font(.caption).foregroundStyle(.secondary)
-                    }
                     if hotel.distance >= 0 {
                         if let value = hotelWalkingTimes[hotel.id] {
                             Text("\(hotelTravelText("walking")) · \(travelTimeText(value))")
@@ -869,7 +862,7 @@ private struct PlannerView: View {
                     if isSelected {
                         hotelTravelSummary
                             .id("selectedHotelTravel")
-                            .task(id: hotelTravelKey) { await updateHotelTravelTimes() }
+                            .task(id: hotelTravelRefreshKey) { await updateHotelTravelTimes() }
                     }
                 }
                 .padding(12)
@@ -878,7 +871,7 @@ private struct PlannerView: View {
             if hotelChoice == "suggested", let hotel = selectedSuggestedHotel, !selectedSearchedHotelVisible {
                 Text(hotelTravelText("selectedHotel")).font(.caption).foregroundStyle(journeyGold)
                 visibleChoice(hotel.name, selected: true) { saveHotelValue("suggested") }
-                hotelTravelSummary.task(id: hotelTravelKey) { await updateHotelTravelTimes() }
+                hotelTravelSummary.task(id: hotelTravelRefreshKey) { await updateHotelTravelTimes() }
                 Text(hotel.address).font(.subheadline).foregroundStyle(.secondary)
                 if let url = hotel.website.flatMap(URL.init(string:)) { translatedGuideLink(extra("rate"), url: url) }
                 if let url = locationURL(hotel.query) { journeyLink(extra("hotelMap"), url: url, systemImage: "mappin.and.ellipse") }
@@ -893,7 +886,7 @@ private struct PlannerView: View {
                     .textFieldStyle(.roundedBorder)
                 Text(journeyText("hotelInputNote")).font(.footnote).foregroundStyle(.secondary)
                 if !hotelQuery.isEmpty {
-                    hotelTravelSummary.task(id: hotelTravelKey) { await updateHotelTravelTimes() }
+                    hotelTravelSummary.task(id: hotelTravelRefreshKey) { await updateHotelTravelTimes() }
                 }
             }
             Text(hotelTravelText("afterChoosing"))
@@ -918,6 +911,18 @@ private struct PlannerView: View {
     }
     private func pinnedVenueCoordinate(_ venue: Venue) -> CLLocationCoordinate2D? {
         switch venue.name {
+        case "Shirahige Falls":
+            // Observation point: https://tokachidake-geopark.jp/geoname/246/
+            return CLLocationCoordinate2D(latitude: 43.474722, longitude: 142.638889)
+        case "Shirogane Blue Pond":
+            // Pedestrian entrance / parking access, not a point in the water.
+            // https://kankojapan.jp/hokkaido/dohoku/shiroganeaoiike.html (WGS84)
+            return CLLocationCoordinate2D(latitude: 43.493064, longitude: 142.612482)
+        case "Biei Shirogane Birke roadside station":
+            return CLLocationCoordinate2D(latitude: 43.503077, longitude: 142.596635)
+        case "Lunch in Biei Shirogane Onsen":
+            // Meal AREA at Shirogane Onsen; a restaurant is not implied.
+            return CLLocationCoordinate2D(latitude: 43.473770, longitude: 142.638694)
         case "Shimoyoshida Station":
             // Station location; Fujiyama NAVI confirms 新町2-8-12.
             // https://ja.wikipedia.org/wiki/下吉田駅 (WGS84)
@@ -1044,7 +1049,7 @@ private struct PlannerView: View {
         }
         var seen = Set<String>()
         names = names.filter { seen.insert(normalizedPlaceName($0)).inserted }
-        let requests = names.map { "\($0), \(prefecture.ja), Japan" }
+        let requests = names.map { "\(prefecture.ja) \($0)" }
         let needles = names.map(normalizedPlaceName)
         func matchesName(_ value: String) -> Bool {
             let label = normalizedPlaceName(value)
@@ -1085,7 +1090,8 @@ private struct PlannerView: View {
                let mark = marks.first(where: { mark in
                    guard let point = mark.location?.coordinate, CLLocationCoordinate2DIsValid(point) else { return false }
                    let item = MKMapItem(placemark: MKPlacemark(placemark: mark))
-                   return hotelPlace(item, isIn: prefecture) && matchesName(mark.name ?? "")
+                   return hotelPlace(item, isIn: prefecture) &&
+                       (matchesName(mark.name ?? "") || (mark.areasOfInterest ?? []).contains(where: matchesName))
                }) {
                 let item = MKMapItem(placemark: MKPlacemark(placemark: mark))
                 rememberRoutePlace(item, key: cacheKey)
@@ -1119,6 +1125,10 @@ private struct PlannerView: View {
     private func verifiedFallbackHotel(near coordinate: CLLocationCoordinate2D) -> HotelSuggestion? {
         let stay: (String, String, Double, Double, String?, String)?
         switch selectedVenue(0).name {
+        case "Shirogane Blue Pond":
+            // Hotel identity: official biei-hotelparkhills.com; location: Rakuten listing.
+            stay = ("美瑛白金温泉 ホテルパークヒルズ", "北海道上川郡美瑛町白金温泉",
+                    43.4750, 142.6374, nil, "https://www.biei-hotelparkhills.com/")
         case "Shimoyoshida Station":
             // https://toku-p.earth-car.com/parking-search/35.492674672839-138.80382363631-16/
             // Address cross-checked against accommodation listings, 2026-10-10.
@@ -1181,12 +1191,137 @@ private struct PlannerView: View {
         case normalizedPlaceName("東横INN甲府駅南口1"):
             // https://japanheritage.jp/ja/yamanashi/hotels/2661
             return CLLocationCoordinate2D(latitude: 35.6631, longitude: 138.5715)
+        case normalizedPlaceName("東横INN札幌駅南口"):
+            // Mapion hotel map: /m2/15.00/43.06549236/141.35457897/0/0
+            return CLLocationCoordinate2D(latitude: 43.06549236, longitude: 141.35457897)
+        case normalizedPlaceName("美瑛白金温泉 ホテルパークヒルズ"):
+            return CLLocationCoordinate2D(latitude: 43.4750, longitude: 142.6374)
         case normalizedPlaceName("SARUYA HOSTEL"):
             return CLLocationCoordinate2D(latitude: 35.492674672839, longitude: 138.80382363631)
         default: return nil
         }
     }
+    private func immediateMapItem(_ query: String) -> MKMapItem? {
+        func item(_ latitude: Double, _ longitude: Double) -> MKMapItem? {
+            let point = CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
+            guard CLLocationCoordinate2DIsValid(point), latitude != 0, longitude != 0 else { return nil }
+            return MKMapItem(placemark: MKPlacemark(coordinate: point))
+        }
+        if let point = publishedHotelPoint(query) { return item(point.latitude, point.longitude) }
+        let parts = query.split(separator: ",")
+        if parts.count == 2, let lat = Double(parts[0]), let lon = Double(parts[1]) { return item(lat, lon) }
+        if let venue = route.stops.flatMap({ $0.choices }).first(where: { venueQuery($0) == query }) {
+            if let point = pinnedVenueCoordinate(venue) { return item(point.latitude, point.longitude) }
+            if let cached = cachedRoutePlace("\(routePrefecture)|\(venue.name)") { return cached }
+        }
+        if let cached = cachedRoutePlace(query) { return cached }
+        if let hotel = selectedSuggestedHotel, query == hotel.query,
+           let ready = item(hotel.latitude, hotel.longitude) { return ready }
+        if let place = lunchSelection, query == place.query { return item(place.latitude, place.longitude) }
+        if let place = dinnerSelection, query == place.query { return item(place.latitude, place.longitude) }
+        return nil
+    }
+    private func immediateTimes(origin: String, destination: String) -> [String: TravelTime] {
+        guard let start = immediateMapItem(origin), let end = immediateMapItem(destination) else { return [:] }
+        return planningTimes(from: start, to: end)
+    }
+    private var currentHotelTimes: [String: TravelTime] {
+        var values = immediateTimes(origin: hotelQuery, destination: venueQuery(selectedVenue(0)))
+        if displayedHotelTimeKey == hotelTravelKey {
+            for (mode, time) in hotelTravelMinutes { values[mode] = time }
+        }
+        return values
+    }
+    private func displayedLegTimes(origin: String?, destination: String, key: String) -> [String: TravelTime] {
+        var values = origin.map { immediateTimes(origin: $0, destination: destination) } ?? [:]
+        for (mode, value) in routeLegTimes[key] ?? [:] { values[mode] = value }
+        return values
+    }
+    private func readyCoordinateSignature(_ query: String) -> String {
+        guard let point = immediateMapItem(query)?.placemark.coordinate else { return "pending" }
+        return "\(point.latitude),\(point.longitude)"
+    }
+    private var hotelTravelRefreshKey: String {
+        hotelTravelKey + "|" + readyCoordinateSignature(hotelQuery) + "|" + readyCoordinateSignature(venueQuery(selectedVenue(0)))
+    }
+    private var hotelPreparationKey: String {
+        route.id + "|" + selectedVenue(0).name + "|" + hotelResults.map(\.id).joined(separator: ";")
+    }
+    @MainActor
+    private func prepareHotelCoordinates() async {
+        let key = hotelPreparationKey
+        var candidates = hotelResults
+        for hotel in availableHotels {
+            let query = "\(hotel.names[0]), \(hotel.addressJP), Japan"
+            if !candidates.contains(where: { $0.query == query || $0.name == hotel.names[0] }) {
+                candidates.append(HotelSuggestion(id: "prepared|\(route.id)|\(hotel.id)", name: hotel.names[0],
+                    address: hotel.addressJP, latitude: 0, longitude: 0, phone: hotel.phone,
+                    website: hotel.officialURL, distance: -1, anchorLatitude: nil, anchorLongitude: nil,
+                    lookupQuery: query))
+            }
+        }
+        guard let prefecture = NationwideRoutes.prefectures.first(where: { $0.id == routePrefecture }),
+              let first = try? await firstVenueMapItem(in: prefecture) else { return }
+        let anchor = first.placemark.coordinate
+        for hotel in candidates {
+            guard !Task.isCancelled, key == hotelPreparationKey else { return }
+            let item: MKMapItem?
+            if let ready = immediateMapItem(hotel.query) { item = ready }
+            else { item = await resolveRegisteredHotel(hotel, in: prefecture) }
+            guard !Task.isCancelled, key == hotelPreparationKey, let item else { continue }
+            rememberRoutePlace(item, key: hotel.query)
+            let point = item.placemark.coordinate
+            let distance = CLLocation(latitude: anchor.latitude, longitude: anchor.longitude)
+                .distance(from: CLLocation(latitude: point.latitude, longitude: point.longitude))
+            let hydrated = HotelSuggestion(id: hotel.id, name: hotel.name, address: hotel.address,
+                latitude: point.latitude, longitude: point.longitude, phone: hotel.phone, website: hotel.website,
+                distance: distance, anchorLatitude: anchor.latitude, anchorLongitude: anchor.longitude)
+            if let i = hotelResults.firstIndex(where: { $0.id == hotel.id }) { hotelResults[i] = hydrated }
+            hotelWalkingTimes[hotel.id] = TravelTime.rough(from: point, to: anchor, by: .walking)
+        }
+    }
+    @MainActor
+    private func resolveRegisteredHotel(_ hotel: HotelSuggestion, in prefecture: PrefectureOption) async -> MKMapItem? {
+        let needle = normalizedPlaceName(hotel.name)
+        let queries = [hotel.query, "\(hotel.name.replacingOccurrences(of: "東横INN", with: "東横イン")) \(prefecture.ja)"]
+        for query in queries {
+            guard !Task.isCancelled else { return nil }
+            let request = MKLocalSearch.Request()
+            request.naturalLanguageQuery = query
+            request.resultTypes = [.address, .pointOfInterest]
+            if let response = try? await PlaceLookups.search(request),
+               let item = response.mapItems.first(where: { item in
+                   let name = normalizedPlaceName(item.name ?? "")
+                   let point = item.placemark.coordinate
+                   return CLLocationCoordinate2DIsValid(point) && point.latitude != 0 &&
+                       hotelPlace(item, isIn: prefecture) &&
+                       (name == needle || (needle.count >= 5 && name.contains(needle)))
+               }) { return item }
+        }
+        return nil
+    }
+    private var coordinatePreparationKey: String {
+        route.id + "|" + route.stops.map { $0.choices.map(\.name).joined(separator: ";") }.joined(separator: "|")
+    }
+    @MainActor
+    private func prepareCourseCoordinates() async {
+        guard let prefecture = NationwideRoutes.prefectures.first(where: { $0.id == routePrefecture }) else { return }
+        let preparationKey = coordinatePreparationKey
+        // Prepare selected stops first; then alternatives before they are selected.
+        var seen = Set<String>()
+        let selected = route.stops.indices.map { selectedVenue($0) }
+        let venues = (selected + route.stops.flatMap { $0.choices }).filter { seen.insert($0.name).inserted }
+        for venue in venues {
+            guard !Task.isCancelled, preparationKey == coordinatePreparationKey else { return }
+            if let item = try? await venueMapItem(venue, in: prefecture) {
+                guard !Task.isCancelled, preparationKey == coordinatePreparationKey else { return }
+                rememberRoutePlace(item, key: venueQuery(venue))
+            }
+            try? await Task.sleep(nanoseconds: 250_000_000)
+        }
+    }
     private func resolvedAnchorMapItem(_ query: String) async throws -> MKMapItem? {
+        if let ready = immediateMapItem(query) { return ready }
         if let point = publishedHotelPoint(query) {
             return MKMapItem(placemark: MKPlacemark(coordinate: point))
         }
@@ -1522,11 +1657,7 @@ private struct PlannerView: View {
     }
     private func travelTimeText(_ time: TravelTime) -> String {
         let duration = travelDurationText(time.minutes)
-        let label = time.isApproximate ? "\(hotelTravelText("approximate")) · \(duration)" : duration
-        guard let metres = time.routeMetres ?? time.straightMetres else { return label }
-        let kind = hotelTravelText(time.routeMetres == nil ? "straightDistance" : "routeDistance")
-        let distance = metres < 1000 ? "\(Int(metres.rounded())) m" : String(format: "%.1f km", metres / 1000)
-        return "\(label) · \(kind) \(distance)"
+        return time.isApproximate ? "\(hotelTravelText("approximate")) · \(duration)" : duration
     }
     private func travelFailureText(mode: String, missingPlace: Bool) -> String {
         hotelTravelText(missingPlace ? "placeUnavailable" : mode == "transit" ? "transitUnavailable" : "unavailable")
@@ -1542,11 +1673,12 @@ private struct PlannerView: View {
         .tint(PlannerTheme.cyan)
     }
     private func hotelTravelRow(_ mode: String) -> some View {
-        let value = hotelTravelMinutes[mode]
-        let alternative = mode == "transit" ? hotelTravelMinutes["walking"].map {
+        let times = currentHotelTimes
+        let value = times[mode]
+        let alternative = mode == "transit" ? times["walking"].map {
             "\(hotelTravelText("walkingAlternative")) · \(travelTimeText($0))"
         } : nil
-        let detail = value.map(travelTimeText) ?? alternative ?? (hotelTravelLoading ? hotelTravelText("calculating") : travelFailureText(mode: mode, missingPlace: hotelTravelMinutes.isEmpty))
+        let detail = value.map(travelTimeText) ?? alternative ?? (hotelTravelLoading ? hotelTravelText("calculating") : travelFailureText(mode: mode, missingPlace: times.isEmpty))
         return ViewThatFits(in: .horizontal) {
             HStack(alignment: .firstTextBaseline, spacing: 12) {
                 Text(hotelTravelText(mode)).fixedSize()
@@ -1586,13 +1718,15 @@ private struct PlannerView: View {
         let requestKey = hotelTravelKey
         let token = UUID()
         hotelTimeRequestID = token
-        if displayedHotelTimeKey != requestKey { hotelTravelMinutes = [:] }
+        if displayedHotelTimeKey != requestKey {
+            hotelTravelMinutes = immediateTimes(origin: hotelQuery, destination: venueQuery(selectedVenue(0)))
+        }
         displayedHotelTimeKey = requestKey
         hotelTravelLoading = true
         defer { if hotelTimeRequestID == token { hotelTravelLoading = false } }
         do {
             // Pause while a manually entered hotel name is still being typed.
-            try await Task.sleep(nanoseconds: 500_000_000)
+            if hotelChoice == "custom" { try await Task.sleep(nanoseconds: 500_000_000) }
             guard let origin = try await resolvedAnchorMapItem(hotelQuery) else {
                 if !Task.isCancelled && requestKey == hotelTravelKey && hotelTimeRequestID == token { hotelTravelLoading = false }
                 return
@@ -1857,7 +1991,6 @@ private struct PlannerView: View {
                 VStack(alignment: .leading, spacing: 10) {
                     Text(place.name).font(.headline)
                     Text(place.address).font(.subheadline).foregroundStyle(.secondary)
-                    Text(String(format: journeyText("distance"), locale: language.locale, arguments: [Int(place.distance.rounded())])).font(.caption).foregroundStyle(.secondary)
                     if let url = locationURL(place.query) { journeyLink(journeyText("menuHours"), url: url) }
                     journeyAction(journeyText(dinnerSelection?.id == place.id ? "selectedDinner" : "selectDinner"), systemImage: dinnerSelection?.id == place.id ? "checkmark.circle.fill" : "fork.knife", accent: PlannerTheme.coral) {
                         dinnerSelection = place
@@ -1954,16 +2087,17 @@ private struct PlannerView: View {
     private func routeLinks(origin: String?, destination: String) -> some View {
         let key = routeLegKey(origin: origin, destination: destination)
         let internalWalk = isInternalSiteTransfer(origin: origin, destination: destination)
+        let visibleTimes = displayedLegTimes(origin: origin, destination: destination, key: key)
         return VStack(alignment: .leading, spacing: 10) {
             if !internalWalk, let url = mapURL(origin: origin, destination: destination, mode: "transit") {
-                timedRouteLink(extra("transitRoute"), url: url, systemImage: "tram.fill", key: key, mode: "transit", canEstimate: origin?.isEmpty == false)
+                timedRouteLink(extra("transitRoute"), url: url, systemImage: "tram.fill", key: key, mode: "transit", canEstimate: origin?.isEmpty == false, visibleTimes: visibleTimes)
             }
             if let url = mapURL(origin: origin, destination: destination, mode: "walking") {
-                timedRouteLink(extra("walkRoute"), url: url, systemImage: "figure.walk", key: key, mode: "walking", canEstimate: origin?.isEmpty == false)
+                timedRouteLink(extra("walkRoute"), url: url, systemImage: "figure.walk", key: key, mode: "walking", canEstimate: origin?.isEmpty == false, visibleTimes: visibleTimes)
             }
             if internalWalk { Text(hotelTravelText("siteWalk")).font(.caption).foregroundStyle(PlannerTheme.amber) }
             if !internalWalk, let url = mapURL(origin: origin, destination: destination, mode: "driving") {
-                timedRouteLink(extra("driveRoute"), url: url, systemImage: "car.fill", key: key, mode: "taxi", canEstimate: origin?.isEmpty == false)
+                timedRouteLink(extra("driveRoute"), url: url, systemImage: "car.fill", key: key, mode: "taxi", canEstimate: origin?.isEmpty == false, visibleTimes: visibleTimes)
             }
             travelEstimateDetails
             if let omotesando = route.stops.flatMap({ $0.choices }).first(where: { $0.name == "Omotesando Tokyo" }),
@@ -1982,7 +2116,7 @@ private struct PlannerView: View {
                 }.font(.caption.bold()).foregroundStyle(PlannerTheme.cyan)
             }
         }
-        .task(id: key) {
+        .task(id: key + "|" + (origin.map(readyCoordinateSignature) ?? "") + "|" + readyCoordinateSignature(destination)) {
             guard let origin, !origin.isEmpty else { return }
             await updateRouteLegTimes(origin: origin, destination: destination, key: key)
         }
@@ -1996,7 +2130,7 @@ private struct PlannerView: View {
     private func routeLegKey(origin: String?, destination: String) -> String {
         "\(route.id)|\(origin ?? "")|\(destination)"
     }
-    private func timedRouteLink(_ title: String, url: URL, systemImage: String, key: String, mode: String, canEstimate: Bool) -> some View {
+    private func timedRouteLink(_ title: String, url: URL, systemImage: String, key: String, mode: String, canEstimate: Bool, visibleTimes: [String: TravelTime]) -> some View {
         let accent = mode == "walking" ? PlannerTheme.coral : mode == "taxi" ? PlannerTheme.amber : PlannerTheme.cyan
         return Button {
             presentedMap = PlannerMapRequest(url: localizedMapURL(url), title: title)
@@ -2006,10 +2140,10 @@ private struct PlannerView: View {
                     .frame(width: 36, height: 36)
                     .background(accent.opacity(0.15), in: Circle())
                 Text(title).frame(maxWidth: .infinity, alignment: .leading)
-                if let minutes = routeLegTimes[key]?[mode] {
+                if let minutes = visibleTimes[mode] {
                     Text(travelTimeText(minutes))
                         .monospacedDigit().fixedSize(horizontal: false, vertical: true).multilineTextAlignment(.trailing)
-                } else if mode == "transit", let walking = routeLegTimes[key]?["walking"] {
+                } else if mode == "transit", let walking = visibleTimes["walking"] {
                     Text("\(hotelTravelText("walkingAlternative")) · \(travelTimeText(walking))")
                         .font(.caption).fixedSize(horizontal: false, vertical: true).multilineTextAlignment(.trailing)
                 } else if routeLegLoading.contains(key) {
@@ -2798,7 +2932,7 @@ private enum PlannerInstructions {
 
 private enum HotelTravelTranslations {
     static let ui: [String: [String]] = [
-        "registeredStay": ["事前登録の地域内候補です。出発地からの距離は地図で確認してください。", "지역 내 등록 숙소입니다. 출발지와의 거리는 지도에서 확인하세요.", "区域内预存住宿候选，请在地图确认与起点的距离。", "Registered regional alternative. Check its distance from your starting point on the map.", "ที่พักสำรองในภูมิภาค โปรดตรวจสอบระยะทางจากจุดเริ่มต้นบนแผนที่"],
+        "registeredStay": ["事前登録の宿泊候補です。位置情報を確認して所要時間を表示します。", "등록 숙소입니다. 위치 확인 후 소요 시간을 표시합니다.", "预存住宿候选，确认位置后显示所需时间。", "Registered stay. Travel times appear after its location is resolved.", "ที่พักที่บันทึกไว้ จะแสดงเวลาเมื่อยืนยันตำแหน่งแล้ว"],
         "siteWalk": ["同じ施設内の移動です。鳥居参道は徒歩で進み、車・タクシーは駐車場までです。", "같은 시설 내부 이동입니다. 도리이 길은 도보이며 차량은 주차장까지만 이용하세요.", "同一景点内部移动。鸟居步道请步行，车辆仅到停车场。", "Within the same attraction. Walk along the torii path; cars and taxis stop at the parking area.", "เดินภายในสถานที่เดียวกัน ทางโทริอิต้องเดิน รถยนต์และแท็กซี่ถึงลานจอดเท่านั้น"],
 
         "chooseNow": ["次は宿泊するホテルを選ぶ", "다음 단계: 숙박할 호텔 선택", "下一步：选择入住酒店", "Next: choose your hotel", "ขั้นต่อไป: เลือกโรงแรมที่พัก"],
@@ -2828,7 +2962,7 @@ private enum HotelTravelTranslations {
         "transitUnavailable": ["時刻未確認", "시간 미확인", "时刻未确认", "Time unconfirmed", "ยังไม่ยืนยันเวลา"],
         "timeDetails": ["時間表示について", "소요 시간 안내", "关于时间显示", "About travel times", "เกี่ยวกับเวลาเดินทาง"],
         "unavailable": ["経路を取得できません", "경로를 가져올 수 없음", "无法获取路线", "Route unavailable", "ไม่พบเส้นทาง"],
-        "estimateNote": ["「概算」は距離に基づく参考時間です。通行できる道・橋・フェリー・坂道・渋滞・タクシー待ちは反映しません。実際の道順と運行は地図で確認してください。", "‘대략’은 거리 기준 참고 시간입니다. 통행 가능 여부·다리·페리·경사·정체·택시 대기는 반영하지 않습니다. 실제 경로와 운행은 지도에서 확인하세요.", "‘粗略估算’为距离推算的参考时间，不反映道路通行、桥梁、渡轮、坡道、拥堵及出租车等待。请在地图确认实际路线与班次。", "Rough estimates are distance-based guidance. They do not confirm passable roads, bridges, ferries, slopes, traffic or taxi waits. Check actual directions and services on the map.", "ค่าคร่าว ๆ คำนวณจากระยะทาง ไม่ยืนยันถนน สะพาน เรือ ทางลาด รถติด หรือเวลารอแท็กซี่ โปรดตรวจเส้นทางจริงและตารางรถในแผนที่"]
+        "estimateNote": ["「概算」は移動の参考時間です。通行できる道・橋・フェリー・坂道・渋滞・タクシー待ちは反映しません。実際の道順と運行は地図で確認してください。", "‘대략’은 거리 기준 참고 시간입니다. 통행 가능 여부·다리·페리·경사·정체·택시 대기는 반영하지 않습니다. 실제 경로와 운행은 지도에서 확인하세요.", "‘粗略估算’为距离推算的参考时间，不反映道路通行、桥梁、渡轮、坡道、拥堵及出租车等待。请在地图确认实际路线与班次。", "Rough estimates are distance-based guidance. They do not confirm passable roads, bridges, ferries, slopes, traffic or taxi waits. Check actual directions and services on the map.", "ค่าคร่าว ๆ คำนวณจากระยะทาง ไม่ยืนยันถนน สะพาน เรือ ทางลาด รถติด หรือเวลารอแท็กซี่ โปรดตรวจเส้นทางจริงและตารางรถในแผนที่"]
     ]
 }
 
@@ -4231,7 +4365,6 @@ private struct OriginalCourseView: View {
                         VStack(alignment: .leading, spacing: 5) {
                             Text(result.place.name).font(.subheadline.bold())
                             Text(result.place.address).font(.caption).foregroundStyle(.secondary)
-                            Text(String(format: t("nearMeters"), result.distance)).font(.caption)
                             HStack {
                                 Button(t("nearSelect")) { selectNearby(result, after: item.id) }
                                     .font(.caption.bold())
@@ -4332,9 +4465,6 @@ private struct OriginalCourseView: View {
                             Spacer()
                             VStack(alignment: .trailing, spacing: 4) {
                             Text(originalDurationText(duration))
-                            if let metres = duration.routeMetres ?? duration.straightMetres {
-                                Text("\(HotelTravelTranslations.ui[duration.routeMetres == nil ? "straightDistance" : "routeDistance"]?[language.index] ?? "") " + String(format: "%.1f km", locale: language.locale, metres / 1000)).font(.caption)
-                            }
                             }.fixedSize(horizontal: false, vertical: true)
                             Image(systemName: "arrow.up.right")
                         }.font(.subheadline)
@@ -4345,9 +4475,6 @@ private struct OriginalCourseView: View {
                         VStack(alignment: .leading, spacing: 4) {
                             Text(HotelTravelTranslations.ui["walkingAlternative"]?[language.index] ?? "")
                             Text(originalDurationText(walking))
-                            if let metres = walking.routeMetres ?? walking.straightMetres {
-                                Text("\(HotelTravelTranslations.ui[walking.routeMetres == nil ? "straightDistance" : "routeDistance"]?[language.index] ?? "") " + String(format: "%.1f km", metres / 1000))
-                            }
                         }.font(.caption)
                     }
                 }
