@@ -975,6 +975,10 @@ private struct PlannerView: View {
             return CLLocationCoordinate2D(latitude: 34.41965524340437, longitude: 131.06256008148193)
         case "Nio port town":
             return CLLocationCoordinate2D(latitude: 34.20401, longitude: 133.6369)
+        case "Nio Hachiman Shrine":
+            // Kagawa Prefecture open data: 八幡神社, 三豊市仁尾町仁尾乙47-1.
+            // Pinned position avoids a name-search failure blocking route-time estimates.
+            return CLLocationCoordinate2D(latitude: 34.1985113611111, longitude: 133.651956944444)
         case "Ginzan Onsen town":
             return CLLocationCoordinate2D(latitude: 38.5699, longitude: 140.5307)
         case "Kawagoe Ichibangai":
@@ -2155,7 +2159,11 @@ private struct PlannerView: View {
                 } else if routeLegTimes[key] != nil {
                     Text(travelFailureText(mode: mode, missingPlace: routeLegTimes[key]?.isEmpty == true)).font(.caption).multilineTextAlignment(.trailing)
                 } else if canEstimate {
-                    ProgressView().tint(accent)
+                    Text(hotelTravelText("calculating"))
+                        .font(.caption).multilineTextAlignment(.trailing)
+                } else {
+                    Text(travelFailureText(mode: mode, missingPlace: true))
+                        .font(.caption).multilineTextAlignment(.trailing)
                 }
             }
             .font(.subheadline.bold()).fixedSize(horizontal: false, vertical: true)
