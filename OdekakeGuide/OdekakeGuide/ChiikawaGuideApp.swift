@@ -960,6 +960,10 @@ private struct PlannerView: View {
         case "Takachiho Shrine":
             // Kokugakuin University shrine database, WGS84 location.
             return CLLocationCoordinate2D(latitude: 32.706639, longitude: 131.302306)
+        case "Lunch in central Takachiho":
+            // Town-centre area anchor near Takachiho Bus Center; not a chosen restaurant.
+            // When a restaurant is selected, its actual coordinates take precedence.
+            return CLLocationCoordinate2D(latitude: 32.70968, longitude: 131.30914)
         case "Motonosumi torii path":
             // Facility entrance anchor; intra-site travel is labelled separately.
             return pinnedVenueCoordinate(named: "Motonosumi Shrine")
