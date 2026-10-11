@@ -26,7 +26,7 @@ private struct TravelTime {
         // These are planning estimates, not navigation or real-time traffic results.
         let factor = mode == .walking ? 1.35 : 1.55
         let speedMetresPerMinute = mode == .walking ? 75.0 : 400.0
-        let minutes = max(2, Int(ceil(metres * factor / speedMetresPerMinute)))
+        let minutes = max(1, Int(ceil(metres * factor / speedMetresPerMinute)))
         return TravelTime(minutes: minutes, isApproximate: true,
                           straightMetres: metres)
     }
@@ -1668,7 +1668,10 @@ private struct PlannerView: View {
     }
 
     private func hotelTravelText(_ key: String) -> String {
-        HotelTravelTranslations.ui[key]?[language.index] ?? key
+        if key == "walkingDistance" {
+            return ["徒歩圏内", "도보 거리", "步行范围内", "Walking distance", "เดินถึงได้"][language.index]
+        }
+        return HotelTravelTranslations.ui[key]?[language.index] ?? key
     }
     private func travelDurationText(_ minutes: Int) -> String {
         guard minutes >= 60 else {
@@ -1702,7 +1705,9 @@ private struct PlannerView: View {
     private func hotelTravelRow(_ mode: String) -> some View {
         let times = currentHotelTimes
         let value = times[mode]
-        let detail = value.map(travelTimeText) ?? (hotelTravelLoading ? hotelTravelText("calculating") : travelFailureText(mode: mode, missingPlace: times.isEmpty))
+        let nearby = (times["walking"]?.straightMetres ?? Double.infinity) < 500
+        let detail = nearby && mode != "walking" ? hotelTravelText("walkingDistance") :
+            value.map(travelTimeText) ?? (hotelTravelLoading ? hotelTravelText("calculating") : travelFailureText(mode: mode, missingPlace: times.isEmpty))
         return ViewThatFits(in: .horizontal) {
             HStack(alignment: .firstTextBaseline, spacing: 12) {
                 Text(hotelTravelText(mode)).fixedSize()
@@ -1771,11 +1776,13 @@ private struct PlannerView: View {
                 guard !Task.isCancelled, requestKey == hotelTravelKey && hotelTimeRequestID == token else { return }
                 hotelTravelMinutes["walking"] = w
             }
-            if let a = await travelMinutes(from: origin, to: destination, by: .automobile) {
+            let straightMetres = CLLocation(latitude: origin.placemark.coordinate.latitude, longitude: origin.placemark.coordinate.longitude)
+                .distance(from: CLLocation(latitude: destination.placemark.coordinate.latitude, longitude: destination.placemark.coordinate.longitude))
+            if straightMetres >= 500, let a = await travelMinutes(from: origin, to: destination, by: .automobile) {
                 guard !Task.isCancelled, requestKey == hotelTravelKey && hotelTimeRequestID == token else { return }
                 hotelTravelMinutes["taxi"] = a
             }
-            if let t = await travelMinutes(from: origin, to: destination, by: .transit) {
+            if straightMetres >= 500, let t = await travelMinutes(from: origin, to: destination, by: .transit) {
                 guard !Task.isCancelled, requestKey == hotelTravelKey && hotelTimeRequestID == token else { return }
                 hotelTravelMinutes["transit"] = t
             }
@@ -1786,8 +1793,17 @@ private struct PlannerView: View {
         }
     }
     private func planningTimes(from origin: MKMapItem, to destination: MKMapItem) -> [String: TravelTime] {
-        // Do not display a guess while waiting for actual directions.
-        return [:]
+        // Provisional estimates are marked approximate and are replaced by routes.
+        let a = origin.placemark.coordinate, b = destination.placemark.coordinate
+        guard TravelTime.validPair(a, b) else { return [:] }
+        let metres = CLLocation(latitude: a.latitude, longitude: a.longitude)
+            .distance(from: CLLocation(latitude: b.latitude, longitude: b.longitude))
+        var values: [String: TravelTime] = [:]
+        values["walking"] = TravelTime.rough(from: a, to: b, by: .walking)
+        if metres >= 500 {
+            values["taxi"] = TravelTime.rough(from: a, to: b, by: .automobile)
+        }
+        return values
     }
     private func travelMinutes(from origin: MKMapItem, to destination: MKMapItem,
                                by transport: MKDirectionsTransportType) async -> TravelTime? {
@@ -2152,6 +2168,7 @@ private struct PlannerView: View {
     }
     private func timedRouteLink(_ title: String, url: URL, systemImage: String, key: String, mode: String, canEstimate: Bool, visibleTimes: [String: TravelTime]) -> some View {
         let accent = mode == "walking" ? PlannerTheme.coral : mode == "taxi" ? PlannerTheme.amber : PlannerTheme.cyan
+        let nearby = (visibleTimes["walking"]?.straightMetres ?? Double.infinity) < 500
         return Button {
             presentedMap = PlannerMapRequest(url: localizedMapURL(url), title: title)
         } label: {
@@ -2160,12 +2177,12 @@ private struct PlannerView: View {
                     .frame(width: 36, height: 36)
                     .background(accent.opacity(0.15), in: Circle())
                 Text(title).frame(maxWidth: .infinity, alignment: .leading)
-                if let minutes = visibleTimes[mode] {
+                if nearby && mode != "walking" {
+                    Text(hotelTravelText("walkingDistance"))
+                        .font(.caption).multilineTextAlignment(.trailing)
+                } else if let minutes = visibleTimes[mode] {
                     Text(travelTimeText(minutes))
                         .monospacedDigit().fixedSize(horizontal: false, vertical: true).multilineTextAlignment(.trailing)
-                } else if mode == "transit", let walking = visibleTimes["walking"] {
-                    Text("\(hotelTravelText("walkingAlternative")) · \(travelTimeText(walking))")
-                        .font(.caption).fixedSize(horizontal: false, vertical: true).multilineTextAlignment(.trailing)
                 } else if routeLegLoading.contains(key) {
                     ProgressView().tint(accent)
                 } else if routeLegTimes[key] != nil {
@@ -2218,6 +2235,9 @@ private struct PlannerView: View {
             for (mode, transport) in [("walking", MKDirectionsTransportType.walking),
                                       ("taxi", MKDirectionsTransportType.automobile),
                                       ("transit", MKDirectionsTransportType.transit)] {
+                let metres = CLLocation(latitude: start.placemark.coordinate.latitude, longitude: start.placemark.coordinate.longitude)
+                    .distance(from: CLLocation(latitude: end.placemark.coordinate.latitude, longitude: end.placemark.coordinate.longitude))
+                if metres < 500 && mode != "walking" { continue }
                 let time = await travelMinutes(from: start, to: end, by: transport)
                 guard !Task.isCancelled, routeTimeRequestIDs[key] == token else { return }
                 if let time { routeLegTimes[key]?[mode] = time }
