@@ -583,10 +583,10 @@ private struct PlannerView: View {
             .background(journeySurface, in: RoundedRectangle(cornerRadius: 22))
             .overlay(RoundedRectangle(cornerRadius: 22).stroke(accent.opacity(0.28), lineWidth: 1))
     }
-    private func journeyAction(_ title: String, systemImage: String = "arrow.right", accent: Color = PlannerTheme.cyan, action: @escaping () -> Void) -> some View {
+    private func journeyAction(_ title: String, systemImage: String = "arrow.right", accent: Color = PlannerTheme.cyan, selected: Bool = false, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack(spacing: 12) {
-                Image(systemName: systemImage).font(.headline)
+                Image(systemName: selected ? "checkmark.circle.fill" : systemImage).font(.headline)
                     .frame(width: 34, height: 34).background(Color.black.opacity(0.10), in: Circle())
                 Text(title).fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 0)
@@ -594,9 +594,11 @@ private struct PlannerView: View {
             .font(.headline).padding(.horizontal, 16).padding(.vertical, 10)
             .frame(maxWidth: .infinity, minHeight: 54)
             .foregroundStyle(Color.black)
-            .background(accent, in: RoundedRectangle(cornerRadius: 28))
+            .background(selected ? PlannerTheme.cyan : accent, in: RoundedRectangle(cornerRadius: 28))
+            .overlay(RoundedRectangle(cornerRadius: 28).stroke(selected ? Color.white : accent.opacity(0.35), lineWidth: selected ? 3 : 1))
         }
         .buttonStyle(.plain)
+        .accessibilityAddTraits(selected ? [.isSelected] : [])
     }
 
     private var targetWebLanguage: String {
@@ -712,19 +714,17 @@ private struct PlannerView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             ForEach(hotelResults) { hotel in
+                let isSelected = hotelChoice == "suggested" && selectedSuggestedHotel?.id == hotel.id
                 VStack(alignment: .leading, spacing: 10) {
                     Text(hotel.name).font(.headline)
                     Text(hotel.address).font(.subheadline).foregroundStyle(.secondary)
-                    if hotel.distance >= 0 {
-                        Text(String(format: journeyText("distance"), locale: language.locale, arguments: [Int(hotel.distance.rounded())])).font(.caption).foregroundStyle(.secondary)
-                    } else {
+                    if hotel.distance < 0 {
                         Text(hotelTravelText("registeredStay")).font(.caption).foregroundStyle(.secondary)
                     }
                     if let url = locationURL(hotel.query) { journeyLink(extra("hotelMap"), url: url, systemImage: "mappin.and.ellipse") }
                     if let url = hotel.website.flatMap(URL.init(string:)) { translatedGuideLink(extra("rate"), url: url) }
                     if let phone = hotel.phone, let url = URL(string: "tel:\(phone)") { journeyLink("\(extra("call")) · \(phone)", url: url, systemImage: "phone") }
-                    let isSelected = hotelChoice == "suggested" && selectedSuggestedHotel?.id == hotel.id
-                    journeyAction(isSelected ? hotelTravelText("selectedHotel") : journeyText("chooseThisHotel"), systemImage: "checkmark.circle", accent: PlannerTheme.amber) {
+                    journeyAction(isSelected ? hotelTravelText("selectedHotel") : journeyText("chooseThisHotel"), systemImage: "checkmark.circle", accent: PlannerTheme.amber, selected: isSelected) {
                         chooseSuggestedHotel(hotel)
                     }
                     if isSelected {
@@ -734,7 +734,8 @@ private struct PlannerView: View {
                     }
                 }
                 .padding(12)
-                .background(PlannerTheme.raised, in: RoundedRectangle(cornerRadius: 10))
+                .background(isSelected ? PlannerTheme.amber.opacity(0.22) : PlannerTheme.raised, in: RoundedRectangle(cornerRadius: 10))
+                .overlay(RoundedRectangle(cornerRadius: 10).stroke(isSelected ? PlannerTheme.amber : PlannerTheme.amber.opacity(0.12), lineWidth: isSelected ? 2 : 1))
             }
             if hotelChoice == "suggested", let hotel = selectedSuggestedHotel, !selectedSearchedHotelVisible {
                 Text(hotelTravelText("selectedHotel")).font(.caption).foregroundStyle(journeyGold)
@@ -793,6 +794,9 @@ private struct PlannerView: View {
             // Statue in the square, not a different Hachiko landmark in Tokyo.
             // https://en.wikipedia.org/wiki/Statue_of_Hachik%C5%8D
             return CLLocationCoordinate2D(latitude: 35.659056, longitude: 139.700583)
+        case "Shimoyoshida Station":
+            // Fujikyuko Line FJ14, Fujiyoshida; OpenStreetMap railway stop.
+            return CLLocationCoordinate2D(latitude: 35.49794, longitude: 138.80363)
         case "Takachiho Shrine":
             // Kokugakuin University shrine database, WGS84 location.
             return CLLocationCoordinate2D(latitude: 32.706639, longitude: 131.302306)
@@ -1090,6 +1094,30 @@ private struct PlannerView: View {
         }
         return nil
     }
+    // Only verified local coordinates are used here. No prefecture-capital placeholder
+    // is allowed to masquerade as a hotel near Shimoyoshida Station.
+    private func knownLocalHotelFallbacks(near origin: CLLocationCoordinate2D?) -> [HotelSuggestion] {
+        guard selectedVenue(0).name == "Shimoyoshida Station",
+              let origin else { return [] }
+        let known: [(String, String, Double, Double, String?, String)] = [
+            ("ホステルマウントフジ福屋", "山梨県富士吉田市竜ケ丘1-9-31",
+             35.49244165, 138.79304532, "0555248381", "https://travel.yahoo.co.jp/00909701/"),
+            ("Megu Fuji 2021", "山梨県富士吉田市上吉田2-7-13",
+             35.482715, 138.795709, "0555285750", "https://www.megufuji.com/"),
+            ("ホテル富士トリイゲート", "山梨県富士吉田市上吉田2-6-18",
+             35.48293, 138.79670, "0555738520", "https://fuji-toriigate.com/")
+        ]
+        let center = CLLocation(latitude: origin.latitude, longitude: origin.longitude)
+        return known.map { stay in
+            let metres = center.distance(from: CLLocation(latitude: stay.2, longitude: stay.3))
+            return HotelSuggestion(
+                id: "verified|shimoyoshida|\(stay.0)", name: stay.0,
+                address: stay.1, latitude: stay.2, longitude: stay.3, phone: stay.4,
+                website: stay.5, distance: metres,
+                anchorLatitude: origin.latitude, anchorLongitude: origin.longitude)
+        }.sorted { $0.distance < $1.distance }
+    }
+
     private func registeredHotels() -> [HotelSuggestion] {
         guard let prefecture = NationwideRoutes.prefectures.first(where: { $0.id == routePrefecture }) else { return [] }
         var hotels = availableHotels.map { hotel in
@@ -1119,7 +1147,8 @@ private struct PlannerView: View {
         hotelSearchError = false
         // Publish real registered stays before any network lookup. Keep them
         // on every error path instead of clearing the screen.
-        hotelResults = registeredHotels()
+        hotelResults = knownLocalHotelFallbacks(near: pinnedFirstVenueCoordinate)
+        if hotelResults.isEmpty { hotelResults = registeredHotels() }
         Task { @MainActor in
             do {
                 let first = try await firstVenueMapItem(in: prefecture)
@@ -1129,8 +1158,9 @@ private struct PlannerView: View {
                 }
                 let coordinate = first.placemark.coordinate
                 let center = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
-                var seen = Set<String>()
-                var suggestions: [HotelSuggestion] = []
+                var suggestions = knownLocalHotelFallbacks(near: coordinate)
+                var seen = Set(suggestions.map { $0.name.folding(options: [.caseInsensitive, .widthInsensitive], locale: .current) })
+                if !suggestions.isEmpty { hotelResults = suggestions }
                 if let fallback = verifiedFallbackHotel(near: coordinate) {
                     suggestions.append(fallback)
                     seen.insert(fallback.name.folding(options: [.caseInsensitive, .widthInsensitive], locale: .current))
@@ -1181,8 +1211,8 @@ private struct PlannerView: View {
                             .contains(where: { lodgingName.contains($0) }) else { continue }
                         let normalizedName = name.folding(options: [.caseInsensitive, .widthInsensitive], locale: .current)
                         let id = "\(normalizedName)|\(Int(point.latitude * 10000))|\(Int(point.longitude * 10000))"
-                        guard !seen.contains(normalizedName) else { continue }
-                        guard seen.insert(id).inserted else { continue }
+                        guard seen.insert(normalizedName).inserted else { continue }
+                        guard !suggestions.contains(where: { $0.id == id }) else { continue }
                         suggestions.append(HotelSuggestion(id: id, name: name, address: item.placemark.title ?? name,
                                                            latitude: point.latitude, longitude: point.longitude,
                                                            phone: item.phoneNumber, website: item.url?.absoluteString,
@@ -1375,7 +1405,10 @@ private struct PlannerView: View {
                     }
                     .foregroundStyle(index == journeyIndex ? journeyGold : Color.white)
                     .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-                }.buttonStyle(.plain)
+                    .padding(.horizontal, 8).padding(.vertical, 5)
+                    .background(index == journeyIndex ? journeyGold.opacity(0.18) : PlannerTheme.raised, in: RoundedRectangle(cornerRadius: 13))
+                    .overlay(RoundedRectangle(cornerRadius: 13).stroke(journeyGold.opacity(index == journeyIndex ? 1 : 0.2), lineWidth: index == journeyIndex ? 2 : 1))
+                }.buttonStyle(.plain).accessibilityAddTraits(index == journeyIndex ? [.isSelected] : [])
                 if index < stages.count - 1 {
                     Image(systemName: "arrow.down").font(.caption).foregroundStyle(.secondary).padding(.leading, 10)
                 }
@@ -1920,6 +1953,8 @@ private struct PlannerView: View {
                 Text(title).font(.subheadline.bold()).foregroundStyle(.white)
                     .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
             }.padding(.vertical, 6).frame(maxWidth: .infinity, minHeight: 100)
+                .background(selected ? accent.opacity(0.22) : PlannerTheme.raised, in: RoundedRectangle(cornerRadius: 18))
+                .overlay(RoundedRectangle(cornerRadius: 18).stroke(accent.opacity(selected ? 1 : 0.25), lineWidth: selected ? 2 : 1))
         }.buttonStyle(.plain).accessibilityAddTraits(selected ? [.isSelected] : [])
     }
 
@@ -3862,8 +3897,9 @@ private struct OriginalCourseView: View {
                 HStack(spacing: 7) {
                     ForEach(item.kind == "lunch" ? [660, 720, 780, 840] : [1020, 1080, 1140], id: \.self) { value in
                         Button(clock(value)) { stops[index].target = value }
-                            .buttonStyle(.bordered)
+                            .buttonStyle(.borderedProminent)
                             .tint(item.target == value ? PlannerTheme.cyan : .gray)
+                            .accessibilityAddTraits(item.target == value ? [.isSelected] : [])
                     }
                 }.font(.caption)
             }
@@ -3900,8 +3936,9 @@ private struct OriginalCourseView: View {
                             .font(.caption.bold()).frame(maxWidth: .infinity).multilineTextAlignment(.center)
                             .padding(.vertical, 9)
                     }
-                    .buttonStyle(.bordered)
-                    .tint(kind == "sight" ? PlannerTheme.cyan : PlannerTheme.amber)
+                    .buttonStyle(.borderedProminent)
+                    .tint(nearbyAnchor == item.id && nearbyKind == kind ? PlannerTheme.violet : (kind == "sight" ? PlannerTheme.cyan : PlannerTheme.amber))
+                    .accessibilityAddTraits(nearbyAnchor == item.id && nearbyKind == kind ? [.isSelected] : [])
                 }
             }
             if nearbyAnchor == item.id {
