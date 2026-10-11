@@ -1242,7 +1242,9 @@ private struct PlannerView: View {
             if let cached = cachedRoutePlace("\(routePrefecture)|\(venue.name)") { return cached }
         }
         if let cached = cachedRoutePlace(query) { return cached }
-        if let hotel = selectedSuggestedHotel, query == hotel.query,
+        // Resolve from the actual hotel selected, not from a different query key.
+        if hotelChoice == "suggested", query == hotelQuery,
+           let hotel = selectedSuggestedHotel,
            let ready = item(hotel.latitude, hotel.longitude) { return ready }
         if let place = lunchSelection, query == place.query { return item(place.latitude, place.longitude) }
         if let place = dinnerSelection, query == place.query { return item(place.latitude, place.longitude) }
@@ -1407,7 +1409,16 @@ private struct PlannerView: View {
         let expectedName = query.components(separatedBy: ",").first ?? query
         let needle = normalizedPlaceName(expectedName)
         let localQuery = query.replacingOccurrences(of: ", Japan", with: "")
-        let alternatives = [localQuery,
+        // Resolve the selected hotel's real street address first.
+        var hotelAddressQueries: [String] = []
+        if query == hotelQuery {
+            if let hotel = selectedSuggestedHotel, hotelChoice == "suggested",
+               !hotel.address.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                hotelAddressQueries.append(hotel.address + " " + (prefecture?.ja ?? ""))
+            }
+            if let hotel = chosenHotel { hotelAddressQueries.append(hotel.addressJP) }
+        }
+        let alternatives = hotelAddressQueries + [localQuery,
                             localQuery.replacingOccurrences(of: "東横INN", with: "東横イン"),
                             query]
         var seen = Set<String>()
@@ -1435,7 +1446,9 @@ private struct PlannerView: View {
         var addresses: [String] = []
         if let hotel = chosenHotel, query == hotelQuery { addresses.append(hotel.addressJP) }
         if hotelChoice == "suggested", query == hotelQuery, let hotel = selectedSuggestedHotel,
-           hotel.address.rangeOfCharacter(from: .decimalDigits) != nil { addresses.append(hotel.address) }
+           !hotel.address.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            addresses.append(hotel.address + " " + (prefecture?.ja ?? ""))
+        }
         for candidate in addresses + [localQuery] {
             guard !Task.isCancelled else { return nil }
             if let marks = try? await CLGeocoder().geocodeAddressString(candidate, in: nil, preferredLocale: Locale(identifier: "ja_JP")),
