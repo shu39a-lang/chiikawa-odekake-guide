@@ -482,6 +482,10 @@ private struct PlannerView: View {
         if value == "suggested", let selected = selectedSuggestedHotel {
             // Hotels saved by an older search lack an anchor and may have been
             // measured from a different city. Require a fresh search for them.
+            // Older regional placeholders had no coordinates and must never
+            // masquerade as measurable nearby lodging after an app upgrade.
+            if selected.id.hasPrefix("registered|") &&
+               (abs(selected.latitude) < 0.01 || abs(selected.longitude) < 0.01) { return "" }
             if selected.id.hasPrefix("registered|\(route.id)|\(selectedVenue(0).name)|") { return value }
             guard let anchorLatitude = selected.anchorLatitude,
                   let anchorLongitude = selected.anchorLongitude else { return "" }
@@ -780,6 +784,22 @@ private struct PlannerView: View {
     }
     private func pinnedVenueCoordinate(_ venue: Venue) -> CLLocationCoordinate2D? {
         switch venue.name {
+        // Verified metropolitan starting places for hotel and travel-time lookup.
+        // All location searches stay anchored to the selected sightseeing venue.
+        case "Sensoji Temple":
+            return CLLocationCoordinate2D(latitude: 35.712856, longitude: 139.796585)
+        case "Tokyo National Museum":
+            return CLLocationCoordinate2D(latitude: 35.7188786, longitude: 139.7764671)
+        case "Gotokuji Temple":
+            return CLLocationCoordinate2D(latitude: 35.64868, longitude: 139.64731)
+        case "Kuromon Market":
+            return CLLocationCoordinate2D(latitude: 34.665277, longitude: 135.506971)
+        case "Katsuoji Temple":
+            return CLLocationCoordinate2D(latitude: 34.865736, longitude: 135.491608)
+        case "Kiyomizu-dera Temple":
+            return CLLocationCoordinate2D(latitude: 34.995317, longitude: 135.783285)
+        case "Otagi Nenbutsuji Temple":
+            return CLLocationCoordinate2D(latitude: 35.0313197, longitude: 135.6611036)
         case "Meiji Jingu Shrine":
             // Fixed entrance-area coordinate for reliable route calculations.
             return CLLocationCoordinate2D(latitude: 35.669868, longitude: 139.702255)
@@ -1097,6 +1117,26 @@ private struct PlannerView: View {
     // Only verified local coordinates are used here. No prefecture-capital placeholder
     // is allowed to masquerade as a hotel near Shimoyoshida Station.
     private func knownLocalHotelFallbacks(near origin: CLLocationCoordinate2D?) -> [HotelSuggestion] {
+        // Katsuoji is in the mountains north of urban Osaka. Retain nearby,
+        // independently located stays even if Apple Maps' hotel index fails.
+        if selectedVenue(0).name == "Katsuoji Temple", let origin {
+            let known: [(String, String, Double, Double, String?, String)] = [
+                ("山荘 風の杜", "大阪府箕面市箕面2-14-71",
+                 34.8410, 135.4753, "0727222191", "https://www.minoo-kazenomori.com/"),
+                ("こもれびの宿 明徳庵", "大阪府箕面市箕面公園2-27",
+                 34.843496, 135.471468, "0727205556", "https://meitokuan.jp/"),
+                ("大江戸温泉物語Premium 箕面観光ホテル", "大阪府箕面市温泉町1-1",
+                 34.838557078162, 135.46782744464, "05036153456", "https://www.ooedoonsen.jp/minoh/")
+            ]
+            let center = CLLocation(latitude: origin.latitude, longitude: origin.longitude)
+            return known.map { stay in
+                let metres = center.distance(from: CLLocation(latitude: stay.2, longitude: stay.3))
+                return HotelSuggestion(id: "verified|katsuoji|\(stay.0)", name: stay.0,
+                    address: stay.1, latitude: stay.2, longitude: stay.3,
+                    phone: stay.4, website: stay.5, distance: metres,
+                    anchorLatitude: origin.latitude, anchorLongitude: origin.longitude)
+            }.sorted { $0.distance < $1.distance }
+        }
         guard selectedVenue(0).name == "Shimoyoshida Station",
               let origin else { return [] }
         let known: [(String, String, Double, Double, String?, String)] = [
@@ -1145,10 +1185,9 @@ private struct PlannerView: View {
         hotelSearchID = token
         hotelSearching = true
         hotelSearchError = false
-        // Publish real registered stays before any network lookup. Keep them
-        // on every error path instead of clearing the screen.
+        // Never offer a prefecture-wide hotel as the closest one. A hotel's
+        // coordinates must be known before it is a selectable nearby result.
         hotelResults = knownLocalHotelFallbacks(near: pinnedFirstVenueCoordinate)
-        if hotelResults.isEmpty { hotelResults = registeredHotels() }
         Task { @MainActor in
             do {
                 let first = try await firstVenueMapItem(in: prefecture)
@@ -1157,6 +1196,12 @@ private struct PlannerView: View {
                     hotelSearching = false; hotelSearchError = hotelResults.isEmpty; return
                 }
                 let coordinate = first.placemark.coordinate
+                guard CLLocationCoordinate2DIsValid(coordinate),
+                      abs(coordinate.latitude) > 0.01, abs(coordinate.longitude) > 0.01 else {
+                    hotelSearching = false
+                    hotelSearchError = hotelResults.isEmpty
+                    return
+                }
                 let center = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
                 var suggestions = knownLocalHotelFallbacks(near: coordinate)
                 var seen = Set(suggestions.map { $0.name.folding(options: [.caseInsensitive, .widthInsensitive], locale: .current) })
@@ -1164,7 +1209,7 @@ private struct PlannerView: View {
                 if let fallback = verifiedFallbackHotel(near: coordinate) {
                     suggestions.append(fallback)
                     seen.insert(fallback.name.folding(options: [.caseInsensitive, .widthInsensitive], locale: .current))
-                    hotelResults = [fallback]
+                    hotelResults = Array(suggestions.sorted { $0.distance < $1.distance }.prefix(5))
                     if selectedVenue(0).name == "Takachiho Shrine" {
                         suggestions.append(HotelSuggestion(id: "verified|solest-takachiho", name: "ソレスト高千穂ホテル",
                             address: "宮崎県西臼杵郡高千穂町三田井1261-1", latitude: 32.7078023, longitude: 131.3048979,
@@ -1174,8 +1219,11 @@ private struct PlannerView: View {
                         hotelResults = suggestions
                     }
                 }
-                // Keep cities local; widen the search only when fewer than three stays were found.
+                // Try to reach five local hotels in the three main metropolitan
+                // areas; in smaller regions, search outward until three are found.
+                let desiredCount = ["tokyo", "osaka", "kyoto"].contains(routePrefecture) ? 5 : 3
                 for radius in [2000.0, 5000.0, 10000.0, 25000.0, 50000.0] {
+                    guard hotelSearchID == token, !Task.isCancelled else { return }
                     let poi = MKLocalPointsOfInterestRequest(center: coordinate, radius: radius)
                     poi.pointOfInterestFilter = MKPointOfInterestFilter(including: [.hotel])
                     var nearbyItems: [MKMapItem] = []
@@ -1219,7 +1267,8 @@ private struct PlannerView: View {
                                                            distance: distance, anchorLatitude: coordinate.latitude,
                                                            anchorLongitude: coordinate.longitude))
                     }
-                    if suggestions.count >= 3 { break }
+                    hotelResults = Array(suggestions.sorted { $0.distance < $1.distance }.prefix(5))
+                    if suggestions.count >= desiredCount { break }
                 }
                 if !suggestions.isEmpty {
                     hotelResults = Array(suggestions.sorted { $0.distance < $1.distance }.prefix(5))
