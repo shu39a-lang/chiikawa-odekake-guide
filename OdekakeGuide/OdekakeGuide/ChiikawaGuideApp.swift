@@ -1185,6 +1185,13 @@ private struct PlannerView: View {
                     if let minutes = hotelTravelMinutes[mode] {
                         Text(travelTimeText(minutes))
                             .fontWeight(.bold).monospacedDigit()
+                    } else if mode == "transit",
+                              let url = mapURL(origin: hotelQuery, destination: venueQuery(selectedVenue(0)), mode: "transit") {
+                        Button(hotelTravelText("transitUnavailable")) {
+                            presentedMap = PlannerMapRequest(url: localizedMapURL(url), title: hotelTravelText("transit"))
+                        }
+                        .font(.caption.bold())
+                        .foregroundStyle(PlannerTheme.cyan)
                     } else if !hotelTravelLoading {
                         Text(travelFailureText(mode: mode, missingPlace: hotelTravelMinutes.isEmpty)).foregroundStyle(.secondary)
                     }
@@ -2437,7 +2444,7 @@ private enum HotelTravelTranslations {
         "afterChoosing": ["ホテルを選ぶと、その下に最初の観光地までの所要時間が表示されます。次は旅の順番へ進んでください。", "호텔을 고르면 바로 아래에 첫 관광지까지의 이동 시간이 표시됩니다. 다음에는 여행 순서를 확인하세요.", "选择酒店后，下方会显示到第一处景点的所需时间。接着查看行程顺序。", "Choose a hotel to see travel times to the first stop directly below it. Then follow the trip order.", "เลือกโรงแรมแล้วดูเวลาเดินทางไปยังจุดเที่ยวแรกด้านล่าง จากนั้นทำตามลำดับทริป"],
         "nearestFive": ["最初の観光地から近い順・最大5件（少ない地域では検索範囲を拡大）", "첫 관광지에서 가까운 순 · 최대 5곳(결과가 적으면 범위 확대)", "距第一站由近到远，最多5家（数量较少时扩大范围）", "Nearest to the first stop · up to 5 (wider search where needed)", "ใกล้จุดเที่ยวแรกที่สุด สูงสุด 5 แห่ง (ขยายพื้นที่หากพบน้อย)"],
         "calculating": ["経路の所要時間を確認中…", "경로 소요 시간 확인 중…", "正在查询路线时间…", "Checking travel times…", "กำลังตรวจสอบเวลาเดินทาง…"],
-        "transit": ["電車・バス", "전철·버스", "电车・公交", "Train / bus", "รถไฟ / รถบัส"],
+        "transit": ["公共交通（電車・地下鉄など）", "대중교통(전철·지하철 등)", "公共交通（铁路、地铁等）", "Public transit (rail/subway etc.)", "ขนส่งสาธารณะ (รถไฟ/รถไฟใต้ดิน ฯลฯ)"],
         "walking": ["徒歩", "도보", "步行", "Walking", "เดิน"],
         "taxi": ["車・タクシー", "차량·택시", "汽车・出租车", "Car / taxi", "รถยนต์ / แท็กซี่"],
         "minutes": ["約%d分", "약 %d분", "约%d分钟", "About %d min", "ประมาณ %d นาที"],
@@ -2446,7 +2453,7 @@ private enum HotelTravelTranslations {
         "approximate": ["概算", "대략", "粗略估算", "Rough estimate", "คำนวณคร่าว ๆ"],
         "retry": ["所要時間を再検索", "소요 시간 다시 검색", "重新查询时间", "Retry travel times", "ค้นหาเวลาอีกครั้ง"],
         "placeUnavailable": ["場所を確認できません・地図で確認", "위치 확인 필요 · 지도 확인", "地点未确认，请查看地图", "Location unresolved · check map", "ยังระบุตำแหน่งไม่ได้ ดูแผนที่"],
-        "transitUnavailable": ["運行・時刻未確認・乗換を確認", "운행·시간 미확인 · 환승 확인", "班次时间未确认，请查询换乘", "Timetable unconfirmed · check transit", "ยังยืนยันตารางรถไม่ได้ ดูการต่อรถ"],
+        "transitUnavailable": ["地図で所要時間を確認 ↗", "지도에서 소요 시간 확인 ↗", "在地图查看所需时间 ↗", "Check travel time on map ↗", "ดูเวลาเดินทางบนแผนที่ ↗"],
         "unavailable": ["経路を取得できません", "경로를 가져올 수 없음", "无法获取路线", "Route unavailable", "ไม่พบเส้นทาง"],
         "estimateNote": ["「概算」は距離に基づく参考時間です。通行できる道・橋・フェリー・坂道・渋滞・タクシー待ちは反映しません。実際の道順と運行は地図で確認してください。", "‘대략’은 거리 기준 참고 시간입니다. 통행 가능 여부·다리·페리·경사·정체·택시 대기는 반영하지 않습니다. 실제 경로와 운행은 지도에서 확인하세요.", "‘粗略估算’为距离推算的参考时间，不反映道路通行、桥梁、渡轮、坡道、拥堵及出租车等待。请在地图确认实际路线与班次。", "Rough estimates are distance-based guidance. They do not confirm passable roads, bridges, ferries, slopes, traffic or taxi waits. Check actual directions and services on the map.", "ค่าคร่าว ๆ คำนวณจากระยะทาง ไม่ยืนยันถนน สะพาน เรือ ทางลาด รถติด หรือเวลารอแท็กซี่ โปรดตรวจเส้นทางจริงและตารางรถในแผนที่"]
     ]
@@ -2972,7 +2979,7 @@ private enum TravelExtras {
         "officialAccess": ["公式の交通案内", "공식 교통 안내", "官方交通指南", "Official access guide", "ข้อมูลการเดินทางทางการ"],
         "transfer": ["次の場所への移動", "다음 장소로 이동", "前往下一站", "Travel to the next stop", "เดินทางไปจุดถัดไป"],
         "walkRoute": ["徒歩の道順", "도보 경로", "步行路线", "Walking directions", "เส้นทางเดิน"],
-        "transitRoute": ["電車・地下鉄・バスの乗換", "전철·지하철·버스 환승", "电车・地铁・公交换乘", "Train / subway / bus routes", "เส้นทางรถไฟ รถไฟใต้ดิน และรถบัส"],
+        "transitRoute": ["公共交通の経路と所要時間", "대중교통 경로·소요 시간", "公共交通路线与所需时间", "Transit directions & travel time", "เส้นทางและเวลาเดินทางขนส่งสาธารณะ"],
         "driveRoute": ["車・タクシーの経路", "차량·택시 경로", "汽车・出租车路线", "Car / taxi route", "เส้นทางรถยนต์หรือแท็กซี่"],
         "liveNote": ["乗車駅・降車駅・乗換・発車時刻・運賃は「電車・地下鉄・バスの乗換」で確認できます。目的地を入れ替えるとリンクも更新されます。", "승차역, 하차역, 환승, 출발 시간과 요금은 대중교통 링크에서 확인할 수 있습니다. 장소를 바꾸면 링크도 업데이트됩니다.", "点击公共交通链接查看上车站、下车站、换乘、发车时间和票价。更换目的地后链接也会更新。", "Open transit routes for boarding and exit stops, transfers, departures and fares. Links update when you swap a destination.", "เปิดเส้นทางขนส่งสาธารณะเพื่อดูจุดขึ้นลง การต่อรถ เวลาออก และค่าโดยสาร ลิงก์จะเปลี่ยนตามสถานที่ที่เลือก"],
         "walkFallback": ["徒歩でこの2か所を移動できます。細かな曲がり角や横断場所は「徒歩の道順」で確認してください。歩く距離が長い場合は公共交通の候補も比較できます。", "두 장소 사이를 걸어서 이동할 수 있습니다. 자세한 회전 지점과 횡단 위치는 도보 경로에서 확인하세요. 거리가 길면 대중교통도 비교할 수 있습니다.", "这两处可步行前往。转弯与过街位置请查看步行路线；距离较长时也可比较公共交通方案。", "You can walk between these stops. Open walking directions for turns and crossings; compare transit if the walk is long.", "เดินระหว่างสองจุดนี้ได้ ดูทางเลี้ยวและจุดข้ามถนนในเส้นทางเดิน หากระยะไกลสามารถเปรียบเทียบขนส่งสาธารณะได้"],
@@ -3581,7 +3588,8 @@ private enum OriginalCourseText {
         "down": ["下へ", "아래로", "下移", "Move down", "เลื่อนลง"],
         "walk": ["徒歩", "도보", "步行", "Walk", "เดิน"],
         "taxi": ["車・タクシー", "차·택시", "汽车·出租车", "Car / taxi", "รถ/แท็กซี่"],
-        "transit": ["電車・バス", "전철·버스", "铁路·巴士", "Transit", "ขนส่งสาธารณะ"],
+        "transit": ["公共交通（電車・地下鉄など）", "대중교통(전철·지하철 등)", "公共交通（铁路、地铁等）", "Transit (rail/subway etc.)", "ขนส่งสาธารณะ (รถไฟ/รถไฟใต้ดิน)"],
+        "checkTransit": ["地図で時間を確認 ↗", "지도에서 시간 확인 ↗", "在地图查看时间 ↗", "Check time on map ↗", "ดูเวลาในแผนที่ ↗"],
         "approx": ["概算", "추정", "估算", "estimate", "ประมาณ"],
         "minutes": ["分", "분", "分钟", "min", "นาที"],
         "route": ["経路を開く", "경로 열기", "打开路线", "Open directions", "เปิดเส้นทาง"],
@@ -3932,14 +3940,18 @@ private struct OriginalCourseView: View {
                 Spacer()
             }
             ForEach(["walking", "taxi", "transit"], id: \.self) { mode in
-                if let duration = estimatedTime(index, mode: mode), let link = directions(index, mode: mode),
+                if let link = directions(index, mode: mode),
                    !stops[index - 1].name.isEmpty && !stops[index].name.isEmpty {
                     Link(destination: link) {
                         HStack {
                             Image(systemName: mode == "walking" ? "figure.walk" : mode == "taxi" ? "car.fill" : "tram.fill")
                             Text(t(mode == "walking" ? "walk" : mode))
                             Spacer()
-                            Text("\(duration.isApproximate ? t("approx") + " " : "")\(duration.minutes)\(t("minutes"))")
+                            if let duration = estimatedTime(index, mode: mode) {
+                                Text("\(duration.isApproximate ? t("approx") + " " : "")\(duration.minutes)\(t("minutes"))")
+                            } else if mode == "transit" {
+                                Text(t("checkTransit")).font(.caption)
+                            }
                             Image(systemName: "arrow.up.right")
                         }.font(.subheadline)
                     }
@@ -4015,6 +4027,7 @@ private enum PlannerMapText {
         "close": ["閉じる", "닫기", "关闭", "Close", "ปิด"],
         "loading": ["地図を読み込み中…", "지도를 불러오는 중…", "正在加载地图…", "Loading map…", "กำลังโหลดแผนที่…"],
         "retry": ["再読み込み", "새로고침", "重新加载", "Reload", "โหลดใหม่"],
+        "external": ["Googleマップで開く", "Google 지도에서 열기", "在谷歌地图中打开", "Open in Google Maps", "เปิดใน Google Maps"],
         "error": ["地図を読み込めませんでした。通信状態を確認し、再読み込みしてください。", "지도를 불러오지 못했습니다. 연결을 확인하고 다시 시도하세요.", "无法加载地图，请检查网络并重新加载。", "The map could not load. Check your connection and reload.", "โหลดแผนที่ไม่ได้ ตรวจสอบการเชื่อมต่อแล้วโหลดใหม่"],
         "note": ["選択言語で地図を読み込みます。地名・店舗名は現地表記が残る場合があります。", "선택한 언어로 지도를 요청합니다. 지명·상호는 현지 언어로 남을 수 있습니다.", "以所选语言加载地图；部分地名与店名可能保留当地文字。", "The map is requested in your chosen language. Some place and business names may remain in the local language.", "โหลดแผนที่ตามภาษาที่เลือก ชื่อสถานที่และร้านบางแห่งอาจยังเป็นภาษาท้องถิ่น"]
     ]
@@ -4069,6 +4082,10 @@ private struct PlannerMapScreen: View {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button { reload() } label: { Image(systemName: "arrow.clockwise") }
                         .accessibilityLabel(PlannerMapText.text("retry", language))
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Link(destination: request.url) { Image(systemName: "arrow.up.right.square") }
+                        .accessibilityLabel(PlannerMapText.text("external", language))
                 }
             }
         }
