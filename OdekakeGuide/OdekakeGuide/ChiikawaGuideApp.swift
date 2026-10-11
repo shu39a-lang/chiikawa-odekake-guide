@@ -14,22 +14,33 @@ private struct TravelTime {
     var routeMetres: Double? = nil
     var straightMetres: Double? = nil
 
-    static func rough(from: CLLocationCoordinate2D, to: CLLocationCoordinate2D,
+    // Last-resort estimate, clearly distinguished from a measured route.
+    // It is only suitable for walking/car; transit depends on the timetable.
+    static func rough(from a: CLLocationCoordinate2D, to b: CLLocationCoordinate2D,
                       by mode: MKDirectionsTransportType) -> TravelTime? {
-        guard CLLocationCoordinate2DIsValid(from), CLLocationCoordinate2DIsValid(to),
-              (from.latitude != 0 || from.longitude != 0),
-              (to.latitude != 0 || to.longitude != 0),
-              mode == .walking || mode == .automobile else { return nil }
-        let straight = CLLocation(latitude: from.latitude, longitude: from.longitude)
-            .distance(from: CLLocation(latitude: to.latitude, longitude: to.longitude))
-        guard straight.isFinite else { return nil }
-        // Coarse planning guidance, never a measured route or a claim of access.
-        let metresPerMinute: Double = mode == .walking ? (4000.0 / 60.0) : (25000.0 / 60.0)
-        let roughMinutes = straight * 1.4 / metresPerMinute
-        let roundedMinutes = Int(ceil(roughMinutes / 5.0)) * 5
-        let minutes = max(5, roundedMinutes)
-        return TravelTime(minutes: minutes, isApproximate: true, straightMetres: straight)
+        guard validPair(a, b), mode == .walking || mode == .automobile else { return nil }
+        let metres = CLLocation(latitude: a.latitude, longitude: a.longitude)
+            .distance(from: CLLocation(latitude: b.latitude, longitude: b.longitude))
+        guard metres.isFinite, metres < 150_000 else { return nil }
+        // Estimated road/path distance is deliberately greater than the straight line.
+        // These are planning estimates, not navigation or real-time traffic results.
+        let factor = mode == .walking ? 1.35 : 1.55
+        let speedMetresPerMinute = mode == .walking ? 75.0 : 400.0
+        let minutes = max(2, Int(ceil(metres * factor / speedMetresPerMinute)))
+        return TravelTime(minutes: minutes, isApproximate: true,
+                          straightMetres: metres)
     }
+
+    static func validPair(_ a: CLLocationCoordinate2D, _ b: CLLocationCoordinate2D) -> Bool {
+        guard CLLocationCoordinate2DIsValid(a), CLLocationCoordinate2DIsValid(b),
+              (a.latitude != 0 || a.longitude != 0),
+              (b.latitude != 0 || b.longitude != 0) else { return false }
+        // Identical or nearly identical resolved coordinates often indicate
+        // that a fallback geocoding result was used for both addresses.
+        return CLLocation(latitude: a.latitude, longitude: a.longitude)
+            .distance(from: CLLocation(latitude: b.latitude, longitude: b.longitude)) >= 15
+    }
+
 }
 
 @MainActor
@@ -40,7 +51,7 @@ private enum RouteMeasurements {
     static func fetch(from origin: MKMapItem, to destination: MKMapItem,
                       by mode: MKDirectionsTransportType) async -> TravelTime? {
         let a = origin.placemark.coordinate, b = destination.placemark.coordinate
-        guard CLLocationCoordinate2DIsValid(a), CLLocationCoordinate2DIsValid(b), !Task.isCancelled else { return nil }
+        guard TravelTime.validPair(a, b), !Task.isCancelled else { return nil }
         let key = "\(a.latitude),\(a.longitude)>\(b.latitude),\(b.longitude)|\(mode.rawValue)"
         if let (date, value) = cache[key], Date().timeIntervalSince(date) < 300 { return value }
         if let task = pending[key] { return await task.value }
@@ -48,9 +59,12 @@ private enum RouteMeasurements {
             await measure(from: origin, to: destination, by: mode)
         }
         pending[key] = task
-        let value = await task.value
+        let measured = await task.value
         pending[key] = nil
-        if let value {
+        // A failed route query must not become a fabricated exact time.
+        // A conservative estimate is available for walking/driving only.
+        let value = measured ?? TravelTime.rough(from: a, to: b, by: mode)
+        if let value, !value.isApproximate {
             if cache.count > 300 { cache.removeAll() }
             cache[key] = (Date(), value)
         }
@@ -72,9 +86,9 @@ private enum RouteMeasurements {
         // All screens, including custom courses, use this shared implementation.
         if mode == .transit {
             guard let eta = try? await directions.calculateETA(), !Task.isCancelled,
-                  eta.expectedTravelTime.isFinite, eta.expectedTravelTime > 0,
+                  eta.expectedTravelTime.isFinite, eta.expectedTravelTime >= 60,
                   eta.expectedTravelTime / 60 < Double(Int.max) else { return nil }
-            let value = TravelTime(minutes: max(1, Int(ceil(eta.expectedTravelTime / 60))),
+            let value = TravelTime(minutes: Int(ceil(eta.expectedTravelTime / 60)),
                                    isApproximate: false,
                                    straightMetres: origin.placemark.location?.distance(from: destination.placemark.location ?? CLLocation(latitude: destination.placemark.coordinate.latitude, longitude: destination.placemark.coordinate.longitude)))
             return value
@@ -86,14 +100,19 @@ private enum RouteMeasurements {
                   $0.expectedTravelTime.isFinite && $0.expectedTravelTime > 0 &&
                   $0.expectedTravelTime / 60 < Double(Int.max)
               }).min(by: { $0.expectedTravelTime < $1.expectedTravelTime }) else { return nil }
-        let value = TravelTime(minutes: max(1, Int(ceil(route.expectedTravelTime / 60))),
+        let straight = CLLocation(latitude: origin.placemark.coordinate.latitude, longitude: origin.placemark.coordinate.longitude)
+            .distance(from: CLLocation(latitude: destination.placemark.coordinate.latitude, longitude: destination.placemark.coordinate.longitude))
+        guard route.distance >= straight * 0.85,
+              route.expectedTravelTime >= 60,
+              route.expectedTravelTime >= straight / (mode == .walking ? 3.0 : 70.0) else { return nil }
+        let value = TravelTime(minutes: Int(ceil(route.expectedTravelTime / 60)),
                                isApproximate: false, routeMetres: route.distance)
         return value
     }
 }
 
 // Shared searches prevent simultaneous screens from issuing identical MapKit
-// requests. A failed request is never cached, so returning/retrying can recover.
+// requests. Estimates are not cached, so returning/retrying can obtain actual routes.
 @MainActor
 private enum PlaceLookups {
     private static var pending: [String: Task<MKLocalSearch.Response, Error>] = [:]
@@ -1683,10 +1702,7 @@ private struct PlannerView: View {
     private func hotelTravelRow(_ mode: String) -> some View {
         let times = currentHotelTimes
         let value = times[mode]
-        let alternative = mode == "transit" ? times["walking"].map {
-            "\(hotelTravelText("walkingAlternative")) · \(travelTimeText($0))"
-        } : nil
-        let detail = value.map(travelTimeText) ?? alternative ?? (hotelTravelLoading ? hotelTravelText("calculating") : travelFailureText(mode: mode, missingPlace: times.isEmpty))
+        let detail = value.map(travelTimeText) ?? (hotelTravelLoading ? hotelTravelText("calculating") : travelFailureText(mode: mode, missingPlace: times.isEmpty))
         return ViewThatFits(in: .horizontal) {
             HStack(alignment: .firstTextBaseline, spacing: 12) {
                 Text(hotelTravelText(mode)).fixedSize()
@@ -1727,7 +1743,7 @@ private struct PlannerView: View {
         let token = UUID()
         hotelTimeRequestID = token
         if displayedHotelTimeKey != requestKey {
-            hotelTravelMinutes = immediateTimes(origin: hotelQuery, destination: venueQuery(selectedVenue(0)))
+            hotelTravelMinutes = [:]
         }
         displayedHotelTimeKey = requestKey
         hotelTravelLoading = true
@@ -1770,16 +1786,12 @@ private struct PlannerView: View {
         }
     }
     private func planningTimes(from origin: MKMapItem, to destination: MKMapItem) -> [String: TravelTime] {
-        var result: [String: TravelTime] = [:]
-        result["walking"] = TravelTime.rough(from: origin.placemark.coordinate, to: destination.placemark.coordinate, by: .walking)
-        result["taxi"] = TravelTime.rough(from: origin.placemark.coordinate, to: destination.placemark.coordinate, by: .automobile)
-        return result
+        // Do not display a guess while waiting for actual directions.
+        return [:]
     }
     private func travelMinutes(from origin: MKMapItem, to destination: MKMapItem,
                                by transport: MKDirectionsTransportType) async -> TravelTime? {
-        if let measured = await RouteMeasurements.fetch(from: origin, to: destination, by: transport) { return measured }
-        guard !Task.isCancelled else { return nil }
-        return TravelTime.rough(from: origin.placemark.coordinate, to: destination.placemark.coordinate, by: transport)
+        await RouteMeasurements.fetch(from: origin, to: destination, by: transport)
     }
     private var journeyOverview: some View {
         journeyPanel {
@@ -2180,7 +2192,7 @@ private struct PlannerView: View {
         let token = UUID()
         routeTimeRequestIDs[key] = token
         if isInternalSiteTransfer(origin: origin, destination: destination) {
-            routeLegTimes[key] = ["walking": TravelTime(minutes: 5, isApproximate: true)]
+            routeLegTimes[key] = [:] // no unmeasured fixed five-minute time
             return
         }
         routeLegLoading.insert(key)
@@ -4217,19 +4229,14 @@ private struct OriginalCourseView: View {
         return parts?.url
     }
     private func estimatedTime(_ index: Int, mode: String) -> TravelTime? {
-        guard index > 0, let a = stops[index - 1].latitude, let b = stops[index - 1].longitude,
-              let c = stops[index].latitude, let d = stops[index].longitude else { return nil }
-        if let exact = times[legKey(index)]?[mode] { return exact }
-        guard mode != "transit" else { return nil }
-        return TravelTime.rough(from: CLLocationCoordinate2D(latitude: a, longitude: b),
-                                to: CLLocationCoordinate2D(latitude: c, longitude: d),
-                                by: mode == "taxi" ? .automobile : .walking)
+        guard index > 0 else { return nil }
+        return times[legKey(index)]?[mode]
     }
     private func arrival(_ index: Int) -> Int {
         guard index > 0 else { return stops[0].target }
         let previous = arrival(index - 1) + stops[index - 1].duration
         let mode = stops[index].mode
-        let travel = estimatedTime(index, mode: mode)?.minutes ?? estimatedTime(index, mode: "walking")?.minutes ?? 0
+        let travel = estimatedTime(index, mode: mode)?.minutes ?? 0 // no fictional time when a route is unavailable
         return max(stops[index].target, previous + travel)
     }
 
