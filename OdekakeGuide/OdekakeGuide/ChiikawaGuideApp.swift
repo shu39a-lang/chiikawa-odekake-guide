@@ -13,6 +13,82 @@ private struct TravelTime {
     let isApproximate: Bool
 }
 
+// Single route-time engine shared by hotels, sightseeing, meals and custom itineraries.
+// Actual MapKit routes are authoritative. The fallback is clearly identified as
+// an estimate and is never described as a confirmed navigable route.
+private enum RouteTimeEngine {
+    private static func straightDistance(_ origin: MKMapItem, _ destination: MKMapItem) -> Double? {
+        let a = origin.placemark.coordinate
+        let b = destination.placemark.coordinate
+        guard CLLocationCoordinate2DIsValid(a), CLLocationCoordinate2DIsValid(b),
+              abs(a.latitude) > 0.01, abs(a.longitude) > 0.01,
+              abs(b.latitude) > 0.01, abs(b.longitude) > 0.01 else { return nil }
+        let metres = CLLocation(latitude: a.latitude, longitude: a.longitude)
+            .distance(from: CLLocation(latitude: b.latitude, longitude: b.longitude))
+        // An identical map pin for two nominally different places is not a route.
+        guard metres.isFinite, metres >= 15 else { return nil }
+        return metres
+    }
+
+    // Only use this as a clearly labelled planning estimate when routing fails.
+    // For distant destinations or places potentially separated by sea/mountains,
+    // a direct-line calculation is too misleading: offer the map link instead.
+    static func estimate(_ origin: MKMapItem, _ destination: MKMapItem,
+                         by mode: MKDirectionsTransportType) -> TravelTime? {
+        guard let metres = straightDistance(origin, destination) else { return nil }
+        let maxDistance: Double
+        let factor: Double
+        let metresPerMinute: Double
+        switch mode {
+        case .walking:
+            maxDistance = 8_000
+            factor = 1.4
+            metresPerMinute = 4_000.0 / 60
+        case .automobile:
+            maxDistance = 20_000
+            factor = 1.5
+            metresPerMinute = 25_000.0 / 60
+        default:
+            return nil  // No fictitious railway/bus timetable.
+        }
+        guard metres <= maxDistance else { return nil }
+        let estimate = (metres * factor) / metresPerMinute
+        guard estimate.isFinite, estimate > 0, estimate < Double(Int.max) else { return nil }
+        return TravelTime(minutes: max(1, Int(ceil(estimate))), isApproximate: true)
+    }
+
+    static func resolve(_ origin: MKMapItem, _ destination: MKMapItem,
+                        by mode: MKDirectionsTransportType) async -> TravelTime? {
+        guard let straight = straightDistance(origin, destination) else { return nil }
+        // MapKit supplies real route length and expected travel time, rather
+        // than an estimate from the straight-line distance between two pins.
+        for attempt in 0..<2 {
+            guard !Task.isCancelled else { return nil }
+            let request = MKDirections.Request()
+            request.source = origin
+            request.destination = destination
+            request.transportType = mode
+            request.departureDate = Date()
+            request.requestsAlternateRoutes = false
+            if let response = try? await MKDirections(request: request).calculate() {
+                let valid = response.routes.filter { route in
+                    route.distance.isFinite && route.distance > 0 &&
+                    route.distance >= straight * 0.70 &&
+                    route.expectedTravelTime.isFinite && route.expectedTravelTime > 0
+                }
+                if let route = valid.min(by: { $0.expectedTravelTime < $1.expectedTravelTime }),
+                   route.expectedTravelTime / 60 < Double(Int.max) {
+                    return TravelTime(minutes: max(1, Int(ceil(route.expectedTravelTime / 60))),
+                                      isApproximate: false)
+                }
+            }
+            if attempt == 0 { try? await Task.sleep(nanoseconds: 400_000_000) }
+        }
+        guard !Task.isCancelled else { return nil }
+        return estimate(origin, destination, by: mode)
+    }
+}
+
 private struct Venue: Decodable {
     let name: String
     let detail: String
@@ -296,7 +372,13 @@ private struct PlannerView: View {
     private func startOfStop(_ index: Int) -> Int {
         var clock = startMinutes
         for previous in 0..<index {
-            clock += duration(route.stops[previous], venue: selectedVenue(previous)) + route.gap
+            let source = venueQuery(selectedVenue(previous))
+            let target = venueQuery(selectedVenue(previous + 1))
+            let measured = routeLegTimes[routeLegKey(origin: source, destination: target)]
+            // Planned gap is retained only while the real route has not been queried.
+            let travel = measured?["walking"]?.minutes ?? measured?["transit"]?.minutes
+                ?? measured?["taxi"]?.minutes ?? route.gap
+            clock += duration(route.stops[previous], venue: selectedVenue(previous)) + travel
         }
         return clock
     }
@@ -964,10 +1046,6 @@ private struct PlannerView: View {
                    let item = MKMapItem(placemark: MKPlacemark(placemark: mark))
                    guard isLocalRoutePlace(item, in: prefecture) else { return false }
                     return matchesName(mark.name ?? "") || matchesName(mark.thoroughfare ?? "")
-                        || (pinnedFirstVenueCoordinate.map { anchor in
-                            CLLocation(latitude: point.latitude, longitude: point.longitude)
-                                .distance(from: CLLocation(latitude: anchor.latitude, longitude: anchor.longitude)) < 12_000
-                        } ?? false)
                }) {
                 let item = MKMapItem(placemark: MKPlacemark(placemark: mark))
                 resolvedPlaceCache[cacheKey] = item
@@ -1335,6 +1413,14 @@ private struct PlannerView: View {
                         }
                         .font(.caption.bold())
                         .foregroundStyle(PlannerTheme.cyan)
+                    } else if !hotelTravelLoading,
+                              let url = mapURL(origin: hotelQuery,
+                                               destination: venueQuery(selectedVenue(0)),
+                                               mode: mode == "taxi" ? "driving" : "walking") {
+                        Button(hotelTravelText("transitUnavailable")) {
+                            presentedMap = PlannerMapRequest(url: localizedMapURL(url), title: hotelTravelText(mode))
+                        }
+                        .font(.caption.bold()).foregroundStyle(PlannerTheme.cyan)
                     } else if !hotelTravelLoading {
                         Text(travelFailureText(mode: mode, missingPlace: hotelTravelMinutes.isEmpty)).foregroundStyle(.secondary)
                     }
@@ -1369,7 +1455,8 @@ private struct PlannerView: View {
                 return
             }
             guard !Task.isCancelled && requestKey == hotelTravelKey else { return }
-            hotelTravelMinutes = planningTimes(from: origin, to: destination)
+            // Never display a fabricated time while the real map lookup is pending.
+            // Publish each result only after actual routing (or a labelled fallback).
             // Avoid a three-request burst and show walking/driving before
             // waiting for a rural transit lookup to finish.
             if let w = await travelMinutes(from: origin, to: destination, by: .walking) {
@@ -1390,47 +1477,9 @@ private struct PlannerView: View {
             if !Task.isCancelled && requestKey == hotelTravelKey { hotelTravelLoading = false }
         }
     }
-    private func planningTimes(from origin: MKMapItem, to destination: MKMapItem) -> [String: TravelTime] {
-        let start = origin.placemark.coordinate, end = destination.placemark.coordinate
-        guard CLLocationCoordinate2DIsValid(start), CLLocationCoordinate2DIsValid(end) else { return [:] }
-        let metres = CLLocation(latitude: start.latitude, longitude: start.longitude)
-            .distance(from: CLLocation(latitude: end.latitude, longitude: end.longitude)) * 1.4
-        guard metres.isFinite else { return [:] }
-        return ["walking": TravelTime(minutes: max(1, Int(ceil(metres / (4000.0 / 60)))), isApproximate: true),
-                "taxi": TravelTime(minutes: max(1, Int(ceil(metres / (25000.0 / 60)))), isApproximate: true)]
-    }
     private func travelMinutes(from origin: MKMapItem, to destination: MKMapItem,
                                by transport: MKDirectionsTransportType) async -> TravelTime? {
-        let start = origin.placemark.coordinate
-        let end = destination.placemark.coordinate
-        guard CLLocationCoordinate2DIsValid(start), CLLocationCoordinate2DIsValid(end) else { return nil }
-        let straight = CLLocation(latitude: start.latitude, longitude: start.longitude)
-            .distance(from: CLLocation(latitude: end.latitude, longitude: end.longitude))
-        // Retry transient failures. Do not discard valid long routes or detours
-        // across rivers, mountains and bridges by a blanket distance/time filter.
-        for attempt in 0..<2 {
-            guard !Task.isCancelled else { return nil }
-            let request = MKDirections.Request()
-            request.source = origin
-            request.destination = destination
-            request.transportType = transport
-            request.departureDate = Date()
-            request.requestsAlternateRoutes = true
-            if let response = try? await MKDirections(request: request).calculate(),
-               let seconds = response.routes.map({ $0.expectedTravelTime }).filter({ $0.isFinite && $0 > 0 }).min(),
-               seconds / 60 < Double(Int.max) {
-                return TravelTime(minutes: max(1, Int(ceil(seconds / 60))),
-                                  isApproximate: false)
-            }
-            if attempt == 0 { try? await Task.sleep(nanoseconds: 700_000_000) }
-        }
-        guard !Task.isCancelled, transport == .walking || transport == .automobile else { return nil }
-        // A rough planning estimate only. This does not certify a walkable road,
-        // bridge/ferry connection or taxi availability, and excludes waiting.
-        let roadMetres = straight * 1.4
-        let metresPerMinute = transport == .walking ? 4000.0 / 60 : 25000.0 / 60
-        let minutes = max(1, Int(ceil(roadMetres / metresPerMinute)))
-        return TravelTime(minutes: minutes, isApproximate: true)
+        await RouteTimeEngine.resolve(origin, destination, by: transport)
     }
     private var journeyOverview: some View {
         journeyPanel {
@@ -1809,7 +1858,8 @@ private struct PlannerView: View {
                 } else if routeLegLoading.contains(key) {
                     ProgressView().tint(accent)
                 } else if routeLegTimes[key] != nil {
-                    // The Google Maps direction link still works when Apple's lookup fails.
+                    // Every mode retains a working directions button when no
+                    // trustworthy on-device duration can be calculated.
                     Text(hotelTravelText("transitUnavailable"))
                         .font(.caption).multilineTextAlignment(.trailing)
                 } else if canEstimate {
@@ -1828,7 +1878,7 @@ private struct PlannerView: View {
     private func updateRouteLegTimes(origin: String, destination: String, key: String) async {
         guard routeLegTimes[key] == nil, !routeLegLoading.contains(key) else { return }
         if isInternalSiteTransfer(origin: origin, destination: destination) {
-            routeLegTimes[key] = ["walking": TravelTime(minutes: 5, isApproximate: true)]
+            routeLegTimes[key] = [:]
             return
         }
         routeLegLoading.insert(key)
@@ -1844,7 +1894,8 @@ private struct PlannerView: View {
                 routeLegTimes[key] = [:]
                 return
             }
-            routeLegTimes[key] = planningTimes(from: start, to: end)
+            // Do not show rough straight-line estimates as if already verified.
+            routeLegTimes[key] = [:]
             for (mode, transport) in [("walking", MKDirectionsTransportType.walking),
                                       ("taxi", MKDirectionsTransportType.automobile),
                                       ("transit", MKDirectionsTransportType.transit)] {
@@ -3842,9 +3893,13 @@ private struct OriginalCourseView: View {
         guard index > 0, let a = stops[index - 1].latitude, let b = stops[index - 1].longitude,
               let c = stops[index].latitude, let d = stops[index].longitude else { return nil }
         if let exact = times[legKey(index)]?[mode] { return exact }
-        guard mode != "transit" else { return nil }
-        let distance = CLLocation(latitude: a, longitude: b).distance(from: CLLocation(latitude: c, longitude: d))
-        return TravelTime(minutes: max(3, Int(ceil(distance * 1.35 / (mode == "taxi" ? 400 : 75)))), isApproximate: true)
+        guard mode == "walking" || mode == "taxi" else { return nil }
+        let source = MKMapItem(placemark: MKPlacemark(coordinate:
+            CLLocationCoordinate2D(latitude: a, longitude: b)))
+        let destination = MKMapItem(placemark: MKPlacemark(coordinate:
+            CLLocationCoordinate2D(latitude: c, longitude: d)))
+        return RouteTimeEngine.estimate(source, destination,
+            by: mode == "walking" ? .walking : .automobile)
     }
     private func arrival(_ index: Int) -> Int {
         guard index > 0 else { return stops[0].target }
@@ -4136,12 +4191,26 @@ private struct OriginalCourseView: View {
             let found: [OriginalPlace] = Array(response.mapItems.prefix(4)).compactMap { result in
                 guard let name = result.name else { return nil }
                 let point = result.placemark.coordinate
+                guard CLLocationCoordinate2DIsValid(point), abs(point.latitude) > 0.01,
+                      abs(point.longitude) > 0.01,
+                      result.placemark.isoCountryCode == nil || result.placemark.isoCountryCode == "JP" else { return nil }
                 return OriginalPlace(name: name, address: result.placemark.title ?? name, latitude: point.latitude, longitude: point.longitude)
             }
             guard let i = stops.firstIndex(where: { $0.id == item.id && $0.name == item.name }) else { continue }
             candidates[item.id] = found
-            if let first = found.first, stops[i].latitude == nil {
-                stops[i].latitude = first.latitude; stops[i].longitude = first.longitude; stops[i].address = first.address
+            // Do not silently assign a different same-name place or arbitrary
+            // first search hit. Ask the traveller to choose if ambiguous.
+            let wanted = item.name.folding(options: [.caseInsensitive, .widthInsensitive, .diacriticInsensitive], locale: .current)
+                .replacingOccurrences(of: " ", with: "")
+            let confident = found.filter { place in
+                let actual = place.name.folding(options: [.caseInsensitive, .widthInsensitive, .diacriticInsensitive], locale: .current)
+                    .replacingOccurrences(of: " ", with: "")
+                return !wanted.isEmpty && (wanted == actual || (wanted.count >= 5 && actual.contains(wanted)))
+            }
+            if confident.count == 1, let exact = confident.first, stops[i].latitude == nil {
+                stops[i].latitude = exact.latitude
+                stops[i].longitude = exact.longitude
+                stops[i].address = exact.address
             }
         }
         if let last = stops.indices.last, stops[last].kind == "return", stops[0].latitude != nil {
@@ -4151,6 +4220,7 @@ private struct OriginalCourseView: View {
             stops[last].longitude = stops[0].longitude
         }
     }
+    @MainActor
     private func calculateRoutes() async {
         times = [:]
         let snapshot = stops
@@ -4158,16 +4228,20 @@ private struct OriginalCourseView: View {
         for index in 1..<snapshot.count {
             guard !Task.isCancelled else { return }
             let from = snapshot[index - 1], to = snapshot[index]
-            guard let a = from.latitude, let b = from.longitude, let c = to.latitude, let d = to.longitude else { continue }
+            guard let a = from.latitude, let b = from.longitude,
+                  let c = to.latitude, let d = to.longitude else { continue }
             let key = "\(from.id)|\(to.id)"
-            for mode in ["walking", "taxi", "transit"] {
+            let source = MKMapItem(placemark: MKPlacemark(coordinate:
+                CLLocationCoordinate2D(latitude: a, longitude: b)))
+            let destination = MKMapItem(placemark: MKPlacemark(coordinate:
+                CLLocationCoordinate2D(latitude: c, longitude: d)))
+            for (mode, transport) in [("walking", MKDirectionsTransportType.walking),
+                                      ("taxi", MKDirectionsTransportType.automobile),
+                                      ("transit", MKDirectionsTransportType.transit)] {
                 guard !Task.isCancelled else { return }
-                let request = MKDirections.Request()
-                request.source = MKMapItem(placemark: MKPlacemark(coordinate: CLLocationCoordinate2D(latitude: a, longitude: b)))
-                request.destination = MKMapItem(placemark: MKPlacemark(coordinate: CLLocationCoordinate2D(latitude: c, longitude: d)))
-                request.transportType = mode == "walking" ? .walking : mode == "taxi" ? .automobile : .transit
-                if let route = (try? await MKDirections(request: request).calculate())?.routes.first, !Task.isCancelled {
-                    times[key, default: [:]][mode] = TravelTime(minutes: max(1, Int(ceil(route.expectedTravelTime / 60))), isApproximate: false)
+                if let result = await RouteTimeEngine.resolve(source, destination, by: transport) {
+                    guard !Task.isCancelled, routeKey == snapshot.map({ "\($0.id):\($0.latitude ?? 0):\($0.longitude ?? 0)" }).joined(separator: "|") else { return }
+                    times[key, default: [:]][mode] = result
                 }
             }
         }
