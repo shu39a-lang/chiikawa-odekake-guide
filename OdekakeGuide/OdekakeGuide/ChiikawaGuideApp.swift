@@ -453,7 +453,11 @@ private struct PlannerView: View {
                     }
                     .background(journeyBackground)
                     .onChange(of: journeyIndex) { _ in
-                        withAnimation { proxy.scrollTo("currentStage", anchor: .top) }
+                        DispatchQueue.main.async {
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                proxy.scrollTo("currentStage", anchor: .top)
+                            }
+                        }
                     }
                     .onChange(of: hotelTravelKey) { _ in
                         if selectedSearchedHotelVisible {
@@ -494,9 +498,9 @@ private struct PlannerView: View {
                     }
                 }
                 .onChange(of: startMinutes) { _ in resetJourney() }
-                .onChange(of: dinnerArea) { _ in resetJourney() }
+                .onChange(of: dinnerArea) { _ in resetDinner() }
                 .onChange(of: savedChoices) { _ in routeLegTimes = [:]; resetDinner(); resetLunch() }
-                .onChange(of: dinnerNearHotel) { _ in resetJourney() }
+                .onChange(of: dinnerNearHotel) { _ in preserveJourneyAfterDinnerLocationChange() }
             } else {
                 languageHome
             }
@@ -515,7 +519,7 @@ private struct PlannerView: View {
 
 
     // Each destination and transfer has its own visible stage.
-    private enum JourneyStage {
+    private enum JourneyStage: Equatable {
         case departure, stop(Int), hotelBeforeDinner, dinner, hotelAfterDinner
     }
     private let journeyBackground = PlannerTheme.background
@@ -608,15 +612,29 @@ private struct PlannerView: View {
     private var lastVenue: Venue { selectedVenue(route.stops.count - 1) }
     private var dinnerAnchorQuery: String { dinnerNearHotel ? hotelQuery : venueQuery(lastVenue) }
     private var dinnerAnchorName: String { dinnerNearHotel ? hotelName : venueText(lastVenue, 0) }
-    private var stages: [JourneyStage] {
+    private func makeJourneyStages(dinnerAtHotel: Bool) -> [JourneyStage] {
         var items: [JourneyStage] = [.departure]
         items.append(contentsOf: route.stops.indices.map { .stop($0) })
-        if dinnerNearHotel { items.append(.hotelBeforeDinner) }
+        if dinnerAtHotel { items.append(.hotelBeforeDinner) }
         items.append(.dinner)
         items.append(.hotelAfterDinner)
         return items
     }
+    private var stages: [JourneyStage] { makeJourneyStages(dinnerAtHotel: dinnerNearHotel) }
     private var currentStage: JourneyStage { stages[min(max(0, journeyIndex), stages.count - 1)] }
+
+    // Keep the visible journey step while asynchronously calculated travel times
+    // change the optional hotel-before-dinner stage. Do not discard route times.
+    private func preserveJourneyAfterDinnerLocationChange() {
+        let oldStages = makeJourneyStages(dinnerAtHotel: !dinnerNearHotel)
+        let oldStage = oldStages[min(max(0, journeyIndex), oldStages.count - 1)]
+        if let newIndex = stages.firstIndex(of: oldStage) {
+            journeyIndex = newIndex
+        } else {
+            journeyIndex = stages.firstIndex(of: .dinner) ?? max(0, stages.count - 1)
+        }
+        resetDinner()
+    }
     private func stageTitle(_ item: JourneyStage) -> String {
         switch item {
         case .departure: return journeyText("depart")
@@ -1527,16 +1545,6 @@ private struct PlannerView: View {
             Text(extra("liveNote")).font(.footnote).foregroundStyle(.secondary)
         }
     }
-    private var journeyNextEnabled: Bool {
-        switch currentStage {
-        case .departure, .hotelBeforeDinner: return !hotelQuery.isEmpty
-        case .dinner: return dinnerSelection != nil
-        case .hotelAfterDinner: return dinnerSelection != nil && !hotelQuery.isEmpty
-        case .stop(let index):
-            return !selectedVenue(index).name.hasPrefix("Lunch near ") || lunchSelection != nil
-        default: return true
-        }
-    }
     private var journeyCurrent: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("\(journeyText("current")) · \(journeyIndex + 1) / \(stages.count)")
@@ -1593,7 +1601,7 @@ private struct PlannerView: View {
             if !journeyCompleted {
                 journeyAction(journeyText(journeyIndex == stages.count - 1 ? "arrived" : "next")) {
                     if journeyIndex < stages.count - 1 { journeyIndex += 1 } else { journeyCompleted = true }
-                }.disabled(!journeyNextEnabled).opacity(journeyNextEnabled ? 1 : 0.45)
+                }
             }
             if journeyIndex > 0 {
                 Button(journeyText("previous")) { journeyIndex -= 1; journeyCompleted = false }
@@ -2583,7 +2591,7 @@ private enum PlannerInstructions {
                 ("言語を選ぶ", "トップ画面の左側にある言語ボタンを押すと、その言語の観光画面が開きます。右側の「使い方」は、横にある言語の説明だけを開きます。説明を閉じてから左側の言語ボタンを押して始めてください。観光画面の「言語選択」から、このトップ画面に戻れます。"),
                 ("地域・コース・出発時刻", "おすすめのコースボタンを押すか、地域 → 都道府県 → 観光コースの順に選びます。出発時刻を変更すると、各立ち寄り先の予定時刻と終了予定時刻が更新されます。コースや出発時刻を変更すると、旅の進行は最初に戻ります。"),
                 ("ホテルを設定する", "ホテルの候補から宿泊先を選びます。自分で予約したホテルを使う場合は「自分のホテルを入力」を選び、ホテル名と地域・住所を入力してください。周辺ホテル検索で見つかった候補を選ぶこともできます。表示される地図、料金確認、公式サイト、電話などのボタンで詳細を確認します。ホテルの選択だけでは予約は完了しません。"),
-                ("旅程を進める", "旅の順番には、ホテルからの出発、観光、食事、ホテルへの帰着が並びます。一覧の行を押すと、その段階の案内が開きます。順に進む場合は画面下の次へ進むボタンを押し、戻る場合は前へ戻るボタンを押してください。必要なホテルや食事を選ぶまでは、次へ進めない段階があります。"),
+                ("旅程を進める", "旅の順番には、ホテルからの出発、観光、食事、ホテルへの帰着が並びます。一覧の行を押すと、その段階の案内が開きます。順に進む場合は画面下の次へ進むボタンを押し、戻る場合は前へ戻るボタンを押してください。ホテルや食事が未選択でも次へ進めますが、その経路を確認するには先に場所を選んでください。"),
                 ("観光地・昼食を変更する", "観光地の「立ち寄り先を変更」や昼食の選択ボタンを押し、表示された候補から選びます。変更後は旅程の予定時刻が更新されます。昼食を周辺から検索するコースでは、昼食検索ボタンを押し、住所やメニュー・営業時間を確認して店を選んでください。候補が出ない場合は、追加の地図検索リンクから探せます。"),
                 ("地図・移動経路を見る", "電車・バスなどの公共交通、徒歩、車の経路ボタンから、出発地と目的地の地図を開きます。地図はアプリ内で表示されます。公共交通のページでは乗車駅、乗り換え、所要時間などを確認してください。地図画面を閉じると旅程に戻ります。表示される時刻は目安なので、実際の出発時刻に合わせて経路を確認してください。"),
                 ("夕食とホテルへの帰り方", "夕食エリアは自動、ホテル周辺、最後の観光地周辺から選べます。自動では観光終了が18時より前ならホテル周辺、18時以降なら最後の観光地周辺を選びます。夕食検索ボタンで店を探し、店を選択してから経路を確認します。食後は選んだホテルへの帰り道を確認できます。"),
@@ -2596,7 +2604,7 @@ private enum PlannerInstructions {
                 ("언어 선택", "첫 화면 왼쪽의 언어 버튼을 누르면 해당 언어의 여행 화면이 열립니다. 오른쪽 사용 방법 버튼은 같은 줄에 있는 언어의 설명만 엽니다. 설명을 닫고 왼쪽 언어 버튼을 눌러 시작하세요. 여행 화면의 언어 선택 버튼으로 첫 화면에 돌아갈 수 있습니다."),
                 ("지역, 코스, 출발 시간", "추천 코스를 누르거나 지역 → 도도부현 → 관광 코스 순서로 선택하세요. 출발 시간을 바꾸면 각 장소의 예정 시간과 종료 예정 시간이 갱신됩니다. 코스나 출발 시간을 바꾸면 여행 진행 단계가 처음으로 돌아갑니다."),
                 ("호텔 설정", "호텔 후보에서 숙박할 곳을 선택하세요. 직접 예약한 호텔은 내 호텔 입력을 선택한 뒤 호텔 이름과 지역 또는 주소를 입력하세요. 주변 호텔 검색으로 찾은 후보도 선택할 수 있습니다. 표시되는 지도, 요금 확인, 공식 사이트, 전화 버튼으로 상세 정보를 확인하세요. 호텔을 선택하는 것만으로 예약되지는 않습니다."),
-                ("일정 진행", "순서 목록에는 호텔 출발, 관광, 식사, 호텔 복귀가 표시됩니다. 목록의 항목을 누르면 해당 단계의 안내가 열립니다. 순서대로 진행하려면 아래의 다음 단계 버튼을, 돌아가려면 이전 단계 버튼을 누르세요. 필요한 호텔이나 식당을 선택해야 다음으로 넘어갈 수 있는 단계도 있습니다."),
+                ("일정 진행", "순서 목록에는 호텔 출발, 관광, 식사, 호텔 복귀가 표시됩니다. 목록의 항목을 누르면 해당 단계의 안내가 열립니다. 순서대로 진행하려면 아래의 다음 단계 버튼을, 돌아가려면 이전 단계 버튼을 누르세요. 호텔이나 식당을 선택하지 않아도 다음 단계로 갈 수 있습니다. 다만 경로 안내에는 해당 장소를 선택해야 합니다."),
                 ("관광지와 점심 변경", "관광지 변경 또는 점심 선택 버튼을 누르고 후보를 선택하세요. 변경하면 일정의 예정 시간이 갱신됩니다. 주변 점심 식당을 검색하는 코스에서는 점심 검색 버튼으로 찾고 주소, 메뉴, 영업시간을 확인한 뒤 식당을 선택하세요. 결과가 없으면 추가 지도 검색 링크를 이용하세요."),
                 ("지도와 이동 경로", "대중교통, 도보, 자동차 경로 버튼으로 출발지와 목적지의 지도를 엽니다. 지도는 앱 안에서 표시됩니다. 대중교통 페이지에서 승차역, 환승, 소요 시간 등을 확인하세요. 지도를 닫으면 일정으로 돌아갑니다. 예정 시간은 추정치이므로 실제 출발 시간에 맞춰 경로를 확인하세요."),
                 ("저녁과 호텔 복귀", "저녁 장소는 자동, 호텔 주변, 마지막 관광지 주변 중에서 고릅니다. 자동은 관광이 18시 전에 끝나면 호텔 주변, 18시부터는 마지막 관광지 주변을 선택합니다. 저녁 검색 버튼으로 식당을 찾고 선택한 뒤 경로를 확인하세요. 식사 후에는 선택한 호텔로 돌아가는 길을 확인할 수 있습니다."),
@@ -2609,7 +2617,7 @@ private enum PlannerInstructions {
                 ("选择语言", "点击首页左侧的语言按钮，进入该语言的旅游页面。右侧的使用说明按钮只打开同一行语言的说明。关闭说明后，点击左侧语言按钮开始。在旅游页面点击选择语言，可以返回首页。"),
                 ("地区、路线和出发时间", "点击推荐路线，或按地区 → 都道府县 → 观光路线的顺序选择。修改出发时间后，各站预计时间和预计结束时间会更新。更改路线或出发时间后，行程进度会回到第一步。"),
                 ("设置酒店", "从酒店候选中选择入住地点。如已自行预订，请选择输入自己的酒店，并输入酒店名称及地区或地址。也可以通过周边酒店搜索选择候选。使用页面显示的地图、价格查询、官网、电话等按钮查看详情。选择酒店本身不会完成预订。"),
-                ("按步骤游览", "行程顺序中列出酒店出发、观光、用餐和返回酒店。点击列表中的一项，即可查看该阶段的说明。按顺序游览时，点击底部的下一步；需要返回时，点击上一步。某些阶段需要先选定酒店或餐厅，才能继续。"),
+                ("按步骤游览", "行程顺序中列出酒店出发、观光、用餐和返回酒店。点击列表中的一项，即可查看该阶段的说明。按顺序游览时，点击底部的下一步；需要返回时，点击上一步。未选择酒店或餐厅也可以进入下一步，但要查看相关路线，需要先选择地点。"),
                 ("更换景点和午餐", "点击更换景点或选择午餐按钮，再从候选中选择。更改后，行程预计时间会更新。需要搜索附近午餐的路线，请点击午餐搜索，确认餐厅地址、菜单和营业时间后选择餐厅。没有结果时，可以使用更多地图搜索链接。"),
                 ("查看地图和交通路线", "点击公共交通、步行或驾车路线按钮，打开出发地与目的地的地图。地图在应用内显示。请在公共交通页面确认上车站、换乘和所需时间等信息。关闭地图后返回行程。预计时间仅供参考，请按实际出发时间确认路线。"),
                 ("晚餐和返回酒店", "晚餐区域可选自动、酒店附近或最后景点附近。自动模式下，观光在18点前结束时选择酒店附近，18点及之后选择最后景点附近。点击晚餐搜索，选定餐厅后查看路线。餐后可以查看返回所选酒店的路线。"),
@@ -2622,7 +2630,7 @@ private enum PlannerInstructions {
                 ("Choose a language", "Tap a language button on the left of the home screen to open the planner in that language. The User guide button on the right opens instructions in the language on the same row. Close the guide, then tap the language button to begin. Use Languages in the planner to return home."),
                 ("Choose your route and start time", "Tap a featured route, or choose a region, prefecture and sightseeing route in that order. Changing the start time updates the planned times at each stop and the estimated finish time. Changing the route or start time returns your journey progress to the first stage."),
                 ("Set your hotel", "Choose a hotel from the suggestions. If you have booked elsewhere, choose Enter your own hotel and enter its name with the area or address. You can also search for nearby hotels and select a result. Use the available map, rate, website and phone buttons to check details. Selecting a hotel does not make a booking."),
-                ("Follow your itinerary", "The order list shows departure from the hotel, sightseeing, meals and return to the hotel. Tap a row to open that stage. To follow the trip in order, use the next-stage button at the bottom; use the previous-stage button to go back. Some stages require a hotel or restaurant selection before you can continue."),
+                ("Follow your itinerary", "The order list shows departure from the hotel, sightseeing, meals and return to the hotel. Tap a row to open that stage. To follow the trip in order, use the next-stage button at the bottom; use the previous-stage button to go back. You can move to the next stage before choosing a hotel or restaurant, but select one to see its directions."),
                 ("Change a stop or lunch", "Tap Swap this stop or Choose lunch and pick an alternative. The planned times update after a change. On routes that search for nearby lunch, use the lunch search button, check the address, menu and opening hours, then select a restaurant. If no results appear, use the additional map search link."),
                 ("Open maps and directions", "Use the public transport, walking or driving buttons to open a map between the origin and destination. Maps appear inside the app. Check boarding stations, transfers and travel times on the public transport page. Close the map to return to your itinerary. Planned times are estimates; check directions for your actual departure time."),
                 ("Plan dinner and return to your hotel", "Choose Auto, Near hotel or Near final stop for dinner. Auto chooses the hotel area when sightseeing ends before 18:00, and the final stop area from 18:00 onwards. Search for dinner, select a restaurant and check the directions. After dinner, view the route back to your selected hotel."),
