@@ -26,7 +26,7 @@ private enum RouteTimeEngine {
         let metres = CLLocation(latitude: a.latitude, longitude: a.longitude)
             .distance(from: CLLocation(latitude: b.latitude, longitude: b.longitude))
         // An identical map pin for two nominally different places is not a route.
-        guard metres.isFinite, metres >= 15 else { return nil }
+        guard metres.isFinite, metres >= 1 else { return nil }
         return metres
     }
 
@@ -41,13 +41,13 @@ private enum RouteTimeEngine {
         let metresPerMinute: Double
         switch mode {
         case .walking:
-            maxDistance = 8_000
-            factor = 1.4
+            maxDistance = 50_000
+            factor = 1.35
             metresPerMinute = 4_000.0 / 60
         case .automobile:
-            maxDistance = 20_000
-            factor = 1.5
-            metresPerMinute = 25_000.0 / 60
+            maxDistance = 250_000
+            factor = metres < 10_000 ? 1.4 : 1.3
+            metresPerMinute = (metres < 10_000 ? 25_000.0 : (metres < 50_000 ? 40_000.0 : 55_000.0)) / 60
         default:
             return nil  // No fictitious railway/bus timetable.
         }
@@ -1139,9 +1139,12 @@ private struct PlannerView: View {
                 CLLocationCoordinate2D(latitude: place.latitude, longitude: place.longitude)))
         }
         if let venue = route.stops.flatMap({ $0.choices }).first(where: { venueQuery($0) == clean }),
-           let prefecture = NationwideRoutes.prefectures.first(where: { $0.id == routePrefecture }) {
-            return try await venueMapItem(venue, in: prefecture)
+           let prefecture = NationwideRoutes.prefectures.first(where: { $0.id == routePrefecture }),
+           let found = try await venueMapItem(venue, in: prefecture) {
+            resolvedPlaceCache[clean] = found
+            return found
         }
+        // An unmatched sightseeing label must not block local address search.
         let prefecture = NationwideRoutes.prefectures.first(where: { $0.id == routePrefecture })
         var searches: [String] = []
         if clean == hotelQuery {
@@ -1455,10 +1458,16 @@ private struct PlannerView: View {
                 return
             }
             guard !Task.isCancelled && requestKey == hotelTravelKey else { return }
-            // Never display a fabricated time while the real map lookup is pending.
-            // Publish each result only after actual routing (or a labelled fallback).
-            // Avoid a three-request burst and show walking/driving before
-            // waiting for a rural transit lookup to finish.
+            // Show clearly labelled distance-based estimates immediately.
+            // Replace each one with the actual MapKit journey time when available.
+            hotelTravelMinutes = [:]
+            if let quickWalk = RouteTimeEngine.estimate(origin, destination, by: .walking) {
+                hotelTravelMinutes["walking"] = quickWalk
+            }
+            if let quickCar = RouteTimeEngine.estimate(origin, destination, by: .automobile) {
+                hotelTravelMinutes["taxi"] = quickCar
+            }
+            // Trains use the live Google Maps link rather than invented times.
             if let w = await travelMinutes(from: origin, to: destination, by: .walking) {
                 guard !Task.isCancelled, requestKey == hotelTravelKey else { return }
                 hotelTravelMinutes["walking"] = w
@@ -1467,10 +1476,7 @@ private struct PlannerView: View {
                 guard !Task.isCancelled, requestKey == hotelTravelKey else { return }
                 hotelTravelMinutes["taxi"] = a
             }
-            if let t = await travelMinutes(from: origin, to: destination, by: .transit) {
-                guard !Task.isCancelled, requestKey == hotelTravelKey else { return }
-                hotelTravelMinutes["transit"] = t
-            }
+            // Train timing is handled by the transit map link.
             guard !Task.isCancelled, requestKey == hotelTravelKey else { return }
             hotelTravelLoading = false
         } catch {
@@ -1625,12 +1631,13 @@ private struct PlannerView: View {
                     Text(place.name).font(.headline)
                     Text(place.address).font(.subheadline).foregroundStyle(.secondary)
                     if let url = locationURL(place.query) { journeyLink(journeyText("menuHours"), url: url) }
-                    journeyAction(journeyText(lunchSelection?.id == place.id ? "selectedLunch" : "selectLunch"), systemImage: "checkmark.circle", accent: PlannerTheme.coral) {
+                    journeyAction(journeyText(lunchSelection?.id == place.id ? "selectedLunch" : "selectLunch"), systemImage: "checkmark.circle", accent: PlannerTheme.coral, selected: lunchSelection?.id == place.id) {
                         lunchSelection = place
                     }
                 }
                 .padding(12)
-                .background(PlannerTheme.raised, in: RoundedRectangle(cornerRadius: 12))
+                .background(lunchSelection?.id == place.id ? PlannerTheme.coral.opacity(0.20) : PlannerTheme.raised, in: RoundedRectangle(cornerRadius: 12))
+                .overlay(RoundedRectangle(cornerRadius: 12).stroke(PlannerTheme.coral.opacity(lunchSelection?.id == place.id ? 1 : 0), lineWidth: 2))
             }
             if let place = lunchSelection {
                 Text("\(journeyText("selectedLunch")) · \(place.name)").font(.headline).foregroundStyle(journeyGold)
@@ -1704,12 +1711,13 @@ private struct PlannerView: View {
                     Text(place.address).font(.subheadline).foregroundStyle(.secondary)
                     Text(String(format: journeyText("distance"), locale: language.locale, arguments: [Int(place.distance.rounded())])).font(.caption).foregroundStyle(.secondary)
                     if let url = locationURL(place.query) { journeyLink(journeyText("menuHours"), url: url) }
-                    journeyAction(journeyText(dinnerSelection?.id == place.id ? "selectedDinner" : "selectDinner"), systemImage: dinnerSelection?.id == place.id ? "checkmark.circle.fill" : "fork.knife", accent: PlannerTheme.coral) {
+                    journeyAction(journeyText(dinnerSelection?.id == place.id ? "selectedDinner" : "selectDinner"), systemImage: dinnerSelection?.id == place.id ? "checkmark.circle.fill" : "fork.knife", accent: PlannerTheme.coral, selected: dinnerSelection?.id == place.id) {
                         dinnerSelection = place
                     }
                 }
                 .padding(14)
-                .background(PlannerTheme.raised, in: RoundedRectangle(cornerRadius: 12))
+                .background(dinnerSelection?.id == place.id ? PlannerTheme.coral.opacity(0.20) : PlannerTheme.raised, in: RoundedRectangle(cornerRadius: 12))
+                .overlay(RoundedRectangle(cornerRadius: 12).stroke(PlannerTheme.coral.opacity(dinnerSelection?.id == place.id ? 1 : 0), lineWidth: 2))
             }
             if let place = dinnerSelection {
                 Divider()
@@ -1894,11 +1902,18 @@ private struct PlannerView: View {
                 routeLegTimes[key] = [:]
                 return
             }
-            // Do not show rough straight-line estimates as if already verified.
-            routeLegTimes[key] = [:]
+            // First show useful, clearly labelled approximate values.
+            // Actual MapKit walking/driving times replace them as they arrive.
+            var quickTimes: [String: TravelTime] = [:]
+            if let walking = RouteTimeEngine.estimate(start, end, by: .walking) {
+                quickTimes["walking"] = walking
+            }
+            if let driving = RouteTimeEngine.estimate(start, end, by: .automobile) {
+                quickTimes["taxi"] = driving
+            }
+            routeLegTimes[key] = quickTimes
             for (mode, transport) in [("walking", MKDirectionsTransportType.walking),
-                                      ("taxi", MKDirectionsTransportType.automobile),
-                                      ("transit", MKDirectionsTransportType.transit)] {
+                                      ("taxi", MKDirectionsTransportType.automobile)] {
                 let time = await travelMinutes(from: start, to: end, by: transport)
                 guard !Task.isCancelled else { routeLegTimes[key] = nil; return }
                 if let time { routeLegTimes[key]?[mode] = time }
