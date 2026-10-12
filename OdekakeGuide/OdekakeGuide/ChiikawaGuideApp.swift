@@ -30,31 +30,10 @@ private enum RouteTimeEngine {
         return metres
     }
 
-    // Only use this as a clearly labelled planning estimate when routing fails.
-    // For distant destinations or places potentially separated by sea/mountains,
-    // a direct-line calculation is too misleading: offer the map link instead.
+    // Distance-based guesses are intentionally disabled.
     static func estimate(_ origin: MKMapItem, _ destination: MKMapItem,
                          by mode: MKDirectionsTransportType) -> TravelTime? {
-        guard let metres = straightDistance(origin, destination) else { return nil }
-        let maxDistance: Double
-        let factor: Double
-        let metresPerMinute: Double
-        switch mode {
-        case .walking:
-            maxDistance = 50_000
-            factor = 1.35
-            metresPerMinute = 4_000.0 / 60
-        case .automobile:
-            maxDistance = 250_000
-            factor = metres < 10_000 ? 1.4 : 1.3
-            metresPerMinute = (metres < 10_000 ? 25_000.0 : (metres < 50_000 ? 40_000.0 : 55_000.0)) / 60
-        default:
-            return nil  // No fictitious railway/bus timetable.
-        }
-        guard metres <= maxDistance else { return nil }
-        let estimate = (metres * factor) / metresPerMinute
-        guard estimate.isFinite, estimate > 0, estimate < Double(Int.max) else { return nil }
-        return TravelTime(minutes: max(1, Int(ceil(estimate))), isApproximate: true)
+        return nil
     }
 
     static func resolve(_ origin: MKMapItem, _ destination: MKMapItem,
@@ -85,7 +64,7 @@ private enum RouteTimeEngine {
             if attempt == 0 { try? await Task.sleep(nanoseconds: 400_000_000) }
         }
         guard !Task.isCancelled else { return nil }
-        return estimate(origin, destination, by: mode)
+        return nil  // No valid route: do not invent a travel time.
     }
 }
 
@@ -1476,15 +1455,8 @@ private struct PlannerView: View {
                 return
             }
             guard !Task.isCancelled && requestKey == hotelTravelKey else { return }
-            // Show clearly labelled distance-based estimates immediately.
-            // Replace each one with the actual MapKit journey time when available.
+            // Publish only actual calculated routes, not distance guesses.
             hotelTravelMinutes = [:]
-            if let quickWalk = RouteTimeEngine.estimate(origin, destination, by: .walking) {
-                hotelTravelMinutes["walking"] = quickWalk
-            }
-            if let quickCar = RouteTimeEngine.estimate(origin, destination, by: .automobile) {
-                hotelTravelMinutes["taxi"] = quickCar
-            }
             // Trains use the live Google Maps link rather than invented times.
             if let w = await travelMinutes(from: origin, to: destination, by: .walking) {
                 guard !Task.isCancelled, requestKey == hotelTravelKey else { return }
@@ -1910,16 +1882,8 @@ private struct PlannerView: View {
                 routeLegTimes[key] = [:]
                 return
             }
-            // First show useful, clearly labelled approximate values.
-            // Actual MapKit walking/driving times replace them as they arrive.
-            var quickTimes: [String: TravelTime] = [:]
-            if let walking = RouteTimeEngine.estimate(start, end, by: .walking) {
-                quickTimes["walking"] = walking
-            }
-            if let driving = RouteTimeEngine.estimate(start, end, by: .automobile) {
-                quickTimes["taxi"] = driving
-            }
-            routeLegTimes[key] = quickTimes
+            // Do not show estimated times while waiting for actual map routes.
+            routeLegTimes[key] = [:]
             for (mode, transport) in [("walking", MKDirectionsTransportType.walking),
                                       ("taxi", MKDirectionsTransportType.automobile)] {
                 let time = await travelMinutes(from: start, to: end, by: transport)
@@ -2679,7 +2643,7 @@ private enum HotelTravelTranslations {
         "placeUnavailable": ["場所を確認できません・地図で確認", "위치 확인 필요 · 지도 확인", "地点未确认，请查看地图", "Location unresolved · check map", "ยังระบุตำแหน่งไม่ได้ ดูแผนที่"],
         "transitUnavailable": ["地図で所要時間を確認 ↗", "지도에서 소요 시간 확인 ↗", "在地图查看所需时间 ↗", "Check travel time on map ↗", "ดูเวลาเดินทางบนแผนที่ ↗"],
         "unavailable": ["経路を取得できません", "경로를 가져올 수 없음", "无法获取路线", "Route unavailable", "ไม่พบเส้นทาง"],
-        "estimateNote": ["「概算」は距離に基づく参考時間です。通行できる道・橋・フェリー・坂道・渋滞・タクシー待ちは反映しません。実際の道順と運行は地図で確認してください。", "‘대략’은 거리 기준 참고 시간입니다. 통행 가능 여부·다리·페리·경사·정체·택시 대기는 반영하지 않습니다. 실제 경로와 운행은 지도에서 확인하세요.", "‘粗略估算’为距离推算的参考时间，不反映道路通行、桥梁、渡轮、坡道、拥堵及出租车等待。请在地图确认实际路线与班次。", "Rough estimates are distance-based guidance. They do not confirm passable roads, bridges, ferries, slopes, traffic or taxi waits. Check actual directions and services on the map.", "ค่าคร่าว ๆ คำนวณจากระยะทาง ไม่ยืนยันถนน สะพาน เรือ ทางลาด รถติด หรือเวลารอแท็กซี่ โปรดตรวจเส้นทางจริงและตารางรถในแผนที่"]
+        "estimateNote": ["表示する時間は取得できた地図経路に基づきます。取得できない場合はGoogleマップで確認してください。電車はGoogleマップで所要時間を確認できます。","표시 시간은 실제 지도 경로를 기준으로 합니다. 미확인 구간과 대중교통은 Google 지도에서 확인하세요.","时间以地图实际路线为准。未获取的路段及公共交通时间请在 Google 地图查看。","Shown times use calculated map routes. Check missing routes and transit times in Google Maps.","เวลาที่แสดงมาจากเส้นทางแผนที่ ตรวจเส้นทางที่หาไม่พบและขนส่งสาธารณะใน Google Maps"]
     ]
 }
 
@@ -3817,7 +3781,7 @@ private enum OriginalCourseText {
         "approx": ["概算", "추정", "估算", "estimate", "ประมาณ"],
         "minutes": ["分", "분", "分钟", "min", "นาที"],
         "route": ["経路を開く", "경로 열기", "打开路线", "Open directions", "เปิดเส้นทาง"],
-        "timeNote": ["時刻は到着の目安です。移動時間は地図の経路を優先し、取得できない徒歩・車は直線距離から概算します。交通機関の時刻・道路事情は地図で確認してください。", "도착 시각은 예상입니다. 도보와 차량은 경로가 없을 때 직선 거리로 추정합니다. 교통 시간표는 지도에서 확인하세요.", "到达时间为参考。步行及驾车无路线时按直线距离估算。请在地图核对班次与路况。", "Arrival times are estimates. Walking and driving fall back to straight-line distance when routing fails. Check services and traffic on the map.", "เวลาเป็นการประมาณ หากไม่พบเส้นทางเดินหรือรถจะคำนวณจากระยะตรง ตรวจสอบตารางเดินรถในแผนที่"],
+        "timeNote": ["地図経路の時間が取得できた場合だけ到着時刻を表示します。未取得の区間はGoogleマップで確認してください。","지도 경로 시간이 확인된 경우에만 도착 시각을 표시합니다. 미확인 구간은 Google 지도에서 확인하세요.","仅在获取地图路线时间后显示到达时刻。未取得的路段请在 Google 地图查看。","Arrival times appear only when route times are verified. Check missing routes in Google Maps.","จะแสดงเวลาถึงเฉพาะเมื่อได้รับเวลาจากแผนที่ ตรวจเส้นทางที่ไม่ทราบใน Google Maps"],
         "return": ["ホテルへ戻る", "호텔로 돌아가기", "返回酒店", "Return to hotel", "กลับโรงแรม"],
         "choose": ["昼食・夕食の枠も観光に変更できます。時刻は15分ずつ調整できます。", "점심·저녁도 관광으로 변경할 수 있습니다. 시간은 15분씩 조정할 수 있습니다.", "午餐和晚餐时段也可改为观光，时间可按15分钟调整。", "Lunch and dinner slots can be sightseeing instead. Adjust times in 15-minute steps.", "ช่วงมื้ออาหารเปลี่ยนเป็นเที่ยวชมได้ ปรับเวลาทีละ 15 นาที"],
         "nearSight": ["近くの観光地", "근처 관광지", "附近景点", "Nearby sights", "ที่เที่ยวใกล้เคียง"],
@@ -3913,22 +3877,21 @@ private struct OriginalCourseView: View {
         return parts?.url
     }
     private func estimatedTime(_ index: Int, mode: String) -> TravelTime? {
-        guard index > 0, let a = stops[index - 1].latitude, let b = stops[index - 1].longitude,
-              let c = stops[index].latitude, let d = stops[index].longitude else { return nil }
-        if let exact = times[legKey(index)]?[mode] { return exact }
-        guard mode == "walking" || mode == "taxi" else { return nil }
-        let source = MKMapItem(placemark: MKPlacemark(coordinate:
-            CLLocationCoordinate2D(latitude: a, longitude: b)))
-        let destination = MKMapItem(placemark: MKPlacemark(coordinate:
-            CLLocationCoordinate2D(latitude: c, longitude: d)))
-        return RouteTimeEngine.estimate(source, destination,
-            by: mode == "walking" ? .walking : .automobile)
+        guard index > 0 else { return nil }
+        return times[legKey(index)]?[mode]
+    }
+    private func hasVerifiedArrival(_ index: Int) -> Bool {
+        if index == 0 { return true }
+        for leg in 1...index {
+            if estimatedTime(leg, mode: stops[leg].mode) == nil { return false }
+        }
+        return true
     }
     private func arrival(_ index: Int) -> Int {
         guard index > 0 else { return stops[0].target }
         let previous = arrival(index - 1) + stops[index - 1].duration
         let mode = stops[index].mode
-        let travel = estimatedTime(index, mode: mode)?.minutes ?? estimatedTime(index, mode: "walking")?.minutes ?? 0
+        let travel = estimatedTime(index, mode: mode)?.minutes ?? 0 // Arrival is hidden until verified.
         return max(stops[index].target, previous + travel)
     }
 
@@ -3970,7 +3933,8 @@ private struct OriginalCourseView: View {
             HStack {
                 Text(item.kind == "return" ? t("return") : t(item.kind)).font(.headline)
                 Spacer()
-                Text(clock(arrival(index))).font(.headline.monospacedDigit()).foregroundStyle(PlannerTheme.cyan)
+                Text(hasVerifiedArrival(index) ? clock(arrival(index)) : "—")
+                    .font(.headline.monospacedDigit()).foregroundStyle(PlannerTheme.cyan)
             }
             if index > 0 && index < stops.count - 1 {
                 Picker(t("choose"), selection: binding(index, \.kind)) {
