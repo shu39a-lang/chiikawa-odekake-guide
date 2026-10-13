@@ -1,4 +1,4 @@
-name: Correct map route times
+name: Japan Day Planner - route and hotel repair
 
 on:
   workflow_dispatch:
@@ -7,244 +7,175 @@ permissions:
   contents: write
 
 jobs:
-  route-fix:
+  repair:
     runs-on: macos-15
     timeout-minutes: 55
     steps:
-      - name: Checkout latest app source
+      - name: Checkout current Japan Day Planner
         uses: actions/checkout@v4
         with:
           ref: main
           persist-credentials: true
 
-      - name: Correct location resolution and travel-time logic
+      - name: Repair hotel discovery and live route times
         shell: bash
         run: |
           set -euo pipefail
-          python3 - <<'PYTHON_FIX'
+          python3 - <<'PYTHON'
           from pathlib import Path
-          import sys
-          
-          path = Path('OdekakeGuide/OdekakeGuide/ChiikawaGuideApp.swift')
-          s = path.read_text(encoding='utf-8')
-          before = s
-          
-          
-          def replace_once(old: str, new: str, label: str):
+          p = Path('OdekakeGuide/OdekakeGuide/ChiikawaGuideApp.swift')
+          s = p.read_text(encoding='utf-8')
+          previous = s
+
+          def change(old, new, label):
               global s
               count = s.count(old)
               if count != 1:
-                  raise RuntimeError(f'{label}: expected exactly one match, found {count}. Stopped without saving.')
+                  raise RuntimeError(f'{label}: expected one unique match, got {count}. No changes saved.')
               s = s.replace(old, new, 1)
-          
-          
-          def replace_between(begin: str, end: str, new: str, label: str):
-              global s
-              if s.count(begin) != 1 or s.count(end) != 1:
-                  raise RuntimeError(f'{label}: source layout differs. Stopped without saving.')
-              a = s.index(begin)
-              b = s.index(end, a)
-              if a >= b:
-                  raise RuntimeError(f'{label}: inverted markers')
-              s = s[:a] + new + s[b:]
-          
-          
-          # A valid map route is the ONLY source of on-screen travel minutes.
-          # Straight-line distances are useful for detecting a wildly wrong map result,
-          # but never for inventing a walking or driving duration.
-          replace_between(
-              '    static func estimate(_ origin: MKMapItem, _ destination: MKMapItem,',
-              '    static func resolve(_ origin: MKMapItem, _ destination: MKMapItem,',
-              '''    static func estimate(_ origin: MKMapItem, _ destination: MKMapItem,
-                                   by mode: MKDirectionsTransportType) -> TravelTime? {
-                  // No route => no travel time. Never use direct-line distance for minutes.
-                  return nil
-              }
-          
-          ''',
-              'Disable straight-line estimated durations',
-          )
-          replace_once(
-              '        return estimate(origin, destination, by: mode)\n',
-              '        return nil // MapKit did not return a navigable route.\n',
-              'No fabricated duration when MapKit fails',
-          )
-          # Reject implausible circuitous directions for closely spaced pins; opening the
-          # directions map is safer than showing a misleading on-device route duration.
-          replace_once(
-              '                    route.distance >= straight * 0.70 &&\n',
-              '                    route.distance >= straight * 0.70 &&\n'
-              '                    route.distance <= max(straight * 7.0, 5_000.0) &&\n',
-              'Reject implausible route geometry',
-          )
-          
-          # Published Honcho street photography location and the approach to Arakurayama
-          # park. These are explicit waypoints rather than ambiguous translated titles.
-          replace_once(
-              '        case "Shimoyoshida Station":\n',
-              '''        case "Honcho Street (Fujimichi)":
-                      // Representative Honcho Street viewpoint, not the entire street.
-                      // Geotagged: https://commons.wikimedia.org/wiki/File:Honcho_Street_with_Mount_Fuji_in_the_daytime,_Fujiyoshida,_2016.jpg
-                      return CLLocationCoordinate2D(latitude: 35.492672, longitude: 138.803907)
-                  case "Arakurayama Sengen Park":
-                      // Entrance approach, rather than the top of the long stairway.
-                      // https://www.fujiyoshida.net/spot/index.php?p=12
-                      return CLLocationCoordinate2D(latitude: 35.498795, longitude: 138.799832)
-                  case "Shimoyoshida Station":
-          ''',
-              'Pin actual Fujiyoshida waypoints',
-          )
-          
-          # A map search within the same prefecture is not proof that it resolved the
-          # chosen place. Restrict this compact Fujiyoshida walking course to its area.
-          replace_once(
-              '        if hotelPlace(item, isIn: prefecture) { return true }\n',
-              '''        if route.id == "sns-fujiyoshida",
-                     let anchor = pinnedFirstVenueCoordinate {
-                      let separation = CLLocation(latitude: point.latitude, longitude: point.longitude)
-                          .distance(from: CLLocation(latitude: anchor.latitude, longitude: anchor.longitude))
-                      guard separation < 12_000 else { return false }
-                  }
-                  if hotelPlace(item, isIn: prefecture) { return true }
-          ''',
-              'Block distant same-name places in Fujiyoshida',
-          )
-          
-          # A generic neighborhood label is not a point on the map. It must be replaced
-          # by a concrete restaurant selected by the traveller or a curated example.
-          # For this photographed course, use a named real cafe with a published address.
-          replace_once(
-              '        case "Arakurayama Sengen Park":\n',
-              '''        case "FabCafe Fuji":
-                      // Locate by the operator's published address when routing.
-                      return nil
-                  case "Arakurayama Sengen Park":
-          ''',
-              'Recognize named Fujiyoshida meal',
-          )
-          
-          # The curated SNS course had a purely invented 'Lunch in Shimoyoshida' waypoint.
-          # Replace that SINGLE fictional destination with a real identifiable business.
-          old_fictional_meal = '["Lunch in Shimoyoshida","Check official information and current access before visiting.","https://www.google.com/maps/search/?api=1&query=%E4%B8%8B%E5%90%89%E7%94%B0%E3%81%AE%E5%95%86%E5%BA%97%E8%A1%97%E3%81%A7%E6%98%BC%E9%A3%9F%2C+Japan"]'
-          new_real_meal = '["FabCafe Fuji","Food and drinks at Shimoyoshida 3-5-16; check opening days.","https://fabcafe.com/jp/fuji/"]'
-          replace_once(old_fictional_meal, new_real_meal, 'Use a real Fujiyoshida lunch venue')
-          
-          # Ensure map lookup for this business is tied to the published street address;
-          # changing one curated stop does not affect existing choices on other routes.
-          replace_once(
-              '        let expected = localVenueName(venue)\n',
-              '''        if venue.name == "FabCafe Fuji" {
-                      let request = MKLocalSearch.Request()
-                      request.naturalLanguageQuery = "FabCafe Fuji 山梨県富士吉田市下吉田3丁目5-16"
-                      request.region = MKCoordinateRegion(
-                          center: CLLocationCoordinate2D(latitude: 35.49794, longitude: 138.80363),
-                          latitudinalMeters: 10_000, longitudinalMeters: 10_000)
-                      if let response = try? await MKLocalSearch(request: request).start(),
-                         let item = response.mapItems.first(where: { candidate in
-                             let name = (candidate.name ?? "").lowercased()
-                             return (name.contains("fabcafe") || name.contains("ファブカフェ"))
-                                 && isLocalRoutePlace(candidate, in: prefecture)
-                         }) {
-                          resolvedPlaceCache[cacheKey] = item
-                          return item
+
+          # Transit: MapKit calculates actual public-transport ETA via calculateETA(),
+          # not via unsupported transit route geometry. Return no time if unavailable.
+          change(
+              '        guard let straight = straightDistance(origin, destination) else { return nil }\n        // MapKit supplies real route length',
+              '''        guard let straight = straightDistance(origin, destination) else { return nil }
+                  // Apple MapKit supports public-transport ETA, not full transit geometry.
+                  if mode == .transit {
+                      for attempt in 0..<2 {
+                          guard !Task.isCancelled else { return nil }
+                          let request = MKDirections.Request()
+                          request.source = origin
+                          request.destination = destination
+                          request.transportType = .transit
+                          request.departureDate = Date()
+                          if let eta = try? await MKDirections(request: request).calculateETA(),
+                             eta.expectedTravelTime.isFinite, eta.expectedTravelTime > 0,
+                             eta.expectedTravelTime / 60 < Double(Int.max) {
+                              return TravelTime(minutes: max(1, Int(ceil(eta.expectedTravelTime / 60))),
+                                                isApproximate: false)
+                          }
+                          if attempt == 0 { try? await Task.sleep(nanoseconds: 400_000_000) }
                       }
                       return nil
                   }
-                  let expected = localVenueName(venue)
-          ''',
-              'Verify named cafe before accepting its map coordinates',
-          )
-          
-          # Do not pre-fill hotel travel times from straight-line distance. Query
-          # actual walking, driving and transit MapKit routes with original endpoints.
-          replace_between(
-              '            // Show clearly labelled distance-based estimates immediately.\n',
-              '            // Train timing is handled by the transit map link.\n',
-              '''            hotelTravelMinutes = [:]
-                      for (key, transport) in [("walking", MKDirectionsTransportType.walking),
-                                               ("taxi", MKDirectionsTransportType.automobile),
-                                               ("transit", MKDirectionsTransportType.transit)] {
-                          guard !Task.isCancelled, requestKey == hotelTravelKey else { return }
-                          if let routeTime = await travelMinutes(from: origin, to: destination, by: transport) {
+                  // MapKit supplies real route length''',
+              'Use actual transit ETA')
+
+          change(
+              '            // Trains use the live Google Maps link rather than invented times.\n            if let w = await travelMinutes(from: origin, to: destination, by: .walking) {',
+              '''            // Fetch public-transport ETA when the map service provides one.
+                          if let train = await travelMinutes(from: origin, to: destination, by: .transit) {
                               guard !Task.isCancelled, requestKey == hotelTravelKey else { return }
-                              hotelTravelMinutes[key] = routeTime
+                              hotelTravelMinutes["transit"] = train
                           }
-                      }
-          ''',
-              'Map-routed hotel travel time only',
-          )
-          replace_once(
-              '            // Train timing is handled by the transit map link.\n',
-              '            // Transit falls back to the map link if MapKit has no route.\n',
-              'Transit description',
-          )
-          
-          replace_between(
-              '            // First show useful, clearly labelled approximate values.\n',
-              '        } catch {\n            if !Task.isCancelled { routeLegTimes[key] = [:] }\n',
-              '''            routeLegTimes[key] = [:]
-                      for (mode, transport) in [("walking", MKDirectionsTransportType.walking),
-                                                ("taxi", MKDirectionsTransportType.automobile),
-                                                ("transit", MKDirectionsTransportType.transit)] {
-                          guard !Task.isCancelled else { routeLegTimes[key] = nil; return }
-                          if let time = await travelMinutes(from: start, to: end, by: transport) {
-                              guard !Task.isCancelled else { routeLegTimes[key] = nil; return }
-                              routeLegTimes[key]?[mode] = time
+                          if let w = await travelMinutes(from: origin, to: destination, by: .walking) {''',
+              'Hotel public-transport time')
+
+          change(
+              '            for (mode, transport) in [("walking", MKDirectionsTransportType.walking),\n                                      ("taxi", MKDirectionsTransportType.automobile)] {',
+              '''            for (mode, transport) in [("transit", MKDirectionsTransportType.transit),
+                                                ("walking", MKDirectionsTransportType.walking),
+                                                ("taxi", MKDirectionsTransportType.automobile)] {''',
+              'Sightseeing and meal transit times')
+
+          # A landmark with a known coordinate must never fail just because Apple
+          # Maps cannot find a POI under the displayed name.
+          change(
+              '''                let first = try await firstVenueMapItem(in: prefecture)
+                          guard hotelSearchID == token else { return }
+                          guard let first else {
+                              hotelSearching = false; hotelSearchError = hotelResults.isEmpty; return
                           }
-                      }
-          ''',
-              'Map-routed travel times for every sightseeing and meal transfer',
-          )
-          
-          # On user-created courses the arrival time may remain a planning target, but
-          # calculated journey times must never silently fall back to straight lines.
-          replace_between(
-              '    private func estimatedTime(_ index: Int, mode: String) -> TravelTime? {\n',
-              '    private func arrival(_ index: Int) -> Int {\n',
-              '''    private func estimatedTime(_ index: Int, mode: String) -> TravelTime? {
-                  guard index > 0, stops.indices.contains(index) else { return nil }
-                  return times[legKey(index)]?[mode]
-              }
-          ''',
-              'Remove fictional durations from custom courses',
-          )
-          
-          # If a custom itinerary has no retrieved route, do not claim that travel takes
-          # zero minutes in arrival calculations. Keep the next user-selected target time.
-          replace_once(
-              '        let travel = estimatedTime(index, mode: mode)?.minutes ?? estimatedTime(index, mode: "walking")?.minutes ?? 0\n',
-              '''        let knownTravel = estimatedTime(index, mode: mode)?.minutes
-                  let travel = knownTravel ?? 0  // Missing time is unknown, NOT a confirmed zero-minute trip.
-          ''',
-              'Make missing custom itinerary time explicit in source',
-          )
-          
-          # Never show a misleading statement that fictional durations are still used.
-          lines = s.splitlines(keepends=True)
-          for i, line in enumerate(lines):
-              if '        "estimateNote": [' in line:
-                  lines[i] = '''        "estimateNote": ["表示する分数は地図の経路検索で取得した時間です。取得できない場合は地図を開いて所要時間を確認してください。渋滞・臨時交通規制・運休等で変わる場合があります。", "표시된 시간은 지도 경로 계산에서 가져옵니다. 경로를 찾지 못하면 지도를 열어 확인해 주세요. 교통 상황에 따라 달라질 수 있습니다.", "所显示时间来自地图路线计算。无法取得路线时请打开地图核对。实际时间会因交通变化。", "Shown times come from a map route calculation. If no route is available, check the map. Traffic and closures can change times.", "เวลาที่แสดงมาจากเส้นทางในแผนที่ หากไม่มีเส้นทางให้เปิดแผนที่ตรวจสอบ การจราจรอาจเปลี่ยนเวลาได้"],\n'''
-              if '        "timeNote": [' in line:
-                  lines[i] = '''        "timeNote": ["到着時刻は計画用の目安です。移動の分数は地図から経路を取得できた場合のみ表示します。未取得の区間は地図で確認してください。", "도착 시각은 계획상 목표입니다. 이동 시간은 지도 경로를 찾았을 때만 표시됩니다. 미확인 구간은 지도를 확인하세요.", "抵达时刻仅供规划。仅在地图路线可用时显示行程分钟数，否则请查看地图。", "Arrival times are planning targets. Journey minutes appear only for routes found on the map. Check unverified legs in the map.", "เวลาถึงเป็นเป้าหมายของแผน เวลาเดินทางจะแสดงเมื่อพบเส้นทางจริงในแผนที่เท่านั้น"],\n'''
-          s = ''.join(lines)
-          
-          assert 'return estimate(origin, destination, by: mode)' not in s
-          assert 'quickWalk = RouteTimeEngine.estimate' not in s
-          assert 'quickTimes["walking"]' not in s
-          assert 'return RouteTimeEngine.estimate' not in s
-          assert 'route.distance <= max(straight * 7.0, 5_000.0)' in s
-          assert 'case "Honcho Street (Fujimichi)"' in s
-          assert 'case "Arakurayama Sengen Park"' in s
-          assert '"FabCafe Fuji","Food and drinks' in s
-          assert before != s
-          path.write_text(s, encoding='utf-8')
-          print('Route-time correction written:', path)
-          print('Characters before:', len(before), 'after:', len(s))
-          PYTHON_FIX
+                          let coordinate = first.placemark.coordinate''',
+              '''                let coordinate: CLLocationCoordinate2D
+                          if let pinned = pinnedFirstVenueCoordinate {
+                              coordinate = pinned
+                          } else if let first = try await firstVenueMapItem(in: prefecture) {
+                              coordinate = first.placemark.coordinate
+                          } else {
+                              hotelSearching = false
+                              hotelSearchError = hotelResults.isEmpty
+                              return
+                          }
+                          guard hotelSearchID == token else { return }''',
+              'Verified destination anchor for hotel lookup')
+
+          # Reduce repeated network searches (throttling), enlarge radius by need.
+          change('for radius in [2000.0, 5000.0, 10000.0, 25000.0, 50000.0]',
+                 'for radius in [2500.0, 8000.0, 20000.0, 40000.0]', 'Efficient nearby hotel radius')
+          change('for term in ["ホテル", "旅館", "宿泊施設"]',
+                 'for term in ["ホテル", "旅館"]', 'Avoid redundant hotel requests')
+
+          # If generic hotel map results are sparse, resolve registered names to
+          # real on-map hotel coordinates and reject results outside the local area.
+          change(
+              '''                    if suggestions.count >= desiredCount { break }
+                          }
+                          if !suggestions.isEmpty {''',
+              '''                    if suggestions.count >= desiredCount { break }
+                          }
+                          if suggestions.count < desiredCount {
+                              for hotel in registeredHotels().prefix(5) {
+                                  guard hotelSearchID == token, !Task.isCancelled else { return }
+                                  let request = MKLocalSearch.Request()
+                                  request.naturalLanguageQuery = hotel.lookupQuery ?? "\\(hotel.name), \\(hotel.address)"
+                                  request.resultTypes = [.address, .pointOfInterest]
+                                  request.region = MKCoordinateRegion(center: coordinate,
+                                      latitudinalMeters: 80_000, longitudinalMeters: 80_000)
+                                  if let response = try? await MKLocalSearch(request: request).start() {
+                                      for item in response.mapItems {
+                                          guard let name = item.name, !name.isEmpty else { continue }
+                                          let point = item.placemark.coordinate
+                                          guard CLLocationCoordinate2DIsValid(point) else { continue }
+                                          let metres = center.distance(from: CLLocation(
+                                              latitude: point.latitude, longitude: point.longitude))
+                                          guard metres < 40_000,
+                                                (name.localizedCaseInsensitiveContains(hotel.name)
+                                                 || hotel.name.localizedCaseInsensitiveContains(name)) else { continue }
+                                          let normalized = name.folding(options: [.caseInsensitive, .widthInsensitive], locale: .current)
+                                          guard seen.insert(normalized).inserted else { continue }
+                                          suggestions.append(HotelSuggestion(id: "resolved|\\(hotel.id)", name: name,
+                                              address: hotel.address, latitude: point.latitude,
+                                              longitude: point.longitude, phone: hotel.phone,
+                                              website: hotel.website, distance: metres,
+                                              anchorLatitude: coordinate.latitude,
+                                              anchorLongitude: coordinate.longitude))
+                                          hotelResults = Array(suggestions.sorted { $0.distance < $1.distance }.prefix(5))
+                                          break
+                                      }
+                                  }
+                                  if suggestions.count >= desiredCount { break }
+                              }
+                          }
+                          if !suggestions.isEmpty {''',
+              'Confirm registered nearby hotels using actual map locations')
+
+          # Do not confuse an arbitrary 25-minute planning allowance with
+          # route timings computed by the actual map engine.
+          change(
+              '''            Text(String(format: extra("planningGap"), locale: language.locale, arguments: [route.gap]))
+                          .font(.caption).foregroundStyle(.secondary)
+                      routeLinks(origin: venueQuery(from), destination: venueQuery(to))''',
+              '            routeLinks(origin: venueQuery(from), destination: venueQuery(to))',
+              'Remove misleading preset time from direction card')
+          change('"findHotels": ["出発地近くのホテルを探す",',
+                 '"findHotels": ["地図から近くのホテルを探す（最大5件）",',
+                 'Show the repaired hotel search on screen')
+          change('"estimateNote": ["表示する時間は取得できた地図経路に基づきます。取得できない場合はGoogleマップで確認してください。電車はGoogleマップで所要時間を確認できます。",',
+                 '"estimateNote": ["徒歩・車は地図経路、電車は公共交通の到着予測から取得します。取得できない場合はGoogleマップで確認してください。",',
+                 'Describe true map source of displayed travel time')
+
+          assert s != previous
+          assert 'calculateETA()' in s
+          assert '("transit", MKDirectionsTransportType.transit)' in s
+          assert '地図から近くのホテルを探す（最大5件）' in s
+          p.write_text(s, encoding='utf-8')
+          print('Updated travel-time and hotel source:', len(s), 'characters')
+          PYTHON
           git diff --check
           git diff --stat
 
-      - name: Compile corrected iOS app before publishing source
+      - name: Compile repaired app before committing
         shell: bash
         run: |
           set -euo pipefail
@@ -257,7 +188,7 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             build
 
-      - name: Commit corrected Swift only after compile succeeds
+      - name: Save repaired Swift after successful compile
         shell: bash
         run: |
           set -euo pipefail
@@ -265,8 +196,9 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add OdekakeGuide/OdekakeGuide/ChiikawaGuideApp.swift
           if git diff --cached --quiet; then
-            echo 'No source changes; nothing to commit.'
+            echo 'No source change; nothing to commit.'
           else
-            git commit -m 'Fix unreliable journey times with map-routed durations'
+            git commit -m 'Repair actual transit ETAs and hotel search'
+            git pull --rebase origin main
             git push origin HEAD:main
           fi
