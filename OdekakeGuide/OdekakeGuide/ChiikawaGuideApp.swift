@@ -39,6 +39,25 @@ private enum RouteTimeEngine {
     static func resolve(_ origin: MKMapItem, _ destination: MKMapItem,
                         by mode: MKDirectionsTransportType) async -> TravelTime? {
         guard let straight = straightDistance(origin, destination) else { return nil }
+        // Apple MapKit supports public-transport ETA, not full transit geometry.
+        if mode == .transit {
+            for attempt in 0..<2 {
+                guard !Task.isCancelled else { return nil }
+                let request = MKDirections.Request()
+                request.source = origin
+                request.destination = destination
+                request.transportType = .transit
+                request.departureDate = Date()
+                if let eta = try? await MKDirections(request: request).calculateETA(),
+                   eta.expectedTravelTime.isFinite, eta.expectedTravelTime > 0,
+                   eta.expectedTravelTime / 60 < Double(Int.max) {
+                    return TravelTime(minutes: max(1, Int(ceil(eta.expectedTravelTime / 60))),
+                                      isApproximate: false)
+                }
+                if attempt == 0 { try? await Task.sleep(nanoseconds: 400_000_000) }
+            }
+            return nil
+        }
         // MapKit supplies real route length and expected travel time, rather
         // than an estimate from the straight-line distance between two pins.
         for attempt in 0..<2 {
@@ -1268,12 +1287,17 @@ private struct PlannerView: View {
         hotelResults = knownLocalHotelFallbacks(near: pinnedFirstVenueCoordinate)
         Task { @MainActor in
             do {
-                let first = try await firstVenueMapItem(in: prefecture)
-                guard hotelSearchID == token else { return }
-                guard let first else {
-                    hotelSearching = false; hotelSearchError = hotelResults.isEmpty; return
+                let coordinate: CLLocationCoordinate2D
+                if let pinned = pinnedFirstVenueCoordinate {
+                    coordinate = pinned
+                } else if let first = try await firstVenueMapItem(in: prefecture) {
+                    coordinate = first.placemark.coordinate
+                } else {
+                    hotelSearching = false
+                    hotelSearchError = hotelResults.isEmpty
+                    return
                 }
-                let coordinate = first.placemark.coordinate
+                guard hotelSearchID == token else { return }
                 guard CLLocationCoordinate2DIsValid(coordinate),
                       abs(coordinate.latitude) > 0.01, abs(coordinate.longitude) > 0.01 else {
                     hotelSearching = false
@@ -1300,7 +1324,7 @@ private struct PlannerView: View {
                 // Try to reach five local hotels in the three main metropolitan
                 // areas; in smaller regions, search outward until three are found.
                 let desiredCount = ["tokyo", "osaka", "kyoto"].contains(routePrefecture) ? 5 : 3
-                for radius in [2000.0, 5000.0, 10000.0, 25000.0, 50000.0] {
+                for radius in [2500.0, 8000.0, 20000.0, 40000.0] {
                     guard hotelSearchID == token, !Task.isCancelled else { return }
                     let poi = MKLocalPointsOfInterestRequest(center: coordinate, radius: radius)
                     poi.pointOfInterestFilter = MKPointOfInterestFilter(including: [.hotel])
@@ -1311,7 +1335,7 @@ private struct PlannerView: View {
                     } catch {
                         guard hotelSearchID == token else { return }
                     }
-                    for term in ["ホテル", "旅館", "宿泊施設"] {
+                    for term in ["ホテル", "旅館"] {
                         let request = MKLocalSearch.Request()
                         request.naturalLanguageQuery = term
                         request.resultTypes = [.address, .pointOfInterest]
@@ -1347,6 +1371,39 @@ private struct PlannerView: View {
                     }
                     hotelResults = Array(suggestions.sorted { $0.distance < $1.distance }.prefix(5))
                     if suggestions.count >= desiredCount { break }
+                }
+                if suggestions.count < desiredCount {
+                    for hotel in registeredHotels().prefix(5) {
+                        guard hotelSearchID == token, !Task.isCancelled else { return }
+                        let request = MKLocalSearch.Request()
+                        request.naturalLanguageQuery = hotel.lookupQuery ?? "\(hotel.name), \(hotel.address)"
+                        request.resultTypes = [.address, .pointOfInterest]
+                        request.region = MKCoordinateRegion(center: coordinate,
+                            latitudinalMeters: 80_000, longitudinalMeters: 80_000)
+                        if let response = try? await MKLocalSearch(request: request).start() {
+                            for item in response.mapItems {
+                                guard let name = item.name, !name.isEmpty else { continue }
+                                let point = item.placemark.coordinate
+                                guard CLLocationCoordinate2DIsValid(point) else { continue }
+                                let metres = center.distance(from: CLLocation(
+                                    latitude: point.latitude, longitude: point.longitude))
+                                guard metres < 40_000,
+                                      (name.localizedCaseInsensitiveContains(hotel.name)
+                                       || hotel.name.localizedCaseInsensitiveContains(name)) else { continue }
+                                let normalized = name.folding(options: [.caseInsensitive, .widthInsensitive], locale: .current)
+                                guard seen.insert(normalized).inserted else { continue }
+                                suggestions.append(HotelSuggestion(id: "resolved|\(hotel.id)", name: name,
+                                    address: hotel.address, latitude: point.latitude,
+                                    longitude: point.longitude, phone: hotel.phone,
+                                    website: hotel.website, distance: metres,
+                                    anchorLatitude: coordinate.latitude,
+                                    anchorLongitude: coordinate.longitude))
+                                hotelResults = Array(suggestions.sorted { $0.distance < $1.distance }.prefix(5))
+                                break
+                            }
+                        }
+                        if suggestions.count >= desiredCount { break }
+                    }
                 }
                 if !suggestions.isEmpty {
                     hotelResults = Array(suggestions.sorted { $0.distance < $1.distance }.prefix(5))
@@ -1457,8 +1514,12 @@ private struct PlannerView: View {
             guard !Task.isCancelled && requestKey == hotelTravelKey else { return }
             // Publish only actual calculated routes, not distance guesses.
             hotelTravelMinutes = [:]
-            // Trains use the live Google Maps link rather than invented times.
-            if let w = await travelMinutes(from: origin, to: destination, by: .walking) {
+            // Fetch public-transport ETA when the map service provides one.
+                if let train = await travelMinutes(from: origin, to: destination, by: .transit) {
+                    guard !Task.isCancelled, requestKey == hotelTravelKey else { return }
+                    hotelTravelMinutes["transit"] = train
+                }
+                if let w = await travelMinutes(from: origin, to: destination, by: .walking) {
                 guard !Task.isCancelled, requestKey == hotelTravelKey else { return }
                 hotelTravelMinutes["walking"] = w
             }
@@ -1884,7 +1945,8 @@ private struct PlannerView: View {
             }
             // Do not show estimated times while waiting for actual map routes.
             routeLegTimes[key] = [:]
-            for (mode, transport) in [("walking", MKDirectionsTransportType.walking),
+            for (mode, transport) in [("transit", MKDirectionsTransportType.transit),
+                                      ("walking", MKDirectionsTransportType.walking),
                                       ("taxi", MKDirectionsTransportType.automobile)] {
                 let time = await travelMinutes(from: start, to: end, by: transport)
                 guard !Task.isCancelled else { routeLegTimes[key] = nil; return }
@@ -1987,8 +2049,6 @@ private struct PlannerView: View {
                     translatedGuideLink(extra("officialAccess"), url: url)
                 }
             }
-            Text(String(format: extra("planningGap"), locale: language.locale, arguments: [route.gap]))
-                .font(.caption).foregroundStyle(.secondary)
             routeLinks(origin: venueQuery(from), destination: venueQuery(to))
             Text(extra("liveNote")).font(.footnote).foregroundStyle(.secondary)
         }
@@ -2643,7 +2703,7 @@ private enum HotelTravelTranslations {
         "placeUnavailable": ["場所を確認できません・地図で確認", "위치 확인 필요 · 지도 확인", "地点未确认，请查看地图", "Location unresolved · check map", "ยังระบุตำแหน่งไม่ได้ ดูแผนที่"],
         "transitUnavailable": ["地図で所要時間を確認 ↗", "지도에서 소요 시간 확인 ↗", "在地图查看所需时间 ↗", "Check travel time on map ↗", "ดูเวลาเดินทางบนแผนที่ ↗"],
         "unavailable": ["経路を取得できません", "경로를 가져올 수 없음", "无法获取路线", "Route unavailable", "ไม่พบเส้นทาง"],
-        "estimateNote": ["表示する時間は取得できた地図経路に基づきます。取得できない場合はGoogleマップで確認してください。電車はGoogleマップで所要時間を確認できます。","표시 시간은 실제 지도 경로를 기준으로 합니다. 미확인 구간과 대중교통은 Google 지도에서 확인하세요.","时间以地图实际路线为准。未获取的路段及公共交通时间请在 Google 地图查看。","Shown times use calculated map routes. Check missing routes and transit times in Google Maps.","เวลาที่แสดงมาจากเส้นทางแผนที่ ตรวจเส้นทางที่หาไม่พบและขนส่งสาธารณะใน Google Maps"]
+        "estimateNote": ["徒歩・車は地図経路、電車は公共交通の到着予測から取得します。取得できない場合はGoogleマップで確認してください。","표시 시간은 실제 지도 경로를 기준으로 합니다. 미확인 구간과 대중교통은 Google 지도에서 확인하세요.","时间以地图实际路线为准。未获取的路段及公共交通时间请在 Google 地图查看。","Shown times use calculated map routes. Check missing routes and transit times in Google Maps.","เวลาที่แสดงมาจากเส้นทางแผนที่ ตรวจเส้นทางที่หาไม่พบและขนส่งสาธารณะใน Google Maps"]
     ]
 }
 
@@ -3266,7 +3326,7 @@ private enum JourneyTranslations {
         "prefecture": ["都道府県", "도도부현", "都道府县", "Prefecture", "จังหวัด"],
         "courseCount": ["この都道府県：%dコース", "이 지역: %d개 코스", "该地区：%d条路线", "%d routes in this prefecture", "%d เส้นทางในจังหวัดนี้"],
         "placeMap": ["地図・現地情報", "지도·현지 정보", "地图・当地信息", "Map and local details", "แผนที่และข้อมูลสถานที่"],
-        "findHotels": ["出発地近くのホテルを探す", "출발지 주변 호텔 찾기", "查找起点附近的酒店", "Find hotels near the first stop", "ค้นหาโรงแรมใกล้จุดแรก"],
+        "findHotels": ["地図から近くのホテルを探す（最大5件）", "출발지 주변 호텔 찾기", "查找起点附近的酒店", "Find hotels near the first stop", "ค้นหาโรงแรมใกล้จุดแรก"],
         "searchingHotels": ["近くのホテルを検索中…", "주변 호텔 검색 중…", "正在搜索附近酒店…", "Searching nearby hotels…", "กำลังค้นหาโรงแรมใกล้เคียง…"],
         "hotelsUnavailable": ["ホテルを取得できませんでした。再検索するか、ホテル名・住所を入力してください。", "호텔을 찾지 못했습니다. 다시 검색하거나 호텔 이름과 주소를 입력하세요.", "无法获取酒店。请重试或输入酒店名称与地址。", "No hotels were found. Retry or enter a hotel name and address.", "ไม่พบโรงแรม ลองอีกครั้งหรือระบุชื่อและที่อยู่โรงแรม"],
         "chooseThisHotel": ["このホテルを選ぶ", "이 호텔 선택", "选择这家酒店", "Choose this hotel", "เลือกโรงแรมนี้"],
