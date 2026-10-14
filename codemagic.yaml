@@ -56,14 +56,21 @@ workflows:
           PY
       - name: 署名プロファイルを設定
         script: xcode-project use-profiles
-      - name: iPhone用IPAを作成
+      - name: iPhone用IPAを作成（失敗時は原因を表示）
         script: |
-          xcode-project build-ipa \
+          if xcode-project build-ipa \
             --project OdekakeGuide.xcodeproj \
-            --scheme OdekakeGuide
+            --scheme OdekakeGuide; then
+            echo 'iPhone archive succeeded.'
+          else
+            echo '======== XCODE ERROR DETAILS ========'
+            grep -nEi 'error:|provisioning|entitlement|signing|codesign|certificate|No profiles|BUILD FAILED' /tmp/xcodebuild_logs/*.log | tail -n 70 || true
+            echo '======== FULL LOGS IN ARTIFACTS ========'
+            exit 65
+          fi
     artifacts:
       - build/ios/ipa/*.ipa
+      - /tmp/xcodebuild_logs/*.log
     publishing:
       app_store_connect:
         auth: integration
-
