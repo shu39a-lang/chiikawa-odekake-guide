@@ -6,6 +6,133 @@ import Foundation
 import MapKit
 import CoreLocation
 import WebKit
+import FirebaseCore
+import FirebaseAppCheck
+
+
+// Network client for replacing MapKit calls. No MapKit import is required.
+struct JPPoint: Codable, Equatable {
+    let lat: Double
+    let lng: Double
+}
+struct JPPlace: Codable, Identifiable {
+    let id: String
+    let name: String
+    let address: String
+    let lat: Double
+    let lng: Double
+    let type: String
+    let distanceMeters: Int?
+    let mapsUrl: URL?
+    var point: JPPoint { JPPoint(lat: lat, lng: lng) }
+}
+struct JPPlaceResults: Codable { let places: [JPPlace]; let mustSelect: Bool }
+struct JPHotelResults: Codable {
+    let hotels: [JPPlace]
+    let found: Int
+    let searchedRadiusMeters: Int
+    let requiresSelection: Bool
+    let sort: String
+    let distanceNote: String
+    let source: String
+    let message: String?
+    let mapsSearchUrl: URL
+}
+struct JPRestaurantResults: Codable { let restaurants: [JPPlace]; let requiresSelection: Bool }
+struct JPPlaceDetails: Codable {
+    let id: String
+    let name: String
+    let address: String
+    let lat: Double
+    let lng: Double
+    let type: String
+    let distanceMeters: Int?
+    let mapsUrl: URL?
+    let phone: String?
+    let website: URL?
+    let source: String
+}
+struct JPRoute: Codable { let minutes: Int; let source: String }
+struct JPLinks: Codable { let walking: URL; let driving: URL; let transit: URL }
+struct JPRouteResponse: Codable {
+    let walking: JPRoute?
+    let driving: JPRoute?
+    let transit: JPRoute? // Shown only when a real Google transit route is available.
+    let links: JPLinks
+    let transitMessage: String
+}
+enum JPGatewayError: LocalizedError {
+    case unconfigured, invalidResponse
+    var errorDescription: String? {
+        switch self {
+        case .unconfigured: "Google経路サーバーが未設定です。"
+        case .invalidResponse: "Googleから施設または経路を取得できませんでした。"
+        }
+    }
+}
+final class GoogleRouteClient {
+    let gateway: URL
+    init(gateway: URL) { self.gateway=gateway }
+    private func post<R:Decodable, B:Encodable>(_ path:String, body:B) async throws -> R {
+        guard gateway.scheme=="https" else { throw JPGatewayError.unconfigured }
+        var request=URLRequest(url:gateway.appendingPathComponent(path))
+        request.httpMethod="POST"
+        request.timeoutInterval=25
+        request.setValue("application/json",forHTTPHeaderField:"Content-Type")
+        // Ephemeral, device-attested Firebase token (NOT a static secret in the IPA).
+        let verifiedToken=try await AppCheck.appCheck().token(forcingRefresh:false)
+        request.setValue(verifiedToken.token,forHTTPHeaderField:"X-Firebase-AppCheck")
+        request.httpBody=try JSONEncoder().encode(body)
+        let (bytes,response)=try await URLSession.shared.data(for:request)
+        guard let status=response as? HTTPURLResponse,
+              (200..<300).contains(status.statusCode) else {throw JPGatewayError.invalidResponse}
+        return try JSONDecoder().decode(R.self,from:bytes)
+    }
+    func searchPlaces(_ query:String, near center:JPPoint? = nil, radius:Int = 7000) async throws -> [JPPlace] {
+        struct Body:Encodable {let query:String;let center:JPPoint?;let radiusMeters:Int;let maxResults:Int}
+        let result:JPPlaceResults=try await post("api/places",body:Body(query:query,center:center,radiusMeters:radius,maxResults:5))
+        return result.places
+    }
+    func hotels(near center:JPPoint, maxResults:Int = 5) async throws -> JPHotelResults {
+        struct Body:Encodable {let center:JPPoint;let maxResults:Int}
+        return try await post("api/hotels",body:Body(center:center,maxResults:maxResults))
+    }
+    func restaurants(near center:JPPoint, maxResults:Int = 8) async throws -> JPRestaurantResults {
+        struct Body:Encodable {let center:JPPoint;let maxResults:Int}
+        return try await post("api/restaurants",body:Body(center:center,maxResults:maxResults))
+    }
+    func details(for placeId:String) async throws -> JPPlaceDetails {
+        struct Body:Encodable {let placeId:String}
+        return try await post("api/place-details",body:Body(placeId:placeId))
+    }
+    func routes(from origin:JPPoint,to destination:JPPoint) async throws -> JPRouteResponse {
+        struct Body:Encodable {let origin:JPPoint;let destination:JPPoint}
+        return try await post("api/routes",body:Body(origin:origin,destination:destination))
+    }
+}
+
+
+// Register App Attest in Firebase console and set its entitlement to production.
+// Call FirebaseBootstrap.configure() in the existing @main App's init().
+final class JapanDayAppCheckFactory: NSObject, AppCheckProviderFactory {
+    func createProvider(with app: FirebaseApp) -> AppCheckProvider? {
+        if #available(iOS 14.0, *) { return AppAttestProvider(app: app) }
+        return DeviceCheckProvider(app: app)
+    }
+}
+enum FirebaseBootstrap {
+    static func configure() {
+        AppCheck.setAppCheckProviderFactory(JapanDayAppCheckFactory())
+        FirebaseApp.configure() // Requires GoogleService-Info.plist in the signed iOS target.
+    }
+}
+
+
+private enum GoogleAPISingleton {
+    // Production endpoint already deployed under the user's Google Cloud project.
+    static let shared = GoogleRouteClient(gateway: URL(string:
+        "https://japan-day-planner-api-759944709116.asia-northeast1.run.app")!)
+}
 
 private struct TravelTime {
     let minutes: Int
@@ -19,148 +146,74 @@ private struct TravelTime {
 // Route-time source of truth for EVERY screen in the app.
 // Returns a duration only after a real map response; no straight-line guesses.
 @MainActor
+
+// Google-only routing. MapKit data classes remain solely as legacy coordinate adapters.
 private enum RouteTimeEngine {
-    private struct CacheValue {
-        let minutes: Int
-        let created: Date
-    }
-    private static var successfulRoutes: [String: CacheValue] = [:]
-
-    private static func coordinates(_ item: MKMapItem) -> CLLocationCoordinate2D? {
-        let point = item.placemark.coordinate
-        guard CLLocationCoordinate2DIsValid(point),
-              abs(point.latitude) > 0.01, abs(point.longitude) > 0.01 else { return nil }
-        return point
-    }
-
+    private static var lastResults: [String:(Date, JPRouteResponse)] = [:]
     static func estimate(_ origin: MKMapItem, _ destination: MKMapItem,
-                         by mode: MKDirectionsTransportType) -> TravelTime? {
-        nil // Never convert air distance into minutes.
-    }
-
+                         by mode: MKDirectionsTransportType) -> TravelTime? { nil }
     static func resolve(_ origin: MKMapItem, _ destination: MKMapItem,
                         by mode: MKDirectionsTransportType) async -> TravelTime? {
-        guard let start = coordinates(origin), let end = coordinates(destination) else { return nil }
-        let direct = CLLocation(latitude: start.latitude, longitude: start.longitude)
-            .distance(from: CLLocation(latitude: end.latitude, longitude: end.longitude))
-        guard direct.isFinite, direct >= 5 else { return nil }
-
-        let modeKey = mode == .walking ? "walking" : mode == .automobile ? "driving" : "transit"
-        let key = String(format: "%.6f,%.6f|%.6f,%.6f|%@", start.latitude,
-            start.longitude, end.latitude, end.longitude, modeKey)
-        if let saved = successfulRoutes[key], Date().timeIntervalSince(saved.created) < 300 {
-            return TravelTime(minutes: saved.minutes, isApproximate: false)
-        }
-        for attempt in 0..<2 {
-            guard !Task.isCancelled else { return nil }
-            let request = MKDirections.Request()
-            request.source = origin
-            request.destination = destination
-            request.transportType = mode
-            request.departureDate = Date()
-            request.requestsAlternateRoutes = false
-            var result: TimeInterval?
-            if mode == .transit {
-                // Rail/public-transit service is an ETA, not a fabricated walking time.
-                if let eta = try? await MKDirections(request: request).calculateETA() {
-                    result = eta.expectedTravelTime
-                }
-            } else if let response = try? await MKDirections(request: request).calculate() {
-                // A route on public roads/paths, not a straight-line projection.
-                let valid = response.routes.filter {
-                    $0.distance.isFinite && $0.distance > 0 &&
-                    $0.distance >= direct * 0.70 &&
-                    $0.expectedTravelTime.isFinite && $0.expectedTravelTime > 0
-                }
-                result = valid.min(by: { $0.expectedTravelTime < $1.expectedTravelTime })?.expectedTravelTime
+        let a=origin.placemark.coordinate, b=destination.placemark.coordinate
+        guard CLLocationCoordinate2DIsValid(a), CLLocationCoordinate2DIsValid(b),
+              abs(a.latitude)>0.01, abs(b.latitude)>0.01 else { return nil }
+        do {
+            let key=String(format:"%.6f,%.6f|%.6f,%.6f",a.latitude,a.longitude,b.latitude,b.longitude)
+            let result:JPRouteResponse
+            if let saved=lastResults[key],Date().timeIntervalSince(saved.0)<180 {
+                result=saved.1
+            } else {
+                result=try await GoogleAPISingleton.shared.routes(
+                    from:JPPoint(lat:a.latitude,lng:a.longitude),
+                    to:JPPoint(lat:b.latitude,lng:b.longitude))
+                lastResults[key]=(Date(),result)
+                if lastResults.count>150 { lastResults=lastResults.filter { Date().timeIntervalSince($0.value.0)<180 } }
             }
-            if let seconds = result, seconds.isFinite, seconds > 0,
-               seconds / 60 < Double(Int.max) {
-                let minutes = max(1, Int(ceil(seconds / 60)))
-                successfulRoutes[key] = CacheValue(minutes: minutes, created: Date())
-                if successfulRoutes.count > 250 {
-                    successfulRoutes = successfulRoutes.filter {
-                        Date().timeIntervalSince($0.value.created) < 300
-                    }
-                }
-                return TravelTime(minutes: minutes, isApproximate: false)
-            }
-            if attempt == 0 { try? await Task.sleep(nanoseconds: 400_000_000) }
-        }
-        return nil // Unsupported/failed route: present a map link instead of false minutes.
+            let minutes:Int?
+            if mode == .walking { minutes=result.walking?.minutes }
+            else if mode == .automobile { minutes=result.driving?.minutes }
+            else { minutes=result.transit?.minutes }
+            guard let minutes, minutes>0 else { return nil }
+            return TravelTime(minutes:minutes,isApproximate:false)
+        } catch { return nil } // never borrow walking minutes for a train.
     }
 }
 
-// Shared resolver for named places, addresses, and registered lodging.
-// It validates the coordinate, country and local area before any ETA request.
 private enum RoutePlaceEngine {
-    static func validCoordinate(_ point: CLLocationCoordinate2D) -> Bool {
-        CLLocationCoordinate2DIsValid(point) &&
-        abs(point.latitude) > 0.01 && abs(point.longitude) > 0.01
+    static func validCoordinate(_ p: CLLocationCoordinate2D) -> Bool {
+        CLLocationCoordinate2DIsValid(p) && abs(p.latitude)>0.01 && abs(p.longitude)>0.01
     }
-
-    static func inArea(_ item: MKMapItem, anchor: CLLocationCoordinate2D?,
-                       radius: Double = 90_000) -> Bool {
-        let point = item.placemark.coordinate
-        guard validCoordinate(point),
-              item.placemark.isoCountryCode == nil || item.placemark.isoCountryCode == "JP" else { return false }
+    static func inArea(_ item: MKMapItem, anchor: CLLocationCoordinate2D?, radius: Double=90_000) -> Bool {
+        let p=item.placemark.coordinate
+        guard validCoordinate(p) else { return false }
         guard let anchor, validCoordinate(anchor) else { return true }
-        return CLLocation(latitude: point.latitude, longitude: point.longitude)
-            .distance(from: CLLocation(latitude: anchor.latitude, longitude: anchor.longitude)) <= radius
+        return CLLocation(latitude:p.latitude,longitude:p.longitude)
+            .distance(from:CLLocation(latitude:anchor.latitude,longitude:anchor.longitude))<=radius
     }
-
-    static func normalized(_ value: String) -> String {
-        value.folding(options: [.caseInsensitive, .widthInsensitive, .diacriticInsensitive],
-                      locale: Locale(identifier: "ja_JP"))
-            .components(separatedBy: .whitespacesAndNewlines).joined()
-            .replacingOccurrences(of: "ヶ", with: "ケ")
+    static func normalized(_ s: String) -> String {
+        s.folding(options:[.caseInsensitive,.widthInsensitive,.diacriticInsensitive],locale:Locale(identifier:"ja_JP"))
+            .components(separatedBy:.whitespacesAndNewlines).joined()
     }
-
-    static func resolve(_ query: String, around anchor: CLLocationCoordinate2D?,
-                        maxRadius: Double = 90_000) async -> MKMapItem? {
-        let clean = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !clean.isEmpty else { return nil }
-        let requestedName = normalized(clean.components(separatedBy: ",").first ?? "")
-        let addressLike = clean.contains("丁目") || clean.contains("番地") || clean.contains("〒") ||
-            clean.range(of: "[0-9０-９]+[-−ー][0-9０-９]+", options: .regularExpression) != nil
-        let request = MKLocalSearch.Request()
-        request.naturalLanguageQuery = clean
-        request.resultTypes = [.address, .pointOfInterest]
-        if let anchor, validCoordinate(anchor) {
-            request.region = MKCoordinateRegion(center: anchor,
-                latitudinalMeters: maxRadius * 2, longitudinalMeters: maxRadius * 2)
-        }
-        if let response = try? await MKLocalSearch(request: request).start() {
-            let candidates = response.mapItems.filter { inArea($0, anchor: anchor, radius: maxRadius) }
-            // Named venues must match by name. Full street addresses use reverse
-            // geocoding instead of choosing an unrelated nearby hotel.
-            let matching = candidates.filter { item in
-                let name = normalized(item.name ?? "")
-                return !requestedName.isEmpty &&
-                    (name == requestedName || name.contains(requestedName) ||
-                     (name.count >= 3 && requestedName.contains(name) &&
-                      !["ホテル", "公園", "駅", "神社", "寺院", "温泉"].contains(name)))
+    static func resolve(_ query:String, around anchor:CLLocationCoordinate2D?,
+                        maxRadius:Double=90_000) async -> MKMapItem? {
+        do {
+            let places=try await GoogleAPISingleton.shared.searchPlaces(query,
+                near: anchor.map { JPPoint(lat:$0.latitude,lng:$0.longitude) },
+                radius: min(50_000,max(500,Int(maxRadius))))
+            let normalizedQuery=normalized(query.components(separatedBy:",").first ?? query)
+            let valid=places.filter { p in
+                let item=MKMapItem(placemark:MKPlacemark(coordinate:CLLocationCoordinate2D(latitude:p.lat,longitude:p.lng)))
+                return inArea(item,anchor:anchor,radius:maxRadius)
             }
-            if let exact = matching.first { return exact }
-            // Never treat the only search hit as an exact address.
-            // An ambiguous address must be independently geocoded below.
-        }
-        // Addresses that the POI index missed can still be geocoded directly.
-        if let marks = try? await CLGeocoder().geocodeAddressString(clean,
-                                      in: nil, preferredLocale: Locale(identifier: "ja_JP")) {
-            for mark in marks {
-                let item = MKMapItem(placemark: MKPlacemark(placemark: mark))
-                guard inArea(item, anchor: anchor, radius: maxRadius) else { continue }
-                let label = normalized(mark.name ?? "")
-                if addressLike || (!requestedName.isEmpty &&
-                    (label == requestedName || label.contains(requestedName) ||
-                     (label.count >= 3 && requestedName.contains(label) &&
-                      !["ホテル", "公園", "駅", "神社", "寺院", "温泉"].contains(label)))) {
-                    return item
-                }
-            }
-        }
-        return nil
+            // Reject fuzzy same-name venues. Never silently choose first distant result.
+            guard let place=valid.first(where: { p in
+                let n=normalized(p.name)
+                return n==normalizedQuery || n.contains(normalizedQuery) || normalizedQuery.contains(n)
+            }) else { return nil }
+            let item=MKMapItem(placemark:MKPlacemark(coordinate:CLLocationCoordinate2D(latitude:place.lat,longitude:place.lng)))
+            item.name=place.name
+            return item
+        } catch { return nil }
     }
 }
 
@@ -215,6 +268,7 @@ private struct GuideData: Decodable {
 
 @main
 struct JapanDayPlannerApp: App {
+    init() { FirebaseBootstrap.configure() }
     var body: some Scene {
         WindowGroup { PlannerView() }
     }
@@ -275,7 +329,11 @@ private struct PlannerView: View {
         }
         return [item.label, item.title, item.description, item.area][field]
     }
+    private func isPlaceholderLunch(_ venue: Venue) -> Bool {
+        venue.name.hasPrefix("Lunch near ") || venue.name.hasPrefix("Lunch in ") || venue.name.hasPrefix("Lunch at ")
+    }
     private func venueText(_ venue: Venue, _ field: Int) -> String {
+        if isPlaceholderLunch(venue) { return field == 0 ? journeyText("lunchSearch") : journeyText("lunchNote") }
         if let names = FeaturedRoutes.names[venue.name] {
             return field == 0 ? names[language.index] : FeaturedRoutes.ui["visitNote"]![language.index]
         }
@@ -488,7 +546,7 @@ private struct PlannerView: View {
         var lines = ["Japan Day Planner · \(routeText(route, 0))"]
         for index in route.stops.indices {
             let venue = selectedVenue(index)
-            if venue.name.hasPrefix("Lunch near "), let place = lunchSelection {
+            if isPlaceholderLunch(venue), let place = lunchSelection {
                 lines.append("\(time(startOfStop(index))) · \(place.name) · \(place.address)")
             } else {
                 let url = URL(string: venue.url).flatMap { translatedGuideURL($0) }?.absoluteString ?? venue.url
@@ -715,7 +773,7 @@ private struct PlannerView: View {
         switch item {
         case .departure: return journeyText("depart")
         case .stop(let index):
-            if selectedVenue(index).name.hasPrefix("Lunch near "), let place = lunchSelection { return place.name }
+            if isPlaceholderLunch(selectedVenue(index)), let place = lunchSelection { return place.name }
             return venueText(selectedVenue(index), 0)
         case .hotelBeforeDinner: return journeyText("hotelFirst")
         case .dinner: return journeyText(dinnerNearHotel ? "dinnerHotel" : "dinnerLast")
@@ -1053,127 +1111,26 @@ private struct PlannerView: View {
         return hotelPlace(item, isIn: prefecture)
     }
     private func venueMapItem(_ venue: Venue, in prefecture: PrefectureOption) async throws -> MKMapItem? {
-        let cacheKey = "\(prefecture.id)|\(venue.name)"
-        if let cached = resolvedPlaceCache[cacheKey] { return cached }
-        if let coordinate = pinnedVenueCoordinate(venue) {
-            let item = MKMapItem(placemark: MKPlacemark(coordinate: coordinate))
-            item.name = localVenueName(venue)
-            resolvedPlaceCache[cacheKey] = item
-            return item
-        }
-        if let parent = parentSiteName(venue),
-           let parentVenue = route.stops.flatMap({ $0.choices }).first(where: { $0.name == parent }) {
-            return try await venueMapItem(parentVenue, in: prefecture)
-        }
-        let expected = localVenueName(venue)
-        let aliases = ["仁尾の港町": "仁尾町", "仁尾八幡神社": "仁尾八幡宮", "銀山温泉街": "銀山温泉",
-                       "本町通り（富士みち）": "下吉田本町通り",
-                       "嵯峨鳥居本町並み保存地区": "嵯峨鳥居本",
-                       "箕面駅前商店街": "箕面駅", "箕面滝道入口": "箕面公園",
-                       "高千穂峡の遊歩道": "高千穂峡", "真名井の滝の展望場所": "真名井の滝",
-                       "龍宮の潮吹の展望場所": "龍宮の潮吹", "白銀公園入口": "白銀公園"]
-        // Display labels are not necessarily names indexed by the map provider.
-        // Search known local aliases, the original name and bundled map query.
-        let mapAliases: [String: [String]] = [
-            "ハチ公前広場": ["忠犬ハチ公像", "ハチ公像", "ハチ公広場", "Hachiko Statue"],
-            "表参道": ["表参道通り", "Omotesando"],
-            "渋谷スクランブル交差点": ["渋谷駅前交差点", "Shibuya Scramble Crossing"],
-            "道頓堀": ["Dotonbori"],
-            "祇園の路地": ["祇園", "Gion"],
-            "嵯峨鳥居本町並み保存地区": ["嵯峨鳥居本伝統的建造物群保存地区"]
-        ]
-        var names = [expected]
-        if let alias = aliases[expected] { names.append(alias) }
-        names += mapAliases[expected] ?? []
-        names.append(venue.name)
-        if let components = URLComponents(string: venue.url),
-           components.host?.contains("google.") == true,
-           let query = components.queryItems?.first(where: { $0.name == "query" })?.value {
-            let local = query.replacingOccurrences(of: prefecture.ja, with: "")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            if !local.isEmpty { names.append(local) }
-        }
-        var seen = Set<String>()
-        names = names.filter { seen.insert(normalizedPlaceName($0)).inserted }
-        let requests = names.map { "\($0), \(prefecture.ja), Japan" }
-        let needles = names.map(normalizedPlaceName)
-        func matchesName(_ value: String) -> Bool {
-            let label = normalizedPlaceName(value)
-            return needles.contains { needle in
-                label == needle || label.hasPrefix(needle + "(") || label.hasPrefix(needle + "（")
-                    || label.hasPrefix(needle + "入口")
-                    || (needle.count >= 4 && label.contains(needle) && !needle.hasSuffix("駅"))
-                    || (label.count >= 3 && needle.contains(label) &&
-                        !["ホテル", "公園", "駅", "神社", "寺院", "温泉"].contains(label))
-            }
-        }
-        for query in requests {
-            guard !Task.isCancelled else { return nil }
-            let request = MKLocalSearch.Request()
-            request.naturalLanguageQuery = query
-            request.resultTypes = [.address, .pointOfInterest]
-            if let anchor = pinnedFirstVenueCoordinate {
-                request.region = MKCoordinateRegion(center: anchor,
-                    latitudinalMeters: 120_000, longitudinalMeters: 120_000)
-            }
-            if let response = try? await MKLocalSearch(request: request).start() {
-                let candidates = response.mapItems.filter { item in
-                    let point = item.placemark.coordinate
-                    guard CLLocationCoordinate2DIsValid(point), point.latitude != 0,
-                          item.placemark.isoCountryCode == nil || item.placemark.isoCountryCode == "JP" else { return false }
-                    return isLocalRoutePlace(item, in: prefecture)
-                        && (matchesName(item.name ?? "") || matchesName(item.placemark.name ?? ""))
-                }
-                let exact = candidates.first { needles.contains(normalizedPlaceName($0.name ?? "")) }
-                if let item = exact ?? candidates.first {
-                    resolvedPlaceCache[cacheKey] = item
-                    return item
-                }
-            }
-        }
-        // Street and trail names may be absent from the POI index. Try their
-        // published address/name as an address, still retaining the prefecture.
-        for name in names {
-            guard !Task.isCancelled else { return nil }
-            if let marks = try? await CLGeocoder().geocodeAddressString("\(prefecture.ja) \(name)", in: nil, preferredLocale: Locale(identifier: "ja_JP")),
-               let mark = marks.first(where: { mark in
-                   guard let point = mark.location?.coordinate, CLLocationCoordinate2DIsValid(point) else { return false }
-                   let item = MKMapItem(placemark: MKPlacemark(placemark: mark))
-                   guard isLocalRoutePlace(item, in: prefecture) else { return false }
-                    return matchesName(mark.name ?? "") || matchesName(mark.thoroughfare ?? "")
-               }) {
-                let item = MKMapItem(placemark: MKPlacemark(placemark: mark))
-                resolvedPlaceCache[cacheKey] = item
-                return item
-            }
-        }
-        let publishedAddresses = [
-            // GO TOKYO official listing: https://www.gotokyo.org/jp/spot/86/index.html
-            "Hachiko Square Shibuya": "東京都渋谷区道玄坂2-1"
-        ]
-        if let address = publishedAddresses[venue.name], !Task.isCancelled,
-           let marks = try? await CLGeocoder().geocodeAddressString(address, in: nil,
-                                      preferredLocale: Locale(identifier: "ja_JP")),
-           let mark = marks.first(where: { mark in
-               guard let point = mark.location?.coordinate,
-                     CLLocationCoordinate2DIsValid(point) else { return false }
-               return hotelPlace(MKMapItem(placemark: MKPlacemark(placemark: mark)), isIn: prefecture)
-           }) {
-            let item = MKMapItem(placemark: MKPlacemark(placemark: mark))
-            item.name = expected
-            resolvedPlaceCache[cacheKey] = item
-            return item
-        }
-        if let verified = await RoutePlaceEngine.resolve(
-            "\(expected), \(prefecture.ja), Japan",
-            around: pinnedFirstVenueCoordinate),
-           isLocalRoutePlace(verified, in: prefecture),
-           matchesName(verified.name ?? "") || matchesName(verified.placemark.name ?? "") {
-            resolvedPlaceCache[cacheKey] = verified
-            return verified
-        }
-        return nil
+        let cacheKey="\(prefecture.id)|\(venue.name)"
+        if let cached=resolvedPlaceCache[cacheKey] { return cached }
+        let local=localVenueName(venue)
+        let query="\(local), \(prefecture.ja), Japan"
+        // Verify both the provider-returned name and its actual prefectural address.
+        guard let found=try? await GoogleAPISingleton.shared.searchPlaces(query,radius:50000) else { return nil }
+        let wanted=RoutePlaceEngine.normalized(local)
+        guard let chosen=found.first(where: { c in
+            let name=RoutePlaceEngine.normalized(c.name)
+            let nameMatches=(name==wanted || name.contains(wanted) || wanted.contains(name))
+            return nameMatches && (c.address.contains(prefecture.ja) ||
+                c.address.localizedCaseInsensitiveContains(prefecture.en))
+        }) else { return nil }
+        let place=MKMapItem(placemark:MKPlacemark(coordinate:
+            CLLocationCoordinate2D(latitude:chosen.lat,longitude:chosen.lng)))
+        place.name=chosen.name
+        resolvedPlaceCache[cacheKey]=place
+        return place
     }
+
     private func firstVenueMapItem(in prefecture: PrefectureOption) async throws -> MKMapItem? {
         try await venueMapItem(selectedVenue(0), in: prefecture)
     }
@@ -1247,27 +1204,10 @@ private struct PlannerView: View {
             resolvedPlaceCache[clean] = found
             return found
         }
-        // One deterministic location lookup for all user-entered addresses,
-        // hotel names, dining venues and custom-selected sightseeing points.
-        var queries: [String] = []
-        if clean == hotelQuery {
-            if hotelChoice == "suggested", let hotel = selectedSuggestedHotel {
-                if !hotel.address.isEmpty { queries.append(hotel.address) }
-                if let lookup = hotel.lookupQuery { queries.append(lookup) }
-            }
-            if let chosen = chosenHotel { queries.append(chosen.addressJP) }
-        }
-        queries.append(clean)
-        var unique = Set<String>()
-        for query in queries where unique.insert(query).inserted {
-            guard !Task.isCancelled else { return nil }
-            if let place = await RoutePlaceEngine.resolve(query,
-                around: pinnedFirstVenueCoordinate, maxRadius: 100_000) {
-                resolvedPlaceCache[clean] = place
-                return place
-            }
-        }
-        return nil
+        // All other addresses go through Google Places, never Apple geocoding.
+        let resolved=await RoutePlaceEngine.resolve(clean,around:pinnedFirstVenueCoordinate,maxRadius:100_000)
+        if let resolved { resolvedPlaceCache[clean]=resolved }
+        return resolved
     }
     // Only verified local coordinates are used here. No prefecture-capital placeholder
     // is allowed to masquerade as a hotel near Shimoyoshida Station.
@@ -1332,149 +1272,37 @@ private struct PlannerView: View {
     @MainActor
     private func searchHotels() {
         guard !hotelSearching else { return }
-        guard let prefecture = NationwideRoutes.prefectures.first(where: { $0.id == routePrefecture }) else {
-            hotelSearchError = true
-            return
-        }
-        let token = UUID()
-        hotelSearchID = token
-        hotelSearching = true
-        hotelSearchError = false
-        // Never offer a prefecture-wide hotel as the closest one. A hotel's
-        // coordinates must be known before it is a selectable nearby result.
-        hotelResults = knownLocalHotelFallbacks(near: pinnedFirstVenueCoordinate)
+        let token=UUID()
+        hotelSearchID=token
+        hotelSearching=true
+        hotelSearchError=false
+        hotelResults=[]
         Task { @MainActor in
+            defer { if hotelSearchID==token { hotelSearching=false } }
             do {
-                let coordinate: CLLocationCoordinate2D
-                if let pinned = pinnedFirstVenueCoordinate {
-                    coordinate = pinned
-                } else if let first = try await firstVenueMapItem(in: prefecture) {
-                    coordinate = first.placemark.coordinate
-                } else {
-                    hotelSearching = false
-                    hotelSearchError = hotelResults.isEmpty
-                    return
+                guard let prefecture=NationwideRoutes.prefectures.first(where:{$0.id==routePrefecture}) else {
+                    hotelSearchError=true; return
                 }
-                guard hotelSearchID == token else { return }
-                guard CLLocationCoordinate2DIsValid(coordinate),
-                      abs(coordinate.latitude) > 0.01, abs(coordinate.longitude) > 0.01 else {
-                    hotelSearching = false
-                    hotelSearchError = hotelResults.isEmpty
-                    return
+                // The first sightseeing point must be resolved before any hotel search.
+                guard let first=try await firstVenueMapItem(in:prefecture) else {
+                    hotelSearchError=true; return
                 }
-                let center = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
-                var suggestions = knownLocalHotelFallbacks(near: coordinate)
-                var seen = Set(suggestions.map { $0.name.folding(options: [.caseInsensitive, .widthInsensitive], locale: .current) })
-                if !suggestions.isEmpty { hotelResults = suggestions }
-                if let fallback = verifiedFallbackHotel(near: coordinate) {
-                    suggestions.append(fallback)
-                    seen.insert(fallback.name.folding(options: [.caseInsensitive, .widthInsensitive], locale: .current))
-                    hotelResults = Array(suggestions.sorted { $0.distance < $1.distance }.prefix(5))
-                    if selectedVenue(0).name == "Takachiho Shrine" {
-                        suggestions.append(HotelSuggestion(id: "verified|solest-takachiho", name: "ソレスト高千穂ホテル",
-                            address: "宮崎県西臼杵郡高千穂町三田井1261-1", latitude: 32.7078023, longitude: 131.3048979,
-                            phone: "0982830001", website: "https://www.solest-takachiho.jp/",
-                            distance: center.distance(from: CLLocation(latitude: 32.7078023, longitude: 131.3048979)),
-                            anchorLatitude: coordinate.latitude, anchorLongitude: coordinate.longitude))
-                        hotelResults = suggestions
-                    }
+                let center=first.placemark.coordinate
+                guard CLLocationCoordinate2DIsValid(center) else { hotelSearchError=true; return }
+                let results=try await GoogleAPISingleton.shared.hotels(
+                    near:JPPoint(lat:center.latitude,lng:center.longitude),maxResults:5)
+                guard hotelSearchID==token,!Task.isCancelled else { return }
+                hotelResults=results.hotels.map { h in
+                    HotelSuggestion(id:h.id,name:h.name,address:h.address,
+                        latitude:h.lat,longitude:h.lng,phone:nil,website:nil,
+                        distance:Double(h.distanceMeters ?? 0),
+                        anchorLatitude:center.latitude,anchorLongitude:center.longitude)
                 }
-                // Try to reach five local hotels in the three main metropolitan
-                // areas; in smaller regions, search outward until three are found.
-                let desiredCount = ["tokyo", "osaka", "kyoto"].contains(routePrefecture) ? 5 : 3
-                for radius in [2500.0, 8000.0, 20000.0, 40000.0] {
-                    guard hotelSearchID == token, !Task.isCancelled else { return }
-                    let poi = MKLocalPointsOfInterestRequest(center: coordinate, radius: radius)
-                    poi.pointOfInterestFilter = MKPointOfInterestFilter(including: [.hotel])
-                    var nearbyItems: [MKMapItem] = []
-                    do {
-                        nearbyItems += try await MKLocalSearch(request: poi).start().mapItems
-                        guard hotelSearchID == token else { return }
-                    } catch {
-                        guard hotelSearchID == token else { return }
-                    }
-                    for term in ["ホテル", "旅館"] {
-                        let request = MKLocalSearch.Request()
-                        request.naturalLanguageQuery = term
-                        request.resultTypes = [.address, .pointOfInterest]
-                        request.region = MKCoordinateRegion(center: coordinate,
-                                                            latitudinalMeters: radius * 2,
-                                                            longitudinalMeters: radius * 2)
-                        do {
-                            nearbyItems += try await MKLocalSearch(request: request).start().mapItems
-                            guard hotelSearchID == token else { return }
-                        } catch {
-                            guard hotelSearchID == token else { return }
-                        }
-                    }
-                    for item in nearbyItems {
-                        let point = item.placemark.coordinate
-                        let distance = center.distance(from: CLLocation(latitude: point.latitude, longitude: point.longitude))
-                        // A nearby hotel across a prefectural border is still nearby.
-                        // Distance from the verified landmark is the deciding filter.
-                        guard distance <= radius, item.placemark.isoCountryCode == nil || item.placemark.isoCountryCode == "JP",
-                              let name = item.name, !name.isEmpty else { continue }
-                        let lodgingName = name.lowercased()
-                        guard item.pointOfInterestCategory == .hotel || ["ホテル", "旅館", "民宿", "ペンション", "ゲストハウス", "宿", "hotel", "inn", "ryokan", "lodge", "guesthouse", "resort"]
-                            .contains(where: { lodgingName.contains($0) }) else { continue }
-                        let normalizedName = name.folding(options: [.caseInsensitive, .widthInsensitive], locale: .current)
-                        let id = "\(normalizedName)|\(Int(point.latitude * 10000))|\(Int(point.longitude * 10000))"
-                        guard seen.insert(normalizedName).inserted else { continue }
-                        guard !suggestions.contains(where: { $0.id == id }) else { continue }
-                        suggestions.append(HotelSuggestion(id: id, name: name, address: item.placemark.title ?? name,
-                                                           latitude: point.latitude, longitude: point.longitude,
-                                                           phone: item.phoneNumber, website: item.url?.absoluteString,
-                                                           distance: distance, anchorLatitude: coordinate.latitude,
-                                                           anchorLongitude: coordinate.longitude))
-                    }
-                    hotelResults = Array(suggestions.sorted { $0.distance < $1.distance }.prefix(5))
-                    if suggestions.count >= desiredCount { break }
-                }
-                if suggestions.count < desiredCount {
-                    for hotel in registeredHotels().prefix(5) {
-                        guard hotelSearchID == token, !Task.isCancelled else { return }
-                        let request = MKLocalSearch.Request()
-                        request.naturalLanguageQuery = hotel.lookupQuery ?? "\(hotel.name), \(hotel.address)"
-                        request.resultTypes = [.address, .pointOfInterest]
-                        request.region = MKCoordinateRegion(center: coordinate,
-                            latitudinalMeters: 80_000, longitudinalMeters: 80_000)
-                        if let response = try? await MKLocalSearch(request: request).start() {
-                            for item in response.mapItems {
-                                guard let name = item.name, !name.isEmpty else { continue }
-                                let point = item.placemark.coordinate
-                                guard CLLocationCoordinate2DIsValid(point) else { continue }
-                                let metres = center.distance(from: CLLocation(
-                                    latitude: point.latitude, longitude: point.longitude))
-                                guard metres < 40_000,
-                                      (name.localizedCaseInsensitiveContains(hotel.name)
-                                       || hotel.name.localizedCaseInsensitiveContains(name)) else { continue }
-                                let normalized = name.folding(options: [.caseInsensitive, .widthInsensitive], locale: .current)
-                                guard seen.insert(normalized).inserted else { continue }
-                                suggestions.append(HotelSuggestion(id: "resolved|\(hotel.id)", name: name,
-                                    address: hotel.address, latitude: point.latitude,
-                                    longitude: point.longitude, phone: hotel.phone,
-                                    website: hotel.website, distance: metres,
-                                    anchorLatitude: coordinate.latitude,
-                                    anchorLongitude: coordinate.longitude))
-                                hotelResults = Array(suggestions.sorted { $0.distance < $1.distance }.prefix(5))
-                                break
-                            }
-                        }
-                        if suggestions.count >= desiredCount { break }
-                    }
-                }
-                if !suggestions.isEmpty {
-                    hotelResults = Array(suggestions.sorted { $0.distance < $1.distance }.prefix(5))
-                }
-                hotelSearching = false
-                hotelSearchError = hotelResults.isEmpty
-            } catch {
-                guard hotelSearchID == token else { return }
-                hotelSearching = false
-                hotelSearchError = hotelResults.isEmpty
-            }
+                hotelSearchError=hotelResults.isEmpty
+            } catch { if hotelSearchID==token { hotelSearchError=true } }
         }
     }
+
     private func hotelPlace(_ item: MKMapItem, isIn prefecture: PrefectureOption) -> Bool {
         let area = (item.placemark.administrativeArea ?? item.placemark.title ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1649,16 +1477,16 @@ private struct PlannerView: View {
                 }
                 DisclosureGroup(extra("arrival")) { arrivalCard.padding(.top, 10) }
             case .stop(let index):
-                if selectedVenue(index).name.hasPrefix("Lunch near ") {
+                if isPlaceholderLunch(selectedVenue(index)) {
                     lunchCard(index)
                 } else {
                     stopCard(index)
                 }
                 if index + 1 < route.stops.count &&
-                    !selectedVenue(index + 1).name.hasPrefix("Lunch near ") &&
-                    (!selectedVenue(index).name.hasPrefix("Lunch near ") || lunchSelection != nil) {
+                    !isPlaceholderLunch(selectedVenue(index + 1)) &&
+                    (!isPlaceholderLunch(selectedVenue(index)) || lunchSelection != nil) {
                     transferCard(index + 1)
-                } else if index + 1 < route.stops.count && selectedVenue(index + 1).name.hasPrefix("Lunch near ") {
+                } else if index + 1 < route.stops.count && isPlaceholderLunch(selectedVenue(index + 1)) {
                     journeyPanel { Text(journeyText("lunchNext")).font(.headline).foregroundStyle(journeyGold) }
                 } else if dinnerNearHotel && !hotelQuery.isEmpty {
                     travelPanel(origin: venueQuery(lastVenue), destination: hotelQuery, title: journeyText("nextHotel"), fromName: venueText(lastVenue, 0), toName: hotelName)
@@ -1748,46 +1576,27 @@ private struct PlannerView: View {
     @MainActor
     private func searchLunch(near anchor: String) {
         guard !lunchSearching else { return }
-        let token = UUID()
-        lunchSearchID = token
-        lunchSearching = true
-        lunchSearchError = false
-        lunchResults = []
+        let token=UUID(); lunchSearchID=token
+        lunchSearching=true; lunchSearchError=false; lunchResults=[]
         Task { @MainActor in
-            do {
-                let first = try await resolvedAnchorMapItem(anchor)
-                guard lunchSearchID == token else { return }
-                guard let first else {
-                    lunchSearching = false; lunchSearchError = true; return
-                }
-                let coordinate = first.placemark.coordinate
-                let center = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
-                let request = MKLocalSearch.Request()
-                request.naturalLanguageQuery = "レストラン"
-                request.resultTypes = .pointOfInterest
-                request.pointOfInterestFilter = MKPointOfInterestFilter(including: [.restaurant])
-                request.region = MKCoordinateRegion(center: coordinate, latitudinalMeters: 3000, longitudinalMeters: 3000)
-                let response = try await MKLocalSearch(request: request).start()
-                guard lunchSearchID == token else { return }
-                var seen = Set<String>()
-                lunchResults = Array(response.mapItems.compactMap { item -> DinnerPlace? in
-                    let point = item.placemark.coordinate
-                    let distance = center.distance(from: CLLocation(latitude: point.latitude, longitude: point.longitude))
-                    guard distance <= 2000, let name = item.name, !name.isEmpty else { return nil }
-                    let id = "\(name)|\(point.latitude)|\(point.longitude)"
-                    guard seen.insert(id).inserted else { return nil }
-                    return DinnerPlace(id: id, name: name, address: item.placemark.title ?? name,
-                                       latitude: point.latitude, longitude: point.longitude, distance: distance)
-                }.sorted { $0.distance < $1.distance }.prefix(8))
-                lunchSearching = false
-                lunchSearchError = lunchResults.isEmpty
-            } catch {
-                guard lunchSearchID == token else { return }
-                lunchSearching = false
-                lunchSearchError = true
+            defer { if lunchSearchID==token { lunchSearching=false } }
+            guard let first=try? await resolvedAnchorMapItem(anchor) else {
+                lunchSearchError=true; return
             }
+            let c=first.placemark.coordinate
+            do {
+                let places=try await GoogleAPISingleton.shared.restaurants(
+                    near:JPPoint(lat:c.latitude,lng:c.longitude),maxResults:8)
+                guard lunchSearchID==token else { return }
+                lunchResults=places.restaurants.map { p in
+                    DinnerPlace(id:p.id,name:p.name,address:p.address,
+                        latitude:p.lat,longitude:p.lng,distance:Double(p.distanceMeters ?? 0))
+                }
+                lunchSearchError=lunchResults.isEmpty
+            } catch { if lunchSearchID==token { lunchSearchError=true } }
         }
     }
+
     private var dinnerCard: some View {
         journeyPanel(accent: PlannerTheme.coral) {
             Label(journeyText(dinnerNearHotel ? "dinnerHotel" : "dinnerLast"), systemImage: "fork.knife").font(.title3.bold())
@@ -1830,46 +1639,25 @@ private struct PlannerView: View {
     @MainActor
     private func searchDinner() {
         guard !dinnerAnchorQuery.isEmpty, !dinnerSearching else { return }
-        let anchor = dinnerAnchorQuery
-        let token = UUID()
-        dinnerSearchID = token
-        dinnerSearching = true
-        dinnerSearchError = false
-        dinnerResults = []
-        // Keep the previous selected restaurant until a new one is explicitly chosen.
+        let anchor=dinnerAnchorQuery
+        let token=UUID(); dinnerSearchID=token
+        dinnerSearching=true; dinnerSearchError=false; dinnerResults=[]
         Task { @MainActor in
-            do {
-                let centerItem = try await resolvedAnchorMapItem(anchor)
-                guard dinnerSearchID == token else { return }
-                guard let centerItem else {
-                    dinnerSearchError = true; dinnerSearching = false; return
-                }
-                let coordinate = centerItem.placemark.coordinate
-                let center = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
-                let request = MKLocalSearch.Request()
-                request.naturalLanguageQuery = "レストラン"
-                request.resultTypes = .pointOfInterest
-                request.pointOfInterestFilter = MKPointOfInterestFilter(including: [.restaurant])
-                request.region = MKCoordinateRegion(center: coordinate, latitudinalMeters: 3000, longitudinalMeters: 3000)
-                let response = try await MKLocalSearch(request: request).start()
-                guard dinnerSearchID == token else { return }
-                var seen = Set<String>()
-                let places = response.mapItems.compactMap { item -> DinnerPlace? in
-                    let point = item.placemark.coordinate
-                    let distance = center.distance(from: CLLocation(latitude: point.latitude, longitude: point.longitude))
-                    guard distance <= 2000, let name = item.name, !name.isEmpty else { return nil }
-                    let id = "\(name)|\(point.latitude)|\(point.longitude)"
-                    guard seen.insert(id).inserted else { return nil }
-                    return DinnerPlace(id: id, name: name, address: item.placemark.title ?? name, latitude: point.latitude, longitude: point.longitude, distance: distance)
-                }.sorted { $0.distance < $1.distance }
-                dinnerResults = Array(places.prefix(8))
-                dinnerSearchError = dinnerResults.isEmpty
-                dinnerSearching = false
-            } catch {
-                guard dinnerSearchID == token else { return }
-                dinnerSearching = false
-                dinnerSearchError = true
+            defer { if dinnerSearchID==token { dinnerSearching=false } }
+            guard let point=try? await resolvedAnchorMapItem(anchor) else {
+                dinnerSearchError=true; return
             }
+            let c=point.placemark.coordinate
+            do {
+                let places=try await GoogleAPISingleton.shared.restaurants(
+                    near:JPPoint(lat:c.latitude,lng:c.longitude),maxResults:8)
+                guard dinnerSearchID==token else { return }
+                dinnerResults=places.restaurants.map { p in
+                    DinnerPlace(id:p.id,name:p.name,address:p.address,
+                        latitude:p.lat,longitude:p.lng,distance:Double(p.distanceMeters ?? 0))
+                }
+                dinnerSearchError=dinnerResults.isEmpty
+            } catch { if dinnerSearchID==token { dinnerSearchError=true } }
         }
     }
 
@@ -1880,7 +1668,7 @@ private struct PlannerView: View {
         ["asakusa": "Tokyo", "ueno": "Tokyo", "kyoto": "Kyoto", "osaka": "Osaka", "nara": "Nara", "hiroshima": "Hiroshima"][route.id] ?? "Japan"
     }
     private func venueQuery(_ venue: Venue) -> String {
-        if venue.name.hasPrefix("Lunch near "), let place = lunchSelection { return place.query }
+        if isPlaceholderLunch(venue), let place = lunchSelection { return place.query }
         // Use fixed coordinates for known streets, squares and major sites.
         // This avoids a transient MapKit name-search failure hiding route times.
         if let point = pinnedVenueCoordinate(venue) {
@@ -4177,51 +3965,38 @@ private struct OriginalCourseView: View {
         }
     }
     private func searchNearby(from index: Int, kind: String) {
-        let anchor = stops[index]
-        let token = UUID()
-        nearbySearchID = token
-        nearbyAnchor = anchor.id
-        nearbyKind = kind
-        nearbyResults = []
-        nearbyError = nil
-        guard let latitude = anchor.latitude, let longitude = anchor.longitude else {
-            nearbySearching = false
-            nearbyError = "nearNeedsPlace"
-            return
+        let anchor=stops[index]
+        let token=UUID(); nearbySearchID=token
+        nearbyAnchor=anchor.id; nearbyKind=kind
+        nearbyResults=[]; nearbyError=nil
+        guard let lat=anchor.latitude,let lng=anchor.longitude else {
+            nearbySearching=false;nearbyError="nearNeedsPlace";return
         }
-        nearbySearching = true
-        Task {
-            let coordinate = CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
-            let center = CLLocation(latitude: latitude, longitude: longitude)
-            var found: [String: OriginalNearbyPlace] = [:]
-            let queries = kind == "sight" ? ["観光名所", "博物館", "公園"] : ["レストラン", "食堂"]
-            for query in queries {
-                guard nearbySearchID == token else { return }
-                let request = MKLocalSearch.Request()
-                request.naturalLanguageQuery = query
-                request.resultTypes = .pointOfInterest
-                request.region = MKCoordinateRegion(center: coordinate, latitudinalMeters: 7000, longitudinalMeters: 7000)
-                if kind != "sight" {
-                    request.pointOfInterestFilter = MKPointOfInterestFilter(including: [.restaurant])
+        nearbySearching=true
+        Task { @MainActor in
+            defer { if nearbySearchID==token { nearbySearching=false } }
+            do {
+                let places:[JPPlace]
+                if kind=="sight" {
+                    places=try await GoogleAPISingleton.shared.searchPlaces(
+                        "観光地",near:JPPoint(lat:lat,lng:lng),radius:5000)
+                } else {
+                    let results=try await GoogleAPISingleton.shared.restaurants(
+                        near:JPPoint(lat:lat,lng:lng),maxResults:8)
+                    places=results.restaurants
                 }
-                guard let response = try? await MKLocalSearch(request: request).start() else { continue }
-                guard nearbySearchID == token else { return }
-                for mapItem in response.mapItems {
-                    guard let name = mapItem.name, !name.isEmpty else { continue }
-                    let point = mapItem.placemark.coordinate
-                    let distance = center.distance(from: CLLocation(latitude: point.latitude, longitude: point.longitude))
-                    guard distance >= 30, distance <= 5000 else { continue }
-                    let place = OriginalPlace(name: name, address: mapItem.placemark.title ?? name,
-                                              latitude: point.latitude, longitude: point.longitude)
-                    found[place.id] = OriginalNearbyPlace(place: place, distance: Int(distance.rounded()))
-                }
-            }
-            guard nearbySearchID == token else { return }
-            nearbyResults = Array(found.values.sorted { $0.distance < $1.distance }.prefix(8))
-            nearbySearching = false
-            if nearbyResults.isEmpty { nearbyError = "nearEmpty" }
+                guard nearbySearchID==token else { return }
+                nearbyResults=places.map { p in
+                    let original=OriginalPlace(name:p.name,address:p.address,
+                        latitude:p.lat,longitude:p.lng)
+                    return OriginalNearbyPlace(place:original,distance:p.distanceMeters ?? 0)
+                }.filter { $0.distance>=0 && $0.distance<=5000 }
+                .sorted { $0.distance < $1.distance }
+                if nearbyResults.isEmpty { nearbyError="nearEmpty" }
+            } catch { if nearbySearchID==token { nearbyError="nearEmpty" } }
         }
     }
+
     private func selectNearby(_ result: OriginalNearbyPlace, after anchorID: UUID) {
         guard let index = stops.firstIndex(where: { $0.id == anchorID }) else { return }
         let kind = nearbyKind
@@ -4278,58 +4053,40 @@ private struct OriginalCourseView: View {
     private func searchPlaces() async {
         try? await Task.sleep(nanoseconds: 450_000_000)
         guard !Task.isCancelled else { return }
-        if let last = stops.indices.last, stops[last].kind == "return", stops[0].name.isEmpty {
-            stops[last].name = ""; stops[last].address = ""; stops[last].latitude = nil; stops[last].longitude = nil
-        }
-        for item in stops where item.kind != "return" && !item.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        for item in stops where item.kind != "return" && !item.name.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty {
             guard !Task.isCancelled else { return }
             if item.latitude != nil && candidates[item.id] != nil { continue }
-            let request = MKLocalSearch.Request()
-            request.naturalLanguageQuery = item.address.isEmpty ? item.name : "\(item.name), \(item.address)"
-            request.resultTypes = [.address, .pointOfInterest]
-            if let anchor = stops.first(where: { $0.id != item.id && $0.latitude != nil && $0.longitude != nil }),
-               let lat = anchor.latitude, let lon = anchor.longitude {
-                request.region = MKCoordinateRegion(center: CLLocationCoordinate2D(latitude: lat, longitude: lon),
-                    latitudinalMeters: 120_000, longitudinalMeters: 120_000)
-            }
-            guard let response = try? await MKLocalSearch(request: request).start(), !Task.isCancelled else { continue }
-            let anchor = stops.first(where: { $0.id != item.id && $0.latitude != nil && $0.longitude != nil })
-                .flatMap { stop -> CLLocationCoordinate2D? in
-                    guard let lat = stop.latitude, let lon = stop.longitude else { return nil }
-                    return CLLocationCoordinate2D(latitude: lat, longitude: lon)
+            let query=item.address.isEmpty ? item.name : "\(item.name), \(item.address)"
+            let center=stops.first(where:{$0.id != item.id && $0.latitude != nil && $0.longitude != nil})
+                .flatMap { a -> JPPoint? in
+                    guard let lat=a.latitude,let lon=a.longitude else { return nil }
+                    return JPPoint(lat:lat,lng:lon)
                 }
-            let found: [OriginalPlace] = Array(response.mapItems.filter {
-                RoutePlaceEngine.inArea($0, anchor: anchor, radius: 100_000)
-            }.prefix(4)).compactMap { result in
-                guard let name = result.name else { return nil }
-                let point = result.placemark.coordinate
-                return OriginalPlace(name: name, address: result.placemark.title ?? name,
-                    latitude: point.latitude, longitude: point.longitude)
+            guard let results=try? await GoogleAPISingleton.shared.searchPlaces(query,
+                near:center,radius:50000),!Task.isCancelled else { continue }
+            let found=results.map { p in
+                OriginalPlace(name:p.name,address:p.address,latitude:p.lat,longitude:p.lng)
             }
-            guard let i = stops.firstIndex(where: { $0.id == item.id && $0.name == item.name }) else { continue }
-            candidates[item.id] = found
-            // Do not silently assign a different same-name place or arbitrary
-            // first search hit. Ask the traveller to choose if ambiguous.
-            let wanted = item.name.folding(options: [.caseInsensitive, .widthInsensitive, .diacriticInsensitive], locale: .current)
-                .replacingOccurrences(of: " ", with: "")
-            let confident = found.filter { place in
-                let actual = place.name.folding(options: [.caseInsensitive, .widthInsensitive, .diacriticInsensitive], locale: .current)
-                    .replacingOccurrences(of: " ", with: "")
-                return !wanted.isEmpty && (wanted == actual || (wanted.count >= 5 && actual.contains(wanted)))
+            guard let i=stops.firstIndex(where:{$0.id==item.id && $0.name==item.name}) else { continue }
+            candidates[item.id]=found
+            let want=item.name.folding(options:[.caseInsensitive,.widthInsensitive,.diacriticInsensitive],locale:.current)
+                .replacingOccurrences(of:" ",with:"")
+            let exact=found.filter { p in
+                let actual=p.name.folding(options:[.caseInsensitive,.widthInsensitive,.diacriticInsensitive],locale:.current)
+                    .replacingOccurrences(of:" ",with:"")
+                return want==actual
             }
-            if confident.count == 1, let exact = confident.first, stops[i].latitude == nil {
-                stops[i].latitude = exact.latitude
-                stops[i].longitude = exact.longitude
-                stops[i].address = exact.address
+            if exact.count==1,let chosen=exact.first,stops[i].latitude==nil {
+                stops[i].latitude=chosen.latitude;stops[i].longitude=chosen.longitude
+                stops[i].address=chosen.address
             }
         }
-        if let last = stops.indices.last, stops[last].kind == "return", stops[0].latitude != nil {
-            stops[last].name = stops[0].name
-            stops[last].address = stops[0].address
-            stops[last].latitude = stops[0].latitude
-            stops[last].longitude = stops[0].longitude
+        if let last=stops.indices.last,stops[last].kind=="return",stops[0].latitude != nil {
+            stops[last].name=stops[0].name;stops[last].address=stops[0].address
+            stops[last].latitude=stops[0].latitude;stops[last].longitude=stops[0].longitude
         }
     }
+
     @MainActor
     private func calculateRoutes() async {
         times = [:]

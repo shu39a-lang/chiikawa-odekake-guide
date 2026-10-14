@@ -5,7 +5,11 @@
  objectVersion = 56;
  objects = {
   A10000000000000000000001 = {isa = PBXBuildFile; fileRef = A10000000000000000000011; };
+  B20000000000000000000001 = {isa = PBXBuildFile; productRef = B20000000000000000000011; };
+  B20000000000000000000002 = {isa = PBXBuildFile; productRef = B20000000000000000000012; };
+  B20000000000000000000003 = {isa = PBXBuildFile; fileRef = B20000000000000000000013; };
   A10000000000000000000011 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChiikawaGuideApp.swift; sourceTree = "<group>"; };
+  B20000000000000000000013 = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "GoogleService-Info.plist"; sourceTree = "<group>"; };
   A10000000000000000000013 = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = OdekakeGuide.app; sourceTree = BUILT_PRODUCTS_DIR; };
   A10000000000000000000020 = {
    isa = PBXGroup;
@@ -14,7 +18,7 @@
   };
   A10000000000000000000021 = {
    isa = PBXGroup;
-   children = (A10000000000000000000011,);
+   children = (A10000000000000000000011, B20000000000000000000013,);
    path = "OdekakeGuide/OdekakeGuide";
    sourceTree = "<group>";
   };
@@ -33,13 +37,13 @@
   A10000000000000000000031 = {
    isa = PBXResourcesBuildPhase;
    buildActionMask = 2147483647;
-   files = ();
+   files = (B20000000000000000000003,);
    runOnlyForDeploymentPostprocessing = 0;
   };
   A10000000000000000000032 = {
    isa = PBXFrameworksBuildPhase;
    buildActionMask = 2147483647;
-   files = ();
+   files = (B20000000000000000000001, B20000000000000000000002,);
    runOnlyForDeploymentPostprocessing = 0;
   };
   A10000000000000000000040 = {
@@ -49,6 +53,7 @@
    buildRules = ();
    dependencies = ();
    name = OdekakeGuide;
+   packageProductDependencies = (B20000000000000000000011, B20000000000000000000012,);
    productName = OdekakeGuide;
    productReference = A10000000000000000000013;
    productType = "com.apple.product-type.application";
@@ -69,10 +74,14 @@
    knownRegions = (ja, en, Base,);
    mainGroup = A10000000000000000000020;
    productRefGroup = A10000000000000000000022;
+   packageReferences = (B20000000000000000000010,);
    projectDirPath = "";
    projectRoot = "";
    targets = (A10000000000000000000040,);
   };
+  B20000000000000000000010 = {isa = XCRemoteSwiftPackageReference; repositoryURL = "https://github.com/firebase/firebase-ios-sdk"; requirement = { kind = upToNextMajorVersion; minimumVersion = 12.0.0; }; };
+  B20000000000000000000011 = {isa = XCSwiftPackageProductDependency; package = B20000000000000000000010; productName = FirebaseCore; };
+  B20000000000000000000012 = {isa = XCSwiftPackageProductDependency; package = B20000000000000000000010; productName = FirebaseAppCheck; };
   A10000000000000000000050 = {
    isa = XCConfigurationList;
    buildConfigurations = (A10000000000000000000060, A10000000000000000000061,);
@@ -110,6 +119,7 @@
   A10000000000000000000062 = {
    isa = XCBuildConfiguration;
    buildSettings = {
+    CODE_SIGN_ENTITLEMENTS = OdekakeGuide/OdekakeGuide/JapanDayPlanner.entitlements;
     CODE_SIGN_STYLE = Automatic;
     CURRENT_PROJECT_VERSION = 1;
     GENERATE_INFOPLIST_FILE = YES;
@@ -131,6 +141,7 @@
   A10000000000000000000063 = {
    isa = XCBuildConfiguration;
    buildSettings = {
+    CODE_SIGN_ENTITLEMENTS = OdekakeGuide/OdekakeGuide/JapanDayPlanner.entitlements;
     CODE_SIGN_STYLE = Automatic;
     CURRENT_PROJECT_VERSION = 1;
     GENERATE_INFOPLIST_FILE = YES;
