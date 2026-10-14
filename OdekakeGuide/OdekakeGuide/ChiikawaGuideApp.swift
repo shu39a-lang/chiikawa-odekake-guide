@@ -72,34 +72,68 @@ enum JPGatewayError: LocalizedError {
 }
 final class GoogleRouteClient {
     let gateway: URL
+    private let availability = JPGatewayAvailability()
     init(gateway: URL) { self.gateway=gateway }
     private func post<R:Decodable, B:Encodable>(_ path:String, body:B) async throws -> R {
         guard gateway.scheme=="https" else { throw JPGatewayError.unconfigured }
-        var request=URLRequest(url:gateway.appendingPathComponent(path))
-        request.httpMethod="POST"
-        request.timeoutInterval=25
-        request.setValue("application/json",forHTTPHeaderField:"Content-Type")
-        // Ephemeral, device-attested Firebase token (NOT a static secret in the IPA).
-        let verifiedToken=try await AppCheck.appCheck().token(forcingRefresh:false)
-        request.setValue(verifiedToken.token,forHTTPHeaderField:"X-Firebase-AppCheck")
-        request.httpBody=try JSONEncoder().encode(body)
-        let (bytes,response)=try await URLSession.shared.data(for:request)
-        guard let status=response as? HTTPURLResponse,
-              (200..<300).contains(status.statusCode) else {throw JPGatewayError.invalidResponse}
-        return try JSONDecoder().decode(R.self,from:bytes)
+        // A failed Google gateway should not block every subsequent hotel and meal search.
+        guard await availability.canUseGoogle() else { throw JPGatewayError.invalidResponse }
+        do {
+            var request=URLRequest(url:gateway.appendingPathComponent(path))
+            request.httpMethod="POST"
+            request.timeoutInterval=8
+            request.setValue("application/json",forHTTPHeaderField:"Content-Type")
+            let verifiedToken=try await AppCheck.appCheck().token(forcingRefresh:false)
+            request.setValue(verifiedToken.token,forHTTPHeaderField:"X-Firebase-AppCheck")
+            request.httpBody=try JSONEncoder().encode(body)
+            let (bytes,response)=try await URLSession.shared.data(for:request)
+            guard let status=response as? HTTPURLResponse,
+                  (200..<300).contains(status.statusCode) else {throw JPGatewayError.invalidResponse}
+            let result=try JSONDecoder().decode(R.self,from:bytes)
+            await availability.succeeded()
+            return result
+        } catch {
+            await availability.failed()
+            throw error
+        }
     }
     func searchPlaces(_ query:String, near center:JPPoint? = nil, radius:Int = 7000) async throws -> [JPPlace] {
         struct Body:Encodable {let query:String;let center:JPPoint?;let radiusMeters:Int;let maxResults:Int}
-        let result:JPPlaceResults=try await post("api/places",body:Body(query:query,center:center,radiusMeters:radius,maxResults:5))
-        return result.places
+        do {
+            let result:JPPlaceResults=try await post("api/places",body:Body(query:query,center:center,radiusMeters:radius,maxResults:5))
+            if !result.places.isEmpty { return result.places }
+        } catch { /* Continue with real map search, not invented coordinates. */ }
+        return try await JPMapKitRecovery.places(query:query,center:center,radius:Double(radius),limit:5)
     }
     func hotels(near center:JPPoint, maxResults:Int = 5) async throws -> JPHotelResults {
         struct Body:Encodable {let center:JPPoint;let maxResults:Int}
-        return try await post("api/hotels",body:Body(center:center,maxResults:maxResults))
+        do {
+            let results:JPHotelResults=try await post("api/hotels",body:Body(center:center,maxResults:maxResults))
+            if !results.hotels.isEmpty { return results }
+        } catch { /* Use an independent map provider when Google cannot respond. */ }
+        var matches=try await JPMapKitRecovery.places(query:"ホテル",center:center,radius:12000,limit:maxResults)
+        if matches.count < 3 {
+            let wider=try await JPMapKitRecovery.places(query:"ホテル",center:center,radius:30000,limit:maxResults)
+            matches=JPMapKitRecovery.nearestUnique(matches + wider,limit:maxResults)
+        }
+        return JPHotelResults(hotels:matches,found:matches.count,
+            searchedRadiusMeters:matches.count<3 ? 30000 : 12000,
+            requiresSelection:true,sort:"distance",distanceNote:"real map results only",
+            source:"Apple MapKit fallback",message:matches.isEmpty ? "No verified hotels found" : nil,
+            mapsSearchUrl:URL(string:"https://www.google.com/maps/search/?api=1&query=hotel")!)
     }
     func restaurants(near center:JPPoint, maxResults:Int = 8) async throws -> JPRestaurantResults {
         struct Body:Encodable {let center:JPPoint;let maxResults:Int}
-        return try await post("api/restaurants",body:Body(center:center,maxResults:maxResults))
+        do {
+            let results:JPRestaurantResults=try await post("api/restaurants",body:Body(center:center,maxResults:maxResults))
+            if !results.restaurants.isEmpty { return results }
+        } catch { /* Search actual map listings when Google is unavailable. */ }
+        var matches=try await JPMapKitRecovery.places(query:"レストラン",center:center,radius:5000,limit:maxResults)
+        if matches.count<3 {
+            let wider=try await JPMapKitRecovery.places(query:"飲食店",center:center,radius:6000,limit:maxResults)
+            matches=JPMapKitRecovery.nearestUnique(matches+wider,limit:maxResults)
+        }
+        return JPRestaurantResults(restaurants:matches,requiresSelection:true)
     }
     func details(for placeId:String) async throws -> JPPlaceDetails {
         struct Body:Encodable {let placeId:String}
@@ -127,6 +161,63 @@ enum FirebaseBootstrap {
     }
 }
 
+
+private actor JPGatewayAvailability {
+    private var retryAfter = Date.distantPast
+    func canUseGoogle() -> Bool { Date() >= retryAfter }
+    func failed() { retryAfter = Date().addingTimeInterval(60) }
+    func succeeded() { retryAfter = .distantPast }
+}
+
+// Google Places and Routes remain primary. This is an independent map recovery,
+// and returns actual nearby facilities and map routes, never invented times.
+private enum JPMapKitRecovery {
+    static func nearestUnique(_ places: [JPPlace], limit: Int) -> [JPPlace] {
+        var seen=Set<String>()
+        return places.sorted { ($0.distanceMeters ?? 0) < ($1.distanceMeters ?? 0) }
+            .filter { seen.insert($0.id).inserted }.prefix(max(1,limit)).map { $0 }
+    }
+    static func places(query: String, center: JPPoint?, radius: Double, limit: Int) async throws -> [JPPlace] {
+        let request = MKLocalSearch.Request()
+        request.naturalLanguageQuery = query
+        request.resultTypes = [.pointOfInterest, .address]
+        if let center {
+            request.region = MKCoordinateRegion(center: CLLocationCoordinate2D(latitude: center.lat, longitude: center.lng),
+                                                latitudinalMeters: radius * 2, longitudinalMeters: radius * 2)
+        }
+        let response = try await MKLocalSearch(request: request).start()
+        let matches = response.mapItems.compactMap { item -> JPPlace? in
+            let point = item.placemark.coordinate
+            guard CLLocationCoordinate2DIsValid(point),
+                  item.placemark.isoCountryCode == nil || item.placemark.isoCountryCode == "JP",
+                  let name = item.name, !name.isEmpty else { return nil }
+            let meters: Double? = center.map { anchor in
+                CLLocation(latitude: point.latitude, longitude: point.longitude)
+                    .distance(from: CLLocation(latitude: anchor.lat, longitude: anchor.lng))
+            }
+            if let meters, meters > radius { return nil }
+            return JPPlace(id: String(format: "mapkit:%.6f:%.6f", point.latitude, point.longitude),
+                           name: name, address: item.placemark.title ?? "",
+                           lat: point.latitude, lng: point.longitude, type: "place",
+                           distanceMeters: meters.map { Int($0.rounded()) }, mapsUrl: nil)
+        }
+        return nearestUnique(matches, limit: limit)
+    }
+    // Real road/pedestrian directions, not straight-line estimates.
+    static func route(from origin: MKMapItem, to destination: MKMapItem,
+                      by mode: MKDirectionsTransportType) async -> TravelTime? {
+        let request = MKDirections.Request()
+        request.source = origin
+        request.destination = destination
+        request.transportType = mode
+        guard let response = try? await MKDirections(request: request).calculate(),
+              let route = response.routes.first,
+              route.expectedTravelTime.isFinite,
+              route.expectedTravelTime > 0 else { return nil }
+        return TravelTime(minutes: max(1, Int((route.expectedTravelTime / 60).rounded(.up))),
+                          isApproximate: false)
+    }
+}
 
 private enum GoogleAPISingleton {
     // Production endpoint already deployed under the user's Google Cloud project.
@@ -173,9 +264,13 @@ private enum RouteTimeEngine {
             if mode == .walking { minutes=result.walking?.minutes }
             else if mode == .automobile { minutes=result.driving?.minutes }
             else { minutes=result.transit?.minutes }
-            guard let minutes, minutes>0 else { return nil }
+            guard let minutes, minutes>0 else {
+                return await JPMapKitRecovery.route(from:origin,to:destination,by:mode)
+            }
             return TravelTime(minutes:minutes,isApproximate:false)
-        } catch { return nil } // never borrow walking minutes for a train.
+        } catch {
+            return await JPMapKitRecovery.route(from:origin,to:destination,by:mode)
+        } // Never borrow the wrong transport mode or invent an ETA.
     }
 }
 
@@ -1132,7 +1227,14 @@ private struct PlannerView: View {
     }
 
     private func firstVenueMapItem(in prefecture: PrefectureOption) async throws -> MKMapItem? {
-        try await venueMapItem(selectedVenue(0), in: prefecture)
+        // The verified first-stop coordinates must not depend on another API request.
+        let first=selectedVenue(0)
+        if let coordinate=pinnedVenueCoordinate(first) {
+            let item=MKMapItem(placemark:MKPlacemark(coordinate:coordinate))
+            item.name=localVenueName(first)
+            return item
+        }
+        return try await venueMapItem(first, in: prefecture)
     }
     // Confirmed local stays keep area-based courses useful even when Apple Maps
     // omits small inns or classifies them outside the hotel category.
