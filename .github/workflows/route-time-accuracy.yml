@@ -1,5 +1,8 @@
 name: Japan Day Planner - Google API iPhone integration
 on:
+  push:
+    paths:
+      - '.github/workflows/route-time-accuracy.yml'
   workflow_dispatch:
 permissions:
   contents: write
@@ -34,6 +37,15 @@ jobs:
           print('Firebase client config: correct project and bundle; contents not printed.')
           import subprocess
           subprocess.run(['python3',str(target/'integrate_google.py')],check=True)
+          # Fix double @MainActor left by original Swift source plus generated bridge.
+          # Preserve the original attribute; remove only the inserted duplicate.
+          source_file=pathlib.Path('OdekakeGuide/OdekakeGuide/ChiikawaGuideApp.swift')
+          generated=source_file.read_text(encoding='utf-8')
+          bad='@MainActor private enum RouteTimeEngine {'
+          assert generated.count(bad)==1, 'Unexpected route engine: stop safely'
+          generated=generated.replace(bad,'private enum RouteTimeEngine {',1)
+          source_file.write_text(generated,encoding='utf-8')
+          assert generated.count('private enum RouteTimeEngine {')==1
           PYTHON
           git diff --check
           swiftc -frontend -parse OdekakeGuide/OdekakeGuide/ChiikawaGuideApp.swift
