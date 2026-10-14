@@ -1,350 +1,62 @@
-# Japan Day Planner: ALL cities, hotels, dining, attractions & custom itineraries
-# After pasting, Actions -> Run workflow. Source commits ONLY after compiling.
-name: Japan Day Planner - unified address and route system
+name: Japan Day Planner - Google API iPhone integration
 on:
   workflow_dispatch:
 permissions:
   contents: write
-
 jobs:
-  repair:
+  integrate:
     runs-on: macos-15
     timeout-minutes: 55
     steps:
-      - name: Checkout app source
+      - name: Checkout current Japan Day Planner
         uses: actions/checkout@v4
         with:
           ref: main
           persist-credentials: true
-      - name: Apply unified address and route engine
+      - name: Integrate Places Routes and Firebase app config
         shell: bash
         run: |
           set -euo pipefail
-          python3 - <<'PYTHON_PATCH'
-          # Japan Day Planner – unified route/endpoint corrections (2026-10-13)
-          # Applies to the existing app; stops rather than altering an unknown version.
-          from pathlib import Path
-          import re
-          p = Path('OdekakeGuide/OdekakeGuide/ChiikawaGuideApp.swift')
-          s = p.read_text(encoding='utf-8')
-          original = s
-          
-          def once(old, new, reason):
-              global s
-              count = s.count(old)
-              if count != 1:
-                  raise RuntimeError(f'{reason}: expected 1 anchor, found {count}; source left untouched')
-              s = s.replace(old, new, 1)
-          
-          def between(start, end, replacement, reason):
-              global s
-              if s.count(start) != 1 or s.count(end) != 1:
-                  raise RuntimeError(f'{reason}: cannot uniquely locate boundaries; source left untouched')
-              i=s.index(start)
-              j=s.index(end,i)
-              if j <= i:
-                  raise RuntimeError(f'{reason}: boundaries inverted')
-              s=s[:i]+replacement+s[j:]
-          
-          # One map-based route computation for curated itineraries, hotels, restaurants,
-          # and customer-defined itineraries. No linear-distance guessed durations.
-          route_core='''// Route-time source of truth for EVERY screen in the app.
-          // Returns a duration only after a real map response; no straight-line guesses.
-          @MainActor
-          private enum RouteTimeEngine {
-              private struct CacheValue {
-                  let minutes: Int
-                  let created: Date
-              }
-              private static var successfulRoutes: [String: CacheValue] = [:]
-          
-              private static func coordinates(_ item: MKMapItem) -> CLLocationCoordinate2D? {
-                  let point = item.placemark.coordinate
-                  guard CLLocationCoordinate2DIsValid(point),
-                        abs(point.latitude) > 0.01, abs(point.longitude) > 0.01 else { return nil }
-                  return point
-              }
-          
-              static func estimate(_ origin: MKMapItem, _ destination: MKMapItem,
-                                   by mode: MKDirectionsTransportType) -> TravelTime? {
-                  nil // Never convert air distance into minutes.
-              }
-          
-              static func resolve(_ origin: MKMapItem, _ destination: MKMapItem,
-                                  by mode: MKDirectionsTransportType) async -> TravelTime? {
-                  guard let start = coordinates(origin), let end = coordinates(destination) else { return nil }
-                  let direct = CLLocation(latitude: start.latitude, longitude: start.longitude)
-                      .distance(from: CLLocation(latitude: end.latitude, longitude: end.longitude))
-                  guard direct.isFinite, direct >= 5 else { return nil }
-          
-                  let modeKey = mode == .walking ? "walking" : mode == .automobile ? "driving" : "transit"
-                  let key = String(format: "%.6f,%.6f|%.6f,%.6f|%@", start.latitude,
-                      start.longitude, end.latitude, end.longitude, modeKey)
-                  if let saved = successfulRoutes[key], Date().timeIntervalSince(saved.created) < 300 {
-                      return TravelTime(minutes: saved.minutes, isApproximate: false)
-                  }
-                  for attempt in 0..<2 {
-                      guard !Task.isCancelled else { return nil }
-                      let request = MKDirections.Request()
-                      request.source = origin
-                      request.destination = destination
-                      request.transportType = mode
-                      request.departureDate = Date()
-                      request.requestsAlternateRoutes = false
-                      var result: TimeInterval?
-                      if mode == .transit {
-                          // Rail/public-transit service is an ETA, not a fabricated walking time.
-                          if let eta = try? await MKDirections(request: request).calculateETA() {
-                              result = eta.expectedTravelTime
-                          }
-                      } else if let response = try? await MKDirections(request: request).calculate() {
-                          // A route on public roads/paths, not a straight-line projection.
-                          let valid = response.routes.filter {
-                              $0.distance.isFinite && $0.distance > 0 &&
-                              $0.distance >= direct * 0.70 &&
-                              $0.expectedTravelTime.isFinite && $0.expectedTravelTime > 0
-                          }
-                          result = valid.min(by: { $0.expectedTravelTime < $1.expectedTravelTime })?.expectedTravelTime
-                      }
-                      if let seconds = result, seconds.isFinite, seconds > 0,
-                         seconds / 60 < Double(Int.max) {
-                          let minutes = max(1, Int(ceil(seconds / 60)))
-                          successfulRoutes[key] = CacheValue(minutes: minutes, created: Date())
-                          if successfulRoutes.count > 250 {
-                              successfulRoutes = successfulRoutes.filter {
-                                  Date().timeIntervalSince($0.value.created) < 300
-                              }
-                          }
-                          return TravelTime(minutes: minutes, isApproximate: false)
-                      }
-                      if attempt == 0 { try? await Task.sleep(nanoseconds: 400_000_000) }
-                  }
-                  return nil // Unsupported/failed route: present a map link instead of false minutes.
-              }
-          }
-          
-          // Shared resolver for named places, addresses, and registered lodging.
-          // It validates the coordinate, country and local area before any ETA request.
-          private enum RoutePlaceEngine {
-              static func validCoordinate(_ point: CLLocationCoordinate2D) -> Bool {
-                  CLLocationCoordinate2DIsValid(point) &&
-                  abs(point.latitude) > 0.01 && abs(point.longitude) > 0.01
-              }
-          
-              static func inArea(_ item: MKMapItem, anchor: CLLocationCoordinate2D?,
-                                 radius: Double = 90_000) -> Bool {
-                  let point = item.placemark.coordinate
-                  guard validCoordinate(point),
-                        item.placemark.isoCountryCode == nil || item.placemark.isoCountryCode == "JP" else { return false }
-                  guard let anchor, validCoordinate(anchor) else { return true }
-                  return CLLocation(latitude: point.latitude, longitude: point.longitude)
-                      .distance(from: CLLocation(latitude: anchor.latitude, longitude: anchor.longitude)) <= radius
-              }
-          
-              static func normalized(_ value: String) -> String {
-                  value.folding(options: [.caseInsensitive, .widthInsensitive, .diacriticInsensitive],
-                                locale: Locale(identifier: "ja_JP"))
-                      .components(separatedBy: .whitespacesAndNewlines).joined()
-                      .replacingOccurrences(of: "ヶ", with: "ケ")
-              }
-          
-              static func resolve(_ query: String, around anchor: CLLocationCoordinate2D?,
-                                  maxRadius: Double = 90_000) async -> MKMapItem? {
-                  let clean = query.trimmingCharacters(in: .whitespacesAndNewlines)
-                  guard !clean.isEmpty else { return nil }
-                  let requestedName = normalized(clean.components(separatedBy: ",").first ?? "")
-                  let addressLike = clean.contains("丁目") || clean.contains("番地") || clean.contains("〒") ||
-                      clean.range(of: "[0-9０-９]+[-−ー][0-9０-９]+", options: .regularExpression) != nil
-                  let request = MKLocalSearch.Request()
-                  request.naturalLanguageQuery = clean
-                  request.resultTypes = [.address, .pointOfInterest]
-                  if let anchor, validCoordinate(anchor) {
-                      request.region = MKCoordinateRegion(center: anchor,
-                          latitudinalMeters: maxRadius * 2, longitudinalMeters: maxRadius * 2)
-                  }
-                  if let response = try? await MKLocalSearch(request: request).start() {
-                      let candidates = response.mapItems.filter { inArea($0, anchor: anchor, radius: maxRadius) }
-                      // Named venues must match by name. Full street addresses use reverse
-                      // geocoding instead of choosing an unrelated nearby hotel.
-                      let matching = candidates.filter { item in
-                          let name = normalized(item.name ?? "")
-                          return !requestedName.isEmpty &&
-                              (name == requestedName || name.contains(requestedName) ||
-                               (name.count >= 3 && requestedName.contains(name) &&
-                                !["ホテル", "公園", "駅", "神社", "寺院", "温泉"].contains(name)))
-                      }
-                      if let exact = matching.first { return exact }
-                      // Never treat the only search hit as an exact address.
-                      // An ambiguous address must be independently geocoded below.
-                  }
-                  // Addresses that the POI index missed can still be geocoded directly.
-                  if let marks = try? await CLGeocoder().geocodeAddressString(clean,
-                                                in: nil, preferredLocale: Locale(identifier: "ja_JP")) {
-                      for mark in marks {
-                          let item = MKMapItem(placemark: MKPlacemark(placemark: mark))
-                          guard inArea(item, anchor: anchor, radius: maxRadius) else { continue }
-                          let label = normalized(mark.name ?? "")
-                          if addressLike || (!requestedName.isEmpty &&
-                              (label == requestedName || label.contains(requestedName) ||
-                               (label.count >= 3 && requestedName.contains(label) &&
-                                !["ホテル", "公園", "駅", "神社", "寺院", "温泉"].contains(label)))) {
-                              return item
-                          }
-                      }
-                  }
-                  return nil
-              }
-          }
-          
-          '''
-          between('private enum RouteTimeEngine {', '\nprivate struct Venue:', route_core, 'replace common route + place engine')
-          
-          # Avoid accepting a matching-name venue on the opposite side of a prefecture.
-          old='''        if hotelPlace(item, isIn: prefecture) { return true }
-                  if let known = pinnedFirstVenueCoordinate {
-                      let d = CLLocation(latitude: point.latitude, longitude: point.longitude)
-                          .distance(from: CLLocation(latitude: known.latitude, longitude: known.longitude))
-                      return d <= 50_000
-                  }
-                  return false'''
-          new='''        if let known = pinnedFirstVenueCoordinate {
-                      // Real nearby locations may cross municipal/prefectural borders.
-                      return RoutePlaceEngine.inArea(item, anchor: known, radius: 75_000)
-                  }
-                  // Without a known first stop, require the correct prefecture.
-                  return hotelPlace(item, isIn: prefecture)'''
-          once(old,new,'enforce local geographic proximity before same-prefecture names')
-          
-          # Accept abbreviated native venue names after the regional filter has succeeded.
-          once('                    || (needle.count >= 4 && label.contains(needle) && !needle.hasSuffix("駅"))',
-               '                    || (needle.count >= 4 && label.contains(needle) && !needle.hasSuffix("駅"))\n                    || (label.count >= 3 && needle.contains(label) &&\n                        !["ホテル", "公園", "駅", "神社", "寺院", "温泉"].contains(label))',
-               'accept shorter native venue name after location validation')
-          
-          # Last-resort geocoding for any sightseeing stop -- not a hardcoded collection
-          # of manually corrected landmarks. Existing exact POI/name logic still runs first.
-          once('''        return nil
-              }
-              private func firstVenueMapItem(in prefecture: PrefectureOption) async throws -> MKMapItem? {''',
-          '''        if let verified = await RoutePlaceEngine.resolve(
-                      "\\(expected), \\(prefecture.ja), Japan",
-                      around: pinnedFirstVenueCoordinate),
-                     isLocalRoutePlace(verified, in: prefecture),
-                     matchesName(verified.name ?? "") || matchesName(verified.placemark.name ?? "") {
-                      resolvedPlaceCache[cacheKey] = verified
-                      return verified
-                  }
-                  return nil
-              }
-              private func firstVenueMapItem(in prefecture: PrefectureOption) async throws -> MKMapItem? {''',
-              'reuse shared address resolver for unmatched sightseeing')
-          
-          # All hotel, meal and place labels share the same address/coordinate filter.
-          between('''        // An unmatched sightseeing label must not block local address search.
-          ''',
-          '''        return nil
-              }
-              // Only verified local coordinates are used here.''',
-          '''        // One deterministic location lookup for all user-entered addresses,
-                  // hotel names, dining venues and custom-selected sightseeing points.
-                  var queries: [String] = []
-                  if clean == hotelQuery {
-                      if hotelChoice == "suggested", let hotel = selectedSuggestedHotel {
-                          if !hotel.address.isEmpty { queries.append(hotel.address) }
-                          if let lookup = hotel.lookupQuery { queries.append(lookup) }
-                      }
-                      if let chosen = chosenHotel { queries.append(chosen.addressJP) }
-                  }
-                  queries.append(clean)
-                  var unique = Set<String>()
-                  for query in queries where unique.insert(query).inserted {
-                      guard !Task.isCancelled else { return nil }
-                      if let place = await RoutePlaceEngine.resolve(query,
-                          around: pinnedFirstVenueCoordinate, maxRadius: 100_000) {
-                          resolvedPlaceCache[clean] = place
-                          return place
-                      }
-                  }
-          ''', 'consolidate hotel / restaurant / address resolution')
-          
-          # When the first attraction has a registered exact coordinate, never depend on
-          # a separate fragile POI name lookup before searching its surrounding hotels.
-          # The current main-branch code already uses pinnedFirstVenueCoordinate here.
-          assert 'if let pinned = pinnedFirstVenueCoordinate {' in s
-          
-          # The same real-route engine now drives all 3 modes in hotel, sightseeing,
-          # restaurant and custom-tour transfers. No replacement with arbitrary duration.
-          assert 'calculateETA()' in s
-          assert 'RouteTimeEngine.resolve(origin, destination, by: transport)' in s
-          assert 'RouteTimeEngine.resolve(source, destination, by: transport)' in s
-          assert 'for (mode, transport) in [("transit", MKDirectionsTransportType.transit)' in s
-          assert 'routeLegTimes[key]?[mode] = time' in s
-          
-          # Ensure manually entered sightseeing / meal stops must have spatially valid
-          # candidates. Never choose an arbitrary first result miles away from the user.
-          once('''            let found: [OriginalPlace] = Array(response.mapItems.prefix(4)).compactMap { result in
-                          guard let name = result.name else { return nil }
-                          let point = result.placemark.coordinate
-                          guard CLLocationCoordinate2DIsValid(point), abs(point.latitude) > 0.01,
-                                abs(point.longitude) > 0.01,
-                                result.placemark.isoCountryCode == nil || result.placemark.isoCountryCode == "JP" else { return nil }
-                          return OriginalPlace(name: name, address: result.placemark.title ?? name, latitude: point.latitude, longitude: point.longitude)
-                      }''',
-          '''            let anchor = stops.first(where: { $0.id != item.id && $0.latitude != nil && $0.longitude != nil })
-                          .flatMap { stop -> CLLocationCoordinate2D? in
-                              guard let lat = stop.latitude, let lon = stop.longitude else { return nil }
-                              return CLLocationCoordinate2D(latitude: lat, longitude: lon)
-                          }
-                      let found: [OriginalPlace] = Array(response.mapItems.filter {
-                          RoutePlaceEngine.inArea($0, anchor: anchor, radius: 100_000)
-                      }.prefix(4)).compactMap { result in
-                          guard let name = result.name else { return nil }
-                          let point = result.placemark.coordinate
-                          return OriginalPlace(name: name, address: result.placemark.title ?? name,
-                              latitude: point.latitude, longitude: point.longitude)
-                      }''', 'validate custom itinerary named place results')
-          
-          # Do not overwrite the user's stored preferences and existing routes.
-          if s == original:
-              raise RuntimeError('Nothing changed')
-          for required in [
-              '@MainActor\nprivate enum RouteTimeEngine',
-              'private enum RoutePlaceEngine',
-              'calculateETA()',
-              'Unsupported/failed route',
-              'RoutePlaceEngine.resolve(query,',
-              'RoutePlaceEngine.inArea',
-              'hotelResults = Array(suggestions.sorted',
-          ]:
-              if required not in s:
-                  raise RuntimeError('Missing required logic: ' + required)
-          p.write_text(s, encoding='utf-8')
-          print('UNIFIED_ROUTE_PATCH_OK', len(original), '->', len(s))
-          PYTHON_PATCH
+          python3 - <<'PYTHON'
+          import base64, pathlib, zipfile, io, shutil, plistlib
+          payload = "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"
+          z=zipfile.ZipFile(io.BytesIO(base64.b64decode(payload)))
+          target=pathlib.Path('/tmp/japan_day_google_v6')
+          target.mkdir(parents=True,exist_ok=True)
+          z.extractall(target)
+          plist=target/'config/GoogleService-Info.plist'
+          with plist.open('rb') as f: config=plistlib.load(f)
+          assert config['BUNDLE_ID']=='com.shu39a.odekakeguide', 'wrong bundle ID'
+          assert config['PROJECT_ID']=='japan-day-plan','wrong Firebase project'
+          dest=pathlib.Path('OdekakeGuide/OdekakeGuide/GoogleService-Info.plist')
+          dest.parent.mkdir(parents=True,exist_ok=True)
+          shutil.copyfile(plist,dest)
+          print('Firebase client config: correct project and bundle; contents not printed.')
+          import subprocess
+          subprocess.run(['python3',str(target/'integrate_google.py')],check=True)
+          PYTHON
           git diff --check
-          git diff --stat
-      - name: Compile corrected iPhone source
+          swiftc -frontend -parse OdekakeGuide/OdekakeGuide/ChiikawaGuideApp.swift
+          plutil -lint OdekakeGuide/OdekakeGuide/GoogleService-Info.plist
+      - name: Compile complete iOS app before saving
         shell: bash
         run: |
           set -euo pipefail
-          xcodebuild \
-            -project OdekakeGuide.xcodeproj \
-            -scheme OdekakeGuide \
-            -configuration Debug \
-            -sdk iphonesimulator \
+          xcodebuild -project OdekakeGuide.xcodeproj -scheme OdekakeGuide \
+            -configuration Debug -sdk iphonesimulator \
             -destination 'generic/platform=iOS Simulator' \
-            CODE_SIGNING_ALLOWED=NO \
-            build
-      - name: Commit only after successful compilation
+            CODE_SIGNING_ALLOWED=NO build
+      - name: Commit only after successful compile
         shell: bash
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add OdekakeGuide/OdekakeGuide/ChiikawaGuideApp.swift
-          if git diff --cached --quiet; then
-            echo 'No changes to commit'
-            exit 0
-          fi
-          git commit -m 'Unify address validation and map route times across all screens'
+          git add OdekakeGuide/OdekakeGuide/ChiikawaGuideApp.swift \
+            OdekakeGuide/OdekakeGuide/GoogleService-Info.plist \
+            OdekakeGuide/OdekakeGuide/JapanDayPlanner.entitlements \
+            OdekakeGuide.xcodeproj/project.pbxproj codemagic.yaml
+          if git diff --cached --quiet; then echo 'No changes to commit'; exit 0; fi
+          git commit -m 'Integrate Google Places and Routes with verified Firebase client config'
           git pull --rebase origin main
           git push origin HEAD:main
