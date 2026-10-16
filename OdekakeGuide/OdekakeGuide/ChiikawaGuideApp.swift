@@ -378,7 +378,7 @@ private struct PlannerView: View {
     @State private var routeLegShortWalk: Set<String> = []
 
     private var language: GuideLanguage { GuideLanguage(rawValue: languageCode) ?? .ja }
-    private func text(_ key: String) -> String { GuideTranslations.ui[key]?[language.index] ?? key }
+    private func text(_ key: String) -> String { GlobalNavigation39.get(key, language) ?? GuideTranslations.ui[key]?[language.index] ?? key }
     private func format(_ key: String, _ arguments: CVarArg...) -> String {
         String(format: text(key), locale: language.locale, arguments: arguments)
     }
@@ -723,6 +723,7 @@ private struct PlannerView: View {
             PlannerInstructionsView(language: item)
         }
         .environment(\.locale, language.locale)
+        .environment(\.layoutDirection, [.ar, .he, .ur].contains(language) ? .rightToLeft : .leftToRight)
         .preferredColorScheme(.dark)
         .tint(journeyGold)
     }
@@ -737,7 +738,7 @@ private struct PlannerView: View {
     private let journeyGold = PlannerTheme.cyan
 
     private func journeyText(_ key: String) -> String {
-        JourneyTranslations.ui[key]?[language.index] ?? key
+        GlobalNavigation39.get(key, language) ?? JourneyTranslations.ui[key]?[language.index] ?? key
     }
     private func storedValues(_ value: String) -> [String: String] {
         guard let data = value.data(using: .utf8) else { return [:] }
@@ -1134,6 +1135,15 @@ private struct PlannerView: View {
             return CLLocationCoordinate2D(latitude: 34.995317, longitude: 135.783285)
         case "Otagi Nenbutsuji Temple":
             return CLLocationCoordinate2D(latitude: 35.0313197, longitude: 135.6611036)
+        case "Saga Toriimoto preserved street":
+            // Saga Toriimoto preserved neighborhood near the townscape museum.
+            return CLLocationCoordinate2D(latitude: 35.0277, longitude: 135.6638)
+        case "Adashino Nenbutsuji Temple":
+            // Main temple area: no speculative straight-line travel time.
+            return CLLocationCoordinate2D(latitude: 35.0268056, longitude: 135.6645222)
+        case "Saga Arashiyama Station":
+            // JR Saga-Arashiyama station, not the similarly named scenic-railway station.
+            return CLLocationCoordinate2D(latitude: 35.0187493, longitude: 135.6811814)
         case "Meiji Jingu Shrine":
             // Fixed entrance-area coordinate for reliable route calculations.
             return CLLocationCoordinate2D(latitude: 35.669868, longitude: 139.702255)
@@ -1703,7 +1713,7 @@ private struct PlannerView: View {
             || area == japaneseName
     }
     private func hotelTravelText(_ key: String) -> String {
-        HotelTravelTranslations.ui[key]?[language.index] ?? key
+        GlobalNavigation39.get(key, language) ?? HotelTravelTranslations.ui[key]?[language.index] ?? key
     }
     private func travelDurationText(_ minutes: Int) -> String {
         guard minutes >= 60 else {
@@ -1917,19 +1927,29 @@ private struct PlannerView: View {
             case .dinner:
                 dinnerCard
             case .hotelAfterDinner:
-                if let place = dinnerSelection, !hotelQuery.isEmpty {
-                    travelPanel(origin: place.query, destination: hotelQuery, title: journeyText("afterDinner"), fromName: place.name, toName: hotelName)
+                if !journeyCompleted {
+                    if let place = dinnerSelection, !hotelQuery.isEmpty {
+                        travelPanel(origin: place.query, destination: hotelQuery,
+                            title: journeyText("afterDinner"), fromName: place.name, toName: hotelName)
+                    } else if hotelQuery.isEmpty {
+                        journeyPanel { Text(journeyText("enterHotel")) }
+                    } else {
+                        // Dinner is optional. Do not claim a non-selected dinner is required.
+                        journeyPanel { Text(journeyText("optionalMeal")) }
+                    }
                 } else {
-                    journeyPanel { Text(journeyText("selectDinnerHotel")) }
-                }
-                if journeyCompleted {
-                    Label(journeyText("completed"), systemImage: "checkmark.circle.fill").font(.headline).foregroundStyle(journeyGold)
+                    Label(journeyText("completed"), systemImage: "checkmark.circle.fill")
+                        .font(.headline).foregroundStyle(journeyGold)
                 }
             }
-            if !journeyCompleted {
-                // Choosing a hotel, lunch or dinner enriches the itinerary.
-                // None of those optional searches may block this navigation button.
-                journeyAction(journeyText(journeyIndex == stages.count - 1 ? "arrived" : "next")) {
+            if journeyCompleted {
+                // This is intentionally visible on the last screen in every language.
+                journeyAction(journeyText("restart"), systemImage: "arrow.counterclockwise") {
+                    moveToJourneyStage(0)
+                }
+            } else {
+                // Choosing a meal remains optional; all languages share this action.
+                journeyAction(journeyText(journeyIndex == stages.count - 1 ? "finishPlan" : "next")) {
                     advanceJourney()
                 }
             }
@@ -2122,7 +2142,7 @@ private struct PlannerView: View {
     }
 
     private func extra(_ key: String) -> String {
-        TravelExtras.ui[key]?[language.index] ?? key
+        GlobalNavigation39.get(key, language) ?? TravelExtras.ui[key]?[language.index] ?? key
     }
     private var cityQuery: String {
         ["asakusa": "Tokyo", "ueno": "Tokyo", "kyoto": "Kyoto", "osaka": "Osaka", "nara": "Nara", "hiroshima": "Hiroshima"][route.id] ?? "Japan"
@@ -2896,6 +2916,24 @@ private enum GuideLanguage: String, CaseIterable, Identifiable {
     }
 }
 
+// Primary actions are localized for every selectable country/language.
+// Longer descriptions and historical place names retain their existing translations.
+private enum GlobalNavigation39 {
+    private static let labels: [String: [String: String]] = {
+        let json = #"""
+{"ja":{"next":"次へ","previous":"戻る","finishPlan":"行程を完了","restart":"最初から確認","completed":"行程の確認が完了しました","current":"現在の工程","home":"言語選択","returnHotel":"ホテルへ戻る","findDinner":"夕食のお店を探す","retry":"もう一度検索","walking":"徒歩","taxi":"車・タクシー","transit":"電車・公共交通","chooseHotel":"ホテルを選ぶ","route":"観光コース"},"ko":{"next":"다음","previous":"이전","finishPlan":"일정 완료","restart":"처음부터 다시","completed":"일정 확인 완료","current":"현재 단계","home":"언어 선택","returnHotel":"호텔로 돌아가기","findDinner":"저녁 식당 찾기","retry":"다시 검색","walking":"도보","taxi":"차량·택시","transit":"대중교통","chooseHotel":"호텔 선택","route":"관광 코스"},"zh":{"next":"下一步","previous":"上一步","finishPlan":"完成行程","restart":"从头查看","completed":"行程已确认","current":"当前步骤","home":"语言选择","returnHotel":"返回酒店","findDinner":"搜索晚餐餐厅","retry":"重新搜索","walking":"步行","taxi":"汽车·出租车","transit":"公共交通","chooseHotel":"选择酒店","route":"观光路线"},"zht":{"next":"下一步","previous":"上一步","finishPlan":"完成行程","restart":"重新開始","completed":"行程確認完成","current":"目前步驟","home":"選擇語言","returnHotel":"返回飯店","findDinner":"尋找晚餐餐廳","retry":"重新搜尋","walking":"步行","taxi":"汽車・計程車","transit":"大眾運輸","chooseHotel":"選擇飯店","route":"觀光路線"},"en":{"next":"Continue","previous":"Back","finishPlan":"Finish itinerary","restart":"Start again","completed":"Itinerary review complete","current":"Current step","home":"Languages","returnHotel":"Return to hotel","findDinner":"Find dinner","retry":"Retry","walking":"Walking","taxi":"Car / taxi","transit":"Transit","chooseHotel":"Choose hotel","route":"Sightseeing routes"},"th":{"next":"ถัดไป","previous":"ย้อนกลับ","finishPlan":"เสร็จสิ้นแผน","restart":"เริ่มใหม่","completed":"ตรวจสอบแผนเสร็จแล้ว","current":"ขั้นตอนปัจจุบัน","home":"เลือกภาษา","returnHotel":"กลับโรงแรม","findDinner":"หาร้านอาหารเย็น","retry":"ค้นหาอีกครั้ง","walking":"เดิน","taxi":"รถยนต์/แท็กซี่","transit":"ขนส่งสาธารณะ","chooseHotel":"เลือกโรงแรม","route":"เส้นทางเที่ยว"},"fil":{"next":"Susunod","previous":"Bumalik","finishPlan":"Tapusin ang plano","restart":"Magsimula muli","completed":"Nakumpleto ang plano","current":"Kasalukuyang hakbang","home":"Mga wika","returnHotel":"Bumalik sa hotel","findDinner":"Maghanap ng hapunan","retry":"Subukan muli","walking":"Lakad","taxi":"Kotse / taksi","transit":"Pampublikong sasakyan","chooseHotel":"Pumili ng hotel","route":"Mga ruta"},"vi":{"next":"Tiếp theo","previous":"Quay lại","finishPlan":"Hoàn tất lịch trình","restart":"Bắt đầu lại","completed":"Đã xem xong lịch trình","current":"Bước hiện tại","home":"Ngôn ngữ","returnHotel":"Về khách sạn","findDinner":"Tìm quán ăn tối","retry":"Thử lại","walking":"Đi bộ","taxi":"Ô tô / taxi","transit":"Giao thông công cộng","chooseHotel":"Chọn khách sạn","route":"Tuyến tham quan"},"id":{"next":"Lanjut","previous":"Kembali","finishPlan":"Selesaikan rencana","restart":"Mulai lagi","completed":"Rencana selesai ditinjau","current":"Langkah saat ini","home":"Bahasa","returnHotel":"Kembali ke hotel","findDinner":"Cari makan malam","retry":"Coba lagi","walking":"Jalan kaki","taxi":"Mobil / taksi","transit":"Angkutan umum","chooseHotel":"Pilih hotel","route":"Rute wisata"},"ms":{"next":"Seterusnya","previous":"Kembali","finishPlan":"Selesaikan jadual","restart":"Mula semula","completed":"Jadual selesai disemak","current":"Langkah semasa","home":"Bahasa","returnHotel":"Kembali ke hotel","findDinner":"Cari makan malam","retry":"Cuba lagi","walking":"Berjalan kaki","taxi":"Kereta / teksi","transit":"Pengangkutan awam","chooseHotel":"Pilih hotel","route":"Laluan lawatan"},"fr":{"next":"Suivant","previous":"Retour","finishPlan":"Terminer le parcours","restart":"Recommencer","completed":"Parcours vérifié","current":"Étape actuelle","home":"Langues","returnHotel":"Retour à l’hôtel","findDinner":"Trouver un dîner","retry":"Réessayer","walking":"À pied","taxi":"Voiture / taxi","transit":"Transports en commun","chooseHotel":"Choisir un hôtel","route":"Circuits"},"de":{"next":"Weiter","previous":"Zurück","finishPlan":"Tour abschließen","restart":"Neu beginnen","completed":"Tour geprüft","current":"Aktueller Schritt","home":"Sprachen","returnHotel":"Zurück zum Hotel","findDinner":"Abendessen suchen","retry":"Erneut versuchen","walking":"Zu Fuß","taxi":"Auto / Taxi","transit":"Öffentliche Verkehrsmittel","chooseHotel":"Hotel wählen","route":"Besichtigungstouren"},"hi":{"next":"आगे","previous":"पीछे","finishPlan":"यात्रा पूरी करें","restart":"फिर से शुरू करें","completed":"यात्रा की जाँच पूरी हुई","current":"वर्तमान चरण","home":"भाषाएँ","returnHotel":"होटल लौटें","findDinner":"रात का भोजन खोजें","retry":"फिर कोशिश करें","walking":"पैदल","taxi":"कार / टैक्सी","transit":"सार्वजनिक परिवहन","chooseHotel":"होटल चुनें","route":"दर्शनीय मार्ग"},"it":{"next":"Avanti","previous":"Indietro","finishPlan":"Termina itinerario","restart":"Ricomincia","completed":"Itinerario verificato","current":"Fase attuale","home":"Lingue","returnHotel":"Torna in hotel","findDinner":"Cerca cena","retry":"Riprova","walking":"A piedi","taxi":"Auto / taxi","transit":"Trasporto pubblico","chooseHotel":"Scegli hotel","route":"Itinerari"},"es":{"next":"Siguiente","previous":"Atrás","finishPlan":"Finalizar itinerario","restart":"Empezar de nuevo","completed":"Itinerario revisado","current":"Paso actual","home":"Idiomas","returnHotel":"Volver al hotel","findDinner":"Buscar cena","retry":"Reintentar","walking":"A pie","taxi":"Coche / taxi","transit":"Transporte público","chooseHotel":"Elegir hotel","route":"Rutas turísticas"},"ru":{"next":"Далее","previous":"Назад","finishPlan":"Завершить маршрут","restart":"Начать заново","completed":"Маршрут проверен","current":"Текущий шаг","home":"Языки","returnHotel":"Вернуться в отель","findDinner":"Найти ужин","retry":"Повторить","walking":"Пешком","taxi":"Авто / такси","transit":"Общественный транспорт","chooseHotel":"Выбрать отель","route":"Маршруты"},"nl":{"next":"Volgende","previous":"Terug","finishPlan":"Route afronden","restart":"Opnieuw beginnen","completed":"Route gecontroleerd","current":"Huidige stap","home":"Talen","returnHotel":"Terug naar hotel","findDinner":"Diner zoeken","retry":"Opnieuw proberen","walking":"Lopen","taxi":"Auto / taxi","transit":"Openbaar vervoer","chooseHotel":"Hotel kiezen","route":"Routes"},"pt":{"next":"Próximo","previous":"Voltar","finishPlan":"Concluir roteiro","restart":"Recomeçar","completed":"Roteiro revisado","current":"Etapa atual","home":"Idiomas","returnHotel":"Voltar ao hotel","findDinner":"Buscar jantar","retry":"Tentar de novo","walking":"A pé","taxi":"Carro / táxi","transit":"Transporte público","chooseHotel":"Escolher hotel","route":"Roteiros turísticos"},"sv":{"next":"Nästa","previous":"Tillbaka","finishPlan":"Avsluta resplan","restart":"Börja om","completed":"Resplanen granskad","current":"Aktuellt steg","home":"Språk","returnHotel":"Tillbaka till hotellet","findDinner":"Hitta middag","retry":"Försök igen","walking":"Till fots","taxi":"Bil / taxi","transit":"Kollektivtrafik","chooseHotel":"Välj hotell","route":"Sightseeingrutter"},"mn":{"next":"Дараах","previous":"Буцах","finishPlan":"Аяллаа дуусгах","restart":"Дахин эхлэх","completed":"Аяллын төлөвлөгөө бэлэн","current":"Одоогийн алхам","home":"Хэл","returnHotel":"Зочид буудалд буцах","findDinner":"Оройн хоол хайх","retry":"Дахин оролдох","walking":"Алхах","taxi":"Машин / такси","transit":"Нийтийн тээвэр","chooseHotel":"Зочид буудал сонгох","route":"Аяллын чиглэл"},"ar":{"next":"التالي","previous":"رجوع","finishPlan":"إنهاء الرحلة","restart":"البدء من جديد","completed":"اكتملت مراجعة الرحلة","current":"الخطوة الحالية","home":"اللغات","returnHotel":"العودة إلى الفندق","findDinner":"البحث عن العشاء","retry":"إعادة المحاولة","walking":"سيرًا","taxi":"سيارة / تاكسي","transit":"النقل العام","chooseHotel":"اختيار الفندق","route":"مسارات سياحية"},"tr":{"next":"İleri","previous":"Geri","finishPlan":"Rotayı bitir","restart":"Yeniden başla","completed":"Rota kontrol edildi","current":"Geçerli adım","home":"Diller","returnHotel":"Otele dön","findDinner":"Akşam yemeği ara","retry":"Tekrar dene","walking":"Yürüyerek","taxi":"Araba / taksi","transit":"Toplu taşıma","chooseHotel":"Otel seç","route":"Gezi rotaları"},"pl":{"next":"Dalej","previous":"Wstecz","finishPlan":"Zakończ plan","restart":"Zacznij od nowa","completed":"Plan został sprawdzony","current":"Bieżący krok","home":"Języki","returnHotel":"Powrót do hotelu","findDinner":"Znajdź kolację","retry":"Spróbuj ponownie","walking":"Pieszo","taxi":"Samochód / taksówka","transit":"Transport publiczny","chooseHotel":"Wybierz hotel","route":"Trasy zwiedzania"},"my":{"next":"ရှေ့သို့","previous":"နောက်သို့","finishPlan":"အစီအစဉ်ပြီးဆုံး","restart":"အစမှပြန်စ","completed":"ခရီးစဉ်စစ်ဆေးပြီး","current":"လက်ရှိအဆင့်","home":"ဘာသာစကားများ","returnHotel":"ဟိုတယ်သို့ပြန်","findDinner":"ညစာရှာရန်","retry":"ထပ်ကြိုးစားပါ","walking":"လမ်းလျှောက်","taxi":"ကား / တက္ကစီ","transit":"အများပြည်သူသယ်ယူပို့ဆောင်ရေး","chooseHotel":"ဟိုတယ်ရွေးရန်","route":"ခရီးစဉ်လမ်းကြောင်း"},"ne":{"next":"अर्को","previous":"पछाडि","finishPlan":"यात्रा पूरा गर्नुहोस्","restart":"फेरि सुरु गर्नुहोस्","completed":"यात्रा योजना जाँच पूरा","current":"हालको चरण","home":"भाषाहरू","returnHotel":"होटल फर्कनुहोस्","findDinner":"बेलुकीको खाना खोज्नुहोस्","retry":"फेरि प्रयास","walking":"पैदल","taxi":"कार / ट्याक्सी","transit":"सार्वजनिक यातायात","chooseHotel":"होटल छान्नुहोस्","route":"भ्रमण मार्ग"},"si":{"next":"ඊළඟ","previous":"ආපසු","finishPlan":"ගමන අවසන් කරන්න","restart":"නැවත අරඹන්න","completed":"ගමන් සැලැස්ම පරීක්ෂා කර ඇත","current":"වත්මන් පියවර","home":"භාෂා","returnHotel":"හෝටලයට ආපසු","findDinner":"රාත්‍රී ආහාර සොයන්න","retry":"නැවත උත්සාහ කරන්න","walking":"පා ගමනින්","taxi":"කාර් / ටැක්සි","transit":"පොදු ප්‍රවාහනය","chooseHotel":"හෝටලය තෝරන්න","route":"සංචාර මාර්ග"},"da":{"next":"Næste","previous":"Tilbage","finishPlan":"Afslut turen","restart":"Start forfra","completed":"Turplanen er gennemgået","current":"Aktuelt trin","home":"Sprog","returnHotel":"Tilbage til hotellet","findDinner":"Find aftensmad","retry":"Prøv igen","walking":"Til fods","taxi":"Bil / taxa","transit":"Offentlig transport","chooseHotel":"Vælg hotel","route":"Sightseeingruter"},"fi":{"next":"Seuraava","previous":"Takaisin","finishPlan":"Viimeistele reitti","restart":"Aloita alusta","completed":"Reitti tarkistettu","current":"Nykyinen vaihe","home":"Kielet","returnHotel":"Takaisin hotellille","findDinner":"Etsi illallinen","retry":"Yritä uudelleen","walking":"Kävellen","taxi":"Auto / taksi","transit":"Julkinen liikenne","chooseHotel":"Valitse hotelli","route":"Nähtävyysreitit"},"no":{"next":"Neste","previous":"Tilbake","finishPlan":"Fullfør turen","restart":"Start på nytt","completed":"Turplanen er gjennomgått","current":"Gjeldende trinn","home":"Språk","returnHotel":"Tilbake til hotellet","findDinner":"Finn middag","retry":"Prøv igjen","walking":"Til fots","taxi":"Bil / taxi","transit":"Kollektivtransport","chooseHotel":"Velg hotell","route":"Sightseeingruter"},"km":{"next":"បន្ទាប់","previous":"ត្រឡប់ក្រោយ","finishPlan":"បញ្ចប់ផែនការ","restart":"ចាប់ផ្តើមម្តងទៀត","completed":"បានពិនិត្យផែនការរួច","current":"ជំហានបច្ចុប្បន្ន","home":"ភាសា","returnHotel":"ត្រឡប់ទៅសណ្ឋាគារ","findDinner":"រកអាហារពេលល្ងាច","retry":"ព្យាយាមម្តងទៀត","walking":"ដើរ","taxi":"រថយន្ត / តាក់ស៊ី","transit":"ដឹកជញ្ជូនសាធារណៈ","chooseHotel":"ជ្រើសសណ្ឋាគារ","route":"ផ្លូវទេសចរណ៍"},"he":{"next":"הבא","previous":"חזרה","finishPlan":"סיום המסלול","restart":"להתחיל מחדש","completed":"המסלול נבדק","current":"השלב הנוכחי","home":"שפות","returnHotel":"חזרה למלון","findDinner":"חיפוש ארוחת ערב","retry":"לנסות שוב","walking":"הליכה","taxi":"רכב / מונית","transit":"תחבורה ציבורית","chooseHotel":"בחירת מלון","route":"מסלולי טיול"},"cs":{"next":"Další","previous":"Zpět","finishPlan":"Dokončit trasu","restart":"Začít znovu","completed":"Trasa zkontrolována","current":"Aktuální krok","home":"Jazyky","returnHotel":"Zpět do hotelu","findDinner":"Najít večeři","retry":"Zkusit znovu","walking":"Pěšky","taxi":"Auto / taxi","transit":"Veřejná doprava","chooseHotel":"Vybrat hotel","route":"Turistické trasy"},"el":{"next":"Επόμενο","previous":"Πίσω","finishPlan":"Ολοκλήρωση διαδρομής","restart":"Ξεκινήστε ξανά","completed":"Το πρόγραμμα ελέγχθηκε","current":"Τρέχον βήμα","home":"Γλώσσες","returnHotel":"Επιστροφή στο ξενοδοχείο","findDinner":"Βρείτε δείπνο","retry":"Προσπαθήστε ξανά","walking":"Με τα πόδια","taxi":"Αυτοκίνητο / ταξί","transit":"Δημόσια συγκοινωνία","chooseHotel":"Επιλέξτε ξενοδοχείο","route":"Διαδρομές"},"ro":{"next":"Înainte","previous":"Înapoi","finishPlan":"Finalizează traseul","restart":"Începe din nou","completed":"Traseu verificat","current":"Pasul curent","home":"Limbi","returnHotel":"Înapoi la hotel","findDinner":"Caută cină","retry":"Reîncearcă","walking":"Pe jos","taxi":"Mașină / taxi","transit":"Transport public","chooseHotel":"Alege hotel","route":"Trasee turistice"},"hu":{"next":"Tovább","previous":"Vissza","finishPlan":"Útvonal befejezése","restart":"Újrakezdés","completed":"Útvonal ellenőrizve","current":"Jelenlegi lépés","home":"Nyelvek","returnHotel":"Vissza a szállodába","findDinner":"Vacsora keresése","retry":"Újrapróbálás","walking":"Gyalog","taxi":"Autó / taxi","transit":"Tömegközlekedés","chooseHotel":"Szálloda választása","route":"Városnéző útvonalak"},"bn":{"next":"পরবর্তী","previous":"পেছনে","finishPlan":"ভ্রমণ শেষ করুন","restart":"আবার শুরু করুন","completed":"ভ্রমণ পরিকল্পনা দেখা শেষ","current":"বর্তমান ধাপ","home":"ভাষা","returnHotel":"হোটেলে ফিরুন","findDinner":"রাতের খাবার খুঁজুন","retry":"আবার চেষ্টা করুন","walking":"হেঁটে","taxi":"গাড়ি / ট্যাক্সি","transit":"গণপরিবহন","chooseHotel":"হোটেল বাছুন","route":"দর্শনীয় পথ"},"ur":{"next":"اگلا","previous":"واپس","finishPlan":"سفر مکمل کریں","restart":"دوبارہ شروع کریں","completed":"سفر کا جائزہ مکمل","current":"موجودہ مرحلہ","home":"زبانیں","returnHotel":"ہوٹل واپس جائیں","findDinner":"رات کا کھانا تلاش کریں","retry":"دوبارہ کوشش کریں","walking":"پیدل","taxi":"کار / ٹیکسی","transit":"عوامی ٹرانسپورٹ","chooseHotel":"ہوٹل منتخب کریں","route":"سیاحتی راستے"},"uk":{"next":"Далі","previous":"Назад","finishPlan":"Завершити маршрут","restart":"Почати спочатку","completed":"Маршрут перевірено","current":"Поточний крок","home":"Мови","returnHotel":"Повернутися до готелю","findDinner":"Знайти вечерю","retry":"Повторити","walking":"Пішки","taxi":"Авто / таксі","transit":"Громадський транспорт","chooseHotel":"Вибрати готель","route":"Туристичні маршрути"},"hr":{"next":"Dalje","previous":"Natrag","finishPlan":"Završi rutu","restart":"Započni ponovno","completed":"Ruta je pregledana","current":"Trenutni korak","home":"Jezici","returnHotel":"Povratak u hotel","findDinner":"Pronađi večeru","retry":"Pokušaj ponovno","walking":"Pješice","taxi":"Auto / taksi","transit":"Javni prijevoz","chooseHotel":"Odaberi hotel","route":"Turističke rute"}}
+"""#
+        guard let value = try? JSONDecoder().decode([String: [String: String]].self,
+                    from: Data(json.utf8)) else {
+            preconditionFailure("Invalid 39-language navigation catalog")
+        }
+        return value
+    }()
+    static func get(_ key: String, _ language: GuideLanguage) -> String? {
+        labels[language.rawValue]?[key]
+    }
+}
+
 private struct PlannerInstructionsView: View {
     let language: GuideLanguage
     @Environment(\.dismiss) private var dismiss
@@ -2936,6 +2974,7 @@ private struct PlannerInstructionsView: View {
             }
         }
         .environment(\.locale, language.locale)
+        .environment(\.layoutDirection, [.ar, .he, .ur].contains(language) ? .rightToLeft : .leftToRight)
         .preferredColorScheme(.dark)
         .tint(PlannerTheme.cyan)
     }
@@ -4743,6 +4782,7 @@ private struct PlannerMapScreen: View {
             }
         }
         .environment(\.locale, language.locale)
+        .environment(\.layoutDirection, [.ar, .he, .ur].contains(language) ? .rightToLeft : .leftToRight)
     }
     private func reload() {
         loading = true
