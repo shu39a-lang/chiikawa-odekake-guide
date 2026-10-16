@@ -562,6 +562,16 @@ private struct PlannerView: View {
         return stop.duration
     }
 
+    // Use map-verified travel minutes only. A short walk is preferred to
+    // a car; unknown/estimated routes are not represented as measured time.
+    private func preferredVerifiedRouteMinutes(_ available: [String: TravelTime]) -> Int? {
+        if let transit = available["transit"], !transit.isApproximate { return transit.minutes }
+        if let walk = available["walking"], !walk.isApproximate, walk.minutes <= 30 { return walk.minutes }
+        if let taxi = available["taxi"], !taxi.isApproximate { return taxi.minutes }
+        if let walk = available["walking"], !walk.isApproximate { return walk.minutes }
+        return nil
+    }
+
     // Plan from available mapped travel times. If no map result exists, use
     // the explicitly provisional course gap for schedule planning only.
     private func startOfStop(_ index: Int) -> Int {
@@ -571,10 +581,9 @@ private struct PlannerView: View {
             let source = venueQuery(selectedVenue(previous))
             let target = venueQuery(selectedVenue(previous + 1))
             let available = routeLegTimes[routeLegKey(origin: source, destination: target)] ?? [:]
-            let measured = available["transit"].flatMap { !$0.isApproximate ? $0.minutes : nil }
-                ?? available["walking"].flatMap { !$0.isApproximate && $0.minutes <= 30 ? $0.minutes : nil }
-                ?? available["taxi"].flatMap { !$0.isApproximate ? $0.minutes : nil }
-                ?? available["walking"].flatMap { !$0.isApproximate ? $0.minutes : nil }
+            // Keep each branch explicit. A long optional/flatMap chain here
+            // caused Xcode's Swift compiler to time out during type checking.
+            let measured = preferredVerifiedRouteMinutes(available)
             clock += duration(route.stops[previous], venue: selectedVenue(previous))
                 + (measured ?? route.gap)
         }
