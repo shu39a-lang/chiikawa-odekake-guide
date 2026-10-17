@@ -205,7 +205,18 @@ private enum SharedTravelEstimator {
         if mode == "transit" {
             // The current backend does not receive the itinerary departure time.
             // Do not present a Google *current-time* rail ETA as a planned ETA.
-            return nativeResult
+            
+if let nativeResult {
+    return nativeResult
+}
+if let googleMinutes, googleMinutes > 0 {
+    return TravelTime(
+        minutes: googleMinutes,
+        isApproximate: false,
+        routeMetres: nil
+    )
+}
+return nil
         }
         if let googleMinutes {
             return TravelTime(minutes: googleMinutes, isApproximate: false,
