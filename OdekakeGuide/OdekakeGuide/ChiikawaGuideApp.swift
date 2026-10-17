@@ -90,7 +90,7 @@ private actor GoogleRoutesGateway {
                 guard !appCheck.token.isEmpty else { return nil }
                 var request = URLRequest(url: service)
                 request.httpMethod = "POST"
-                request.timeoutInterval = 10
+                request.timeoutInterval = 20
                 request.setValue("application/json", forHTTPHeaderField: "Content-Type")
                 request.setValue(appCheck.token, forHTTPHeaderField: "X-Firebase-AppCheck")
                 request.httpBody = try JSONEncoder().encode(RequestBody(origin: start, destination: end))
@@ -203,20 +203,11 @@ private enum SharedTravelEstimator {
         // Transit must use a journey-time timetable, not a potentially empty
         // late-night Google request while the user is planning tomorrow.
         if mode == "transit" {
-            // The current backend does not receive the itinerary departure time.
-            // Do not present a Google *current-time* rail ETA as a planned ETA.
-            
-if let nativeResult {
-    return nativeResult
-}
-if let googleMinutes, googleMinutes > 0 {
-    return TravelTime(
-        minutes: googleMinutes,
-        isApproximate: false,
-        routeMetres: nil
-    )
-}
-return nil
+            if let nativeResult { return nativeResult }
+            if let googleMinutes, googleMinutes > 0 {
+                return TravelTime(minutes: googleMinutes, isApproximate: false, routeMetres: nil)
+            }
+            return nil
         }
         if let googleMinutes {
             return TravelTime(minutes: googleMinutes, isApproximate: false,
