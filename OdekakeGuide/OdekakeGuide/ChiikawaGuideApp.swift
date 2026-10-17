@@ -214,7 +214,8 @@ private enum SharedTravelEstimator {
                               routeMetres: nativeResult?.routeMetres)
         }
         if let nativeResult { return nativeResult }
-        return nil // No unverified duration is displayed for any transport mode.
+        if mode == "transit" { return nil } // Never invent train or bus schedules.
+        return nil
     }
 }
 
@@ -4652,9 +4653,8 @@ private struct OriginalCourseView: View {
             let key = "\(from.id)|\(to.id)"
             let start = MKMapItem(placemark: MKPlacemark(coordinate: CLLocationCoordinate2D(latitude: a, longitude: b)))
             let end = MKMapItem(placemark: MKPlacemark(coordinate: CLLocationCoordinate2D(latitude: c, longitude: d)))
-            // Start every mode together. A slow or unavailable pedestrian route
-            // must not prevent the road and transit durations from appearing.
-            // Capture the planned departure before the concurrent work starts.
+            // Start every independent mode at once. A slow/failed walking request
+            // must not postpone car or rail timings for later itinerary stages.
             let departure = arrival(index - 1) + from.duration
             async let walking = SharedTravelEstimator.routeTime(from: start, to: end, by: .walking)
             async let driving = SharedTravelEstimator.routeTime(from: start, to: end, by: .automobile)
@@ -4664,12 +4664,20 @@ private struct OriginalCourseView: View {
             let driveTime = await driving
             let railTime = await rail
             guard !Task.isCancelled else { return }
+            // Do not publish a result for a leg that has since been changed.
+            guard index < stops.count,
+                  stops[index - 1].id == from.id,
+                  stops[index].id == to.id,
+                  stops[index - 1].latitude == from.latitude,
+                  stops[index - 1].longitude == from.longitude,
+                  stops[index].latitude == to.latitude,
+                  stops[index].longitude == to.longitude else { return }
             if let walkTime { times[key, default: [:]]["walking"] = walkTime }
-            // Short-walk suppression is based on an actual mapped walking path.
-            // Keep the other verified results in the cache so a mode change
-            // cannot accidentally turn a previously available time into nil.
-            if let driveTime { times[key, default: [:]]["taxi"] = driveTime }
-            if let railTime { times[key, default: [:]]["transit"] = railTime }
+            // A verified walk under 500 m needs no car or rail recommendation.
+            if !SharedTravelEstimator.isVerifiedShortWalk(walkTime) {
+                if let driveTime { times[key, default: [:]]["taxi"] = driveTime }
+                if let railTime { times[key, default: [:]]["transit"] = railTime }
+            }
         }
     }
 
