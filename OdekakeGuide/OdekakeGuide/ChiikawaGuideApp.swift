@@ -1480,6 +1480,38 @@ private struct PlannerView: View {
                 return item
             }
         }
+        // Independent Google Places fallback for selected restaurants, stations,
+        // and other names that Apple Maps does not index consistently. Accept
+        // only a locally verified, name-matching place: never substitute the
+        // prefecture centre or an unrelated search hit.
+        if let prefecture, !Task.isCancelled {
+            let localName = clean.components(separatedBy: ",").first?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? clean
+            let variants = [clean, "\(localName) \(prefecture.ja)", localName]
+            let normalizedWanted = normalizedPlaceName(localName)
+            var searched = Set<String>()
+            for term in variants where !term.isEmpty && searched.insert(term).inserted {
+                guard !Task.isCancelled else { return nil }
+                let matches = await GooglePlacesGateway.shared.search(term,
+                    near: pinnedFirstVenueCoordinate.map(RoutePoint.init), radius: 50_000)
+                for match in matches {
+                    let coordinate = match.coordinate
+                    guard CLLocationCoordinate2DIsValid(coordinate),
+                          abs(coordinate.latitude) > 0.01,
+                          abs(coordinate.longitude) > 0.01 else { continue }
+                    let normalizedFound = normalizedPlaceName(match.name)
+                    guard normalizedWanted.count >= 3,
+                          (normalizedFound.contains(normalizedWanted) ||
+                           normalizedWanted.contains(normalizedFound) && normalizedFound.count >= 4)
+                    else { continue }
+                    let item = MKMapItem(placemark: MKPlacemark(coordinate: coordinate))
+                    item.name = match.name
+                    guard isLocalRoutePlace(item, in: prefecture) else { continue }
+                    resolvedPlaceCache[clean] = item
+                    return item
+                }
+            }
+        }
         return nil
     }
     // Only verified local coordinates are used here. No prefecture-capital placeholder
@@ -3575,7 +3607,7 @@ private enum TravelExtras {
         "driveRoute": ["車・タクシーの経路", "차량·택시 경로", "汽车・出租车路线", "Car / taxi route", "เส้นทางรถยนต์หรือแท็กซี่"],
         "liveNote": ["乗車駅・降車駅・乗換・発車時刻・運賃は「電車・地下鉄・バスの乗換」で確認できます。目的地を入れ替えるとリンクも更新されます。", "승차역, 하차역, 환승, 출발 시간과 요금은 대중교통 링크에서 확인할 수 있습니다. 장소를 바꾸면 링크도 업데이트됩니다.", "点击公共交通链接查看上车站、下车站、换乘、发车时间和票价。更换目的地后链接也会更新。", "Open transit routes for boarding and exit stops, transfers, departures and fares. Links update when you swap a destination.", "เปิดเส้นทางขนส่งสาธารณะเพื่อดูจุดขึ้นลง การต่อรถ เวลาออก และค่าโดยสาร ลิงก์จะเปลี่ยนตามสถานที่ที่เลือก"],
         "walkFallback": ["徒歩でこの2か所を移動できます。細かな曲がり角や横断場所は「徒歩の道順」で確認してください。歩く距離が長い場合は公共交通の候補も比較できます。", "두 장소 사이를 걸어서 이동할 수 있습니다. 자세한 회전 지점과 횡단 위치는 도보 경로에서 확인하세요. 거리가 길면 대중교통도 비교할 수 있습니다.", "这两处可步行前往。转弯与过街位置请查看步行路线；距离较长时也可比较公共交通方案。", "You can walk between these stops. Open walking directions for turns and crossings; compare transit if the walk is long.", "เดินระหว่างสองจุดนี้ได้ ดูทางเลี้ยวและจุดข้ามถนนในเส้นทางเดิน หากระยะไกลสามารถเปรียบเทียบขนส่งสาธารณะได้"],
-        "planningGap": ["計画上の移動枠：約%d分（下の各経路の所要時間とは別）", "계획상 이동 여유: 약 %d분 (아래 경로별 소요 시간과 별도)", "行程预留交通时间：约%d分钟（与下方各路线时间不同）", "Time allowed in the plan: about %d min (separate from route times below)", "เวลาเผื่อเดินทางในแผนประมาณ %d นาที (แยกจากเวลาแต่ละเส้นทางด้านล่าง)"],
+        "planningGap": ["仮の移動時間枠：約%d分（地図の所要時間ではありません）", "계획상 이동 여유: 약 %d분 (아래 경로별 소요 시간과 별도)", "行程预留交通时间：约%d分钟（与下方各路线时间不同）", "Provisional schedule allowance: about %d min (not a mapped travel time)", "เวลาเผื่อเดินทางในแผนประมาณ %d นาที (แยกจากเวลาแต่ละเส้นทางด้านล่าง)"],
         "asakusaRail": ["電車なら、東武浅草駅→東武スカイツリーライン→とうきょうスカイツリー駅→徒歩で目的地へ。地下鉄を使う候補や駅までの徒歩も、乗換リンクで比較できます。", "전철 이용 시 도부 아사쿠사역→도부 스카이트리선→도쿄스카이트리역→목적지까지 도보입니다. 지하철과 역까지의 도보도 환승 링크에서 비교하세요.", "乘电车可从东武浅草站→东武晴空塔线→东京晴空塔站→步行至目的地。地铁及前往车站的步行路线也可在换乘链接比较。", "By train: Tobu Asakusa Station → Tobu Skytree Line → Tokyo Skytree Station → walk to the venue. Compare subway options and station walks through the transit link.", "หากใช้รถไฟ: สถานีโทบุอาซากุสะ → สายโทบุสกายทรี → สถานีโตเกียวสกายทรี → เดินไปสถานที่ เปรียบเทียบรถไฟใต้ดินและทางเดินถึงสถานีได้จากลิงก์"],
         "checked": ["公式情報確認：2026年10月2日", "공식 정보 확인: 2026년 10월 2일", "官方信息核对：2026年10月2日", "Official details checked: 2 Oct 2026", "ตรวจสอบข้อมูลทางการ: 2 ต.ค. 2026"]
     ]
