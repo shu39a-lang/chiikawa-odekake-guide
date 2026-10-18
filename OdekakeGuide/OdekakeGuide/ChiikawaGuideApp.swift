@@ -4642,6 +4642,26 @@ private struct OriginalCourseView: View {
             stops[last].longitude = stops[0].longitude
         }
     }
+    private func resolvedCoordinate(for stop: OriginalStop) async -> CLLocationCoordinate2D? {
+        if let latitude = stop.latitude, let longitude = stop.longitude {
+            let coordinate = CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
+            if CLLocationCoordinate2DIsValid(coordinate),
+               abs(latitude) > 0.01, abs(longitude) > 0.01 { return coordinate }
+        }
+        guard !stop.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        let request = MKLocalSearch.Request()
+        request.naturalLanguageQuery = stop.address.isEmpty
+            ? stop.name : "\(stop.name) \(stop.address)"
+        request.resultTypes = [.address, .pointOfInterest]
+        guard !Task.isCancelled,
+              let response = try? await MKLocalSearch(request: request).start(),
+              let match = response.mapItems.first else { return nil }
+        let coordinate = match.placemark.coordinate
+        guard CLLocationCoordinate2DIsValid(coordinate),
+              abs(coordinate.latitude) > 0.01,
+              abs(coordinate.longitude) > 0.01 else { return nil }
+        return coordinate
+    }
     private func calculateRoutes() async {
         times = [:]
         let snapshot = stops
@@ -4649,10 +4669,13 @@ private struct OriginalCourseView: View {
         for index in 1..<snapshot.count {
             guard !Task.isCancelled else { return }
             let from = snapshot[index - 1], to = snapshot[index]
-            guard let a = from.latitude, let b = from.longitude, let c = to.latitude, let d = to.longitude else { continue }
+            // Resolve missing coordinates using the stop's actual name and address.
+            // Do not substitute guessed travel durations for map-confirmed routes.
+            guard let origin = await resolvedCoordinate(for: from),
+                  let destination = await resolvedCoordinate(for: to) else { continue }
             let key = "\(from.id)|\(to.id)"
-            let start = MKMapItem(placemark: MKPlacemark(coordinate: CLLocationCoordinate2D(latitude: a, longitude: b)))
-            let end = MKMapItem(placemark: MKPlacemark(coordinate: CLLocationCoordinate2D(latitude: c, longitude: d)))
+            let start = MKMapItem(placemark: MKPlacemark(coordinate: origin))
+            let end = MKMapItem(placemark: MKPlacemark(coordinate: destination))
             // Start every independent mode at once. A slow/failed walking request
             // must not postpone car or rail timings for later itinerary stages.
             let departure = arrival(index - 1) + from.duration
@@ -4668,10 +4691,10 @@ private struct OriginalCourseView: View {
             guard index < stops.count,
                   stops[index - 1].id == from.id,
                   stops[index].id == to.id,
-                  stops[index - 1].latitude == from.latitude,
-                  stops[index - 1].longitude == from.longitude,
-                  stops[index].latitude == to.latitude,
-                  stops[index].longitude == to.longitude else { return }
+                  stops[index - 1].name == from.name,
+                  stops[index - 1].address == from.address,
+                  stops[index].name == to.name,
+                  stops[index].address == to.address else { return }
             if let walkTime { times[key, default: [:]]["walking"] = walkTime }
             // A verified walk under 500 m needs no car or rail recommendation.
             if !SharedTravelEstimator.isVerifiedShortWalk(walkTime) {
