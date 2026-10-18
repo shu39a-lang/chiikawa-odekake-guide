@@ -580,14 +580,30 @@ private struct PlannerView: View {
         var clock = startMinutes
         guard index > 0 else { return clock }
         for previous in 0..<index {
-            let source = venueQuery(selectedVenue(previous))
-            let target = venueQuery(selectedVenue(previous + 1))
+            let current = selectedVenue(previous)
+            let next = selectedVenue(previous + 1)
+            clock += duration(route.stops[previous], venue: current)
+            // No geographic location exists for an unselected lunch slot.
+            // Its route cannot be counted twice as an invented gap.
+            if next.name.hasPrefix("Lunch near ") && lunchSelection == nil {
+                continue
+            }
+            let source: String
+            if current.name.hasPrefix("Lunch near ") && lunchSelection == nil {
+                var lastRealStop = previous - 1
+                while lastRealStop > 0 &&
+                    selectedVenue(lastRealStop).name.hasPrefix("Lunch near ") {
+                    lastRealStop -= 1
+                }
+                source = venueQuery(selectedVenue(max(0, lastRealStop)))
+            } else {
+                source = venueQuery(current)
+            }
+            let target = venueQuery(next)
             let available = routeLegTimes[routeLegKey(origin: source, destination: target)] ?? [:]
-            // Keep each branch explicit. A long optional/flatMap chain here
-            // caused Xcode's Swift compiler to time out during type checking.
             let measured = preferredVerifiedRouteMinutes(available)
-            clock += duration(route.stops[previous], venue: selectedVenue(previous))
-                + (measured ?? route.gap)
+            // The remaining provisional gap is a schedule allowance only.
+            clock += measured ?? route.gap
         }
         return clock
     }
@@ -1136,6 +1152,14 @@ private struct PlannerView: View {
             return CLLocationCoordinate2D(latitude: 34.995317, longitude: 135.783285)
         case "Otagi Nenbutsuji Temple":
             return CLLocationCoordinate2D(latitude: 35.0313197, longitude: 135.6611036)
+        // Verified WGS84 locations for Kyoto Okusaga destinations.
+        case "Adashino Nenbutsuji Temple":
+            return CLLocationCoordinate2D(latitude: 35.026806, longitude: 135.664522)
+        case "Saga Toriimoto preserved street":
+            return CLLocationCoordinate2D(latitude: 35.0278, longitude: 135.6639)
+        case "Saga Arashiyama Station":
+            // JR station; not the similarly named Randen Arashiyama stop.
+            return CLLocationCoordinate2D(latitude: 35.018742, longitude: 135.681305)
         case "Meiji Jingu Shrine":
             // Fixed entrance-area coordinate for reliable route calculations.
             return CLLocationCoordinate2D(latitude: 35.669868, longitude: 139.702255)
@@ -1903,7 +1927,6 @@ private struct PlannerView: View {
             Label(title, systemImage: "arrow.right.circle.fill").font(.headline).foregroundStyle(journeyGold)
             Text("\(fromName) → \(toName)").font(.headline)
             routeLinks(origin: origin, destination: destination)
-            Text(extra("liveNote")).font(.footnote).foregroundStyle(.secondary)
         }
     }
     private var journeyCurrent: some View {
@@ -2388,6 +2411,50 @@ private struct PlannerView: View {
         .padding(16)
         .background(PlannerTheme.surface, in: RoundedRectangle(cornerRadius: 16))
     }
+    // Overview information is already shown once under the course heading.
+    // Each transfer instead needs route-specific directions, not that overview.
+    private func featuredTransferNote(from: Venue, to: Venue) -> String? {
+        guard FeaturedRoutes.info[route.id] != nil else { return nil }
+        if route.id == "sns-okusaga" {
+            if from.name == "Otagi Nenbutsuji Temple" &&
+               to.name == "Saga Toriimoto preserved street" {
+                return [
+                    "愛宕念仏寺から嵯峨鳥居本の古い町並みへ坂を下ります。徒歩経路を地図で確認してください。",
+                    "오타기 넨부쓰지에서 사가 토리이모토 옛 거리로 내리막길을 걷습니다. 지도에서 도보 경로를 확인하세요.",
+                    "从爱宕念佛寺沿下坡前往嵯峨鸟居本老街，请在地图上确认步行路线。",
+                    "Walk downhill from Otagi Nenbutsuji to the old Saga Toriimoto streets; check the mapped walking route.",
+                    "เดินลงเนินจากวัดโอตากิเน็นบุตสึจิไปถนนเก่าซากะโทริอิโมโตะ ตรวจสอบทางเดินในแผนที่"
+                ][language.index]
+            }
+            if to.name == "Adashino Nenbutsuji Temple" {
+                return [
+                    "化野念仏寺への経路です。昼食のお店を選んでいる場合は、そのお店から出発します。参道と入口を地図で確認してください。",
+                    "아다시노 넨부쓰지로 이동합니다. 식당을 선택했다면 그 식당에서 출발합니다. 지도에서 입구를 확인하세요.",
+                    "前往化野念佛寺。若已选择餐厅，将从该餐厅出发。请在地图确认参道和入口。",
+                    "Head to Adashino Nenbutsuji. If you selected a restaurant, directions start there. Check the mapped entrance.",
+                    "ไปวัดอาดาชิโนะเน็นบุตสึจิ หากเลือกร้านอาหารแล้วจะเริ่มจากร้านนั้น ตรวจสอบทางเข้าในแผนที่"
+                ][language.index]
+            }
+            if from.name == "Adashino Nenbutsuji Temple" &&
+               to.name == "Saga Arashiyama Station" {
+                return [
+                    "化野念仏寺からJR嵯峨嵐山駅へ進みます。下の徒歩・車・公共交通の経路と所要時間を確認してください。",
+                    "아다시노 넨부쓰지에서 JR 사가아라시야마역으로 이동합니다. 아래에서 교통편과 시간을 확인하세요.",
+                    "从化野念佛寺前往JR嵯峨岚山站。请查看下方步行、驾车及公共交通路线和时间。",
+                    "Go from Adashino Nenbutsuji to JR Saga-Arashiyama Station. Check walking, driving and transit below.",
+                    "จากวัดอาดาชิโนะเน็นบุตสึจิไปสถานี JR ซากะอาราชิยามะ ตรวจสอบเส้นทางและเวลาที่ด้านล่าง"
+                ][language.index]
+            }
+        }
+        return [
+            "この区間の出発地と目的地を確認し、下の地図で移動手段と所要時間を調べてください。",
+            "이 구간의 출발지와 목적지를 확인한 뒤 아래 지도에서 이동 경로와 시간을 확인하세요.",
+            "确认本段的起终点，并通过下方地图查询交通方式与所需时间。",
+            "Check this leg's origin and destination, then compare mapped travel times below.",
+            "ตรวจสอบต้นทางและปลายทาง แล้วดูเส้นทางและเวลาเดินทางจากแผนที่ด้านล่าง"
+        ][language.index]
+    }
+
     private func transferCard(_ index: Int) -> some View {
         // A visitor can skip choosing a lunch restaurant. In that case never
         // calculate a route from the text "Lunch near ..." as if it were a POI.
@@ -2409,8 +2476,8 @@ private struct PlannerView: View {
             Text("\(fromTitle) → \(venueText(to, 0))").font(.subheadline.bold())
             if isInternalSiteTransfer(origin: venueQuery(from), destination: venueQuery(to)) {
                 Text(hotelTravelText("siteWalk")).font(.subheadline)
-            } else if let info = FeaturedRoutes.info[route.id] {
-                Text(info.notes[language.index]).font(.subheadline)
+            } else if let note = featuredTransferNote(from: from, to: to) {
+                Text(note).font(.subheadline)
             } else if isOriginalPair, let legs = TravelExtras.legs[route.id], legs.indices.contains(index - 1) {
                 Text(legs[index - 1][language.index]).font(.subheadline)
             } else {
@@ -2422,10 +2489,8 @@ private struct PlannerView: View {
                     translatedGuideLink(extra("officialAccess"), url: url)
                 }
             }
-            Text(String(format: extra("planningGap"), locale: language.locale, arguments: [route.gap]))
-                .font(.caption).foregroundStyle(.secondary)
+            // A planning gap is never a map result. Show measured durations only.
             routeLinks(origin: venueQuery(from), destination: venueQuery(to))
-            Text(extra("liveNote")).font(.footnote).foregroundStyle(.secondary)
         }
         .fixedSize(horizontal: false, vertical: true)
         .padding(16)
