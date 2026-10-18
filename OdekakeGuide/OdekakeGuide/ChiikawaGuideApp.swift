@@ -10,7 +10,7 @@ import WebKit
 import FirebaseCore
 import FirebaseAppCheck
 
-private struct TravelTime {
+private struct TravelTime: Sendable {
     let minutes: Int
     // True only for a distance-based fallback, never for a timetable result.
     let isApproximate: Bool
@@ -191,30 +191,23 @@ private enum SharedTravelEstimator {
         let mode: String = transport == .walking ? "walking"
             : transport == .automobile ? "taxi" : "transit"
         let from = RoutePoint(a), to = RoutePoint(b)
-        // Both providers are started together: no sequential provider chain.
-        // Google times are the preference when confirmed, and Apple road/timetable
-        // mapping is a truly independent recovery channel.
-        async let google = GoogleRoutesGateway.shared.minutes(from:from,to:to,mode:mode)
-        async let native = NativeMapDirections.realRoute(from:from,to:to,mode:mode,
-            plannedDepartureMinutes:plannedDepartureMinutes)
-        let googleMinutes = await google
-        let nativeResult = await native
-        guard !Task.isCancelled else { return nil }
-        // Transit must use a journey-time timetable, not a potentially empty
-        // late-night Google request while the user is planning tomorrow.
-        if mode == "transit" {
-            if let nativeResult { return nativeResult }
-            if let googleMinutes, googleMinutes > 0 {
-                return TravelTime(minutes: googleMinutes, isApproximate: false, routeMetres: nil)
-            }
-            return nil
+        // Google and native map lookups are launched concurrently. Do not
+        // block a valid Apple Maps result while awaiting a slow cloud request.
+        // Native transit is preferable because it knows the intended travel time.
+        let googleTask = Task {
+            await GoogleRoutesGateway.shared.minutes(from: from, to: to, mode: mode)
         }
-        if let googleMinutes {
-            return TravelTime(minutes: googleMinutes, isApproximate: false,
-                              routeMetres: nativeResult?.routeMetres)
+        let nativeResult = await NativeMapDirections.realRoute(
+            from: from, to: to, mode: mode,
+            plannedDepartureMinutes: plannedDepartureMinutes)
+        if let nativeResult {
+            googleTask.cancel()
+            return nativeResult
         }
-        if let nativeResult { return nativeResult }
-        if mode == "transit" { return nil } // Never invent train or bus schedules.
+        guard !Task.isCancelled else { googleTask.cancel(); return nil }
+        if let googleMinutes = await googleTask.value {
+            return TravelTime(minutes: googleMinutes, isApproximate: false)
+        }
         return nil
     }
 }
@@ -1164,7 +1157,17 @@ private struct PlannerView: View {
         case "Hakodate Morning Market":
             return CLLocationCoordinate2D(latitude: 41.7734, longitude: 140.7251)
         case "Shirogane Blue Pond":
-            return CLLocationCoordinate2D(latitude: 43.4935, longitude: 142.6136)
+            // Route to the road-accessible public parking entrance, not the water.
+            // Source: https://kankojapan.jp/hokkaido/dohoku/shiroganeaoiike.html
+            return CLLocationCoordinate2D(latitude: 43.493064, longitude: 142.612482)
+        case "Shirahige Falls":
+            // Bridge viewpoint, from the Tokachidake Geopark official listing.
+            // Source: https://tokachidake-geopark.jp/geoname/246/
+            return CLLocationCoordinate2D(latitude: 43.474722, longitude: 142.638889)
+        case "Biei Shirogane Birke roadside station":
+            // Entrance area of the roadside station, based on mapped POI.
+            // Source: https://mapfan.com/spots/SC3IY%2CJ%2CZB
+            return CLLocationCoordinate2D(latitude: 43.5029751, longitude: 142.5974433)
         // Verified WGS84 locations for Kyoto Okusaga destinations.
         case "Adashino Nenbutsuji Temple":
             return CLLocationCoordinate2D(latitude: 35.026806, longitude: 135.664522)
@@ -1445,6 +1448,19 @@ private struct PlannerView: View {
            abs(latitude) > 0.01, abs(longitude) > 0.01 {
             return MKMapItem(placemark: MKPlacemark(coordinate:
                 CLLocationCoordinate2D(latitude: latitude, longitude: longitude)))
+        }
+        // For this known stay, use a local pinned position instead of an
+        // ambiguous name search which may return zero or the wrong prefecture.
+        if routePrefecture == "hokkaido" &&
+           (clean.contains("ホテルパークヒルズ") ||
+            clean.localizedCaseInsensitiveContains("Hotel Park Hills")) {
+            // Biei Shirogane Onsen Hotel Park Hills mapped site.
+            // Source: https://glamping-map.com/glamping/rakuten-9611/
+            let point = CLLocationCoordinate2D(latitude: 43.4750, longitude: 142.6374)
+            let item = MKMapItem(placemark: MKPlacemark(coordinate: point))
+            item.name = "美瑛白金温泉 ホテルパークヒルズ"
+            resolvedPlaceCache[clean] = item
+            return item
         }
         // A selected hotel's verified coordinate must win over ambiguous hotel names.
         if hotelChoice == "suggested", clean == hotelQuery, let hotel = selectedSuggestedHotel,
@@ -1872,24 +1888,41 @@ private struct PlannerView: View {
             }
             guard !Task.isCancelled && requestKey == hotelTravelKey else { return }
             hotelTravelMinutes = planningTimes(from: origin, to: destination)
-            // Concurrently obtain map-confirmed walking, car and transit routes.
-            // A failed pedestrian path must not prevent hotel taxi timings.
-            async let walkRoute = travelMinutes(from: origin, to: destination, by: .walking)
-            async let carRoute = travelMinutes(from: origin, to: destination, by: .automobile)
-            async let railRoute = travelMinutes(from: origin, to: destination, by: .transit,
-                plannedDepartureMinutes: startMinutes)
-            let walking = await walkRoute
-            guard !Task.isCancelled, requestKey == hotelTravelKey else { return }
-            if let walking {
-                hotelTravelMinutes["walking"] = walking
-                hotelTravelShortWalk = SharedTravelEstimator.isVerifiedShortWalk(walking)
-            }
-            let driving = await carRoute
-            let transit = await railRoute
-            guard !Task.isCancelled, requestKey == hotelTravelKey else { return }
-            if !hotelTravelShortWalk {
-                if let driving { hotelTravelMinutes["taxi"] = driving }
-                if let transit { hotelTravelMinutes["transit"] = transit }
+            // Each successful mode is shown immediately; walking failure must
+            // not delay the car or public-transport duration.
+            let fromPoint = RoutePoint(origin.placemark.coordinate)
+            let toPoint = RoutePoint(destination.placemark.coordinate)
+            let departure = startMinutes
+            await withTaskGroup(of: (String, TravelTime?).self) { group in
+                for mode in ["walking", "taxi", "transit"] {
+                    group.addTask {
+                        let from = MKMapItem(placemark: MKPlacemark(coordinate: fromPoint.location))
+                        let to = MKMapItem(placemark: MKPlacemark(coordinate: toPoint.location))
+                        let transport: MKDirectionsTransportType =
+                            mode == "walking" ? .walking : mode == "taxi" ? .automobile : .transit
+                        let value = await SharedTravelEstimator.routeTime(
+                            from: from, to: to, by: transport,
+                            plannedDepartureMinutes: mode == "transit" ? departure : nil)
+                        return (mode, value)
+                    }
+                }
+                for await (mode, value) in group {
+                    guard !Task.isCancelled, requestKey == hotelTravelKey else {
+                        group.cancelAll()
+                        break
+                    }
+                    guard let value else { continue }
+                    if mode == "walking" {
+                        hotelTravelMinutes["walking"] = value
+                        if SharedTravelEstimator.isVerifiedShortWalk(value) {
+                            hotelTravelShortWalk = true
+                            hotelTravelMinutes["taxi"] = nil
+                            hotelTravelMinutes["transit"] = nil
+                        }
+                    } else if !hotelTravelShortWalk {
+                        hotelTravelMinutes[mode] = value
+                    }
+                }
             }
             guard !Task.isCancelled, requestKey == hotelTravelKey else { return }
             hotelTravelLoading = false
@@ -2343,28 +2376,42 @@ private struct PlannerView: View {
             }
             routeLegShortWalk.remove(key)
             routeLegTimes[key] = [:]
-            // Run all three independent map modes at once. Previously, walking
-            // blocked both road and rail queries: subsequent screens often
-            // appeared to have no times after the first route timed out.
+            // Publish each verified mode separately; do not wait for walking
+            // to finish before showing the already mapped car or rail time.
+            let fromPoint = RoutePoint(start.placemark.coordinate)
+            let toPoint = RoutePoint(end.placemark.coordinate)
             let departure = plannedDeparture(for: origin, destination: destination)
-            async let walking = travelMinutes(from: start, to: end, by: .walking)
-            async let driving = travelMinutes(from: start, to: end, by: .automobile)
-            async let transit = travelMinutes(from: start, to: end, by: .transit,
-                plannedDepartureMinutes: departure)
-            let walkTime = await walking
-            guard !Task.isCancelled else { routeLegTimes[key] = nil; return }
-            if let walkTime {
-                routeLegTimes[key]?["walking"] = walkTime
-                if SharedTravelEstimator.isVerifiedShortWalk(walkTime) {
-                    routeLegShortWalk.insert(key)
+            await withTaskGroup(of: (String, TravelTime?).self) { group in
+                for mode in ["walking", "taxi", "transit"] {
+                    group.addTask {
+                        let from = MKMapItem(placemark: MKPlacemark(coordinate: fromPoint.location))
+                        let to = MKMapItem(placemark: MKPlacemark(coordinate: toPoint.location))
+                        let transport: MKDirectionsTransportType =
+                            mode == "walking" ? .walking : mode == "taxi" ? .automobile : .transit
+                        let value = await SharedTravelEstimator.routeTime(
+                            from: from, to: to, by: transport,
+                            plannedDepartureMinutes: mode == "transit" ? departure : nil)
+                        return (mode, value)
+                    }
                 }
-            }
-            let taxiTime = await driving
-            let railTime = await transit
-            guard !Task.isCancelled else { routeLegTimes[key] = nil; return }
-            if !routeLegShortWalk.contains(key) {
-                if let taxiTime { routeLegTimes[key]?["taxi"] = taxiTime }
-                if let railTime { routeLegTimes[key]?["transit"] = railTime }
+                for await (mode, value) in group {
+                    guard !Task.isCancelled else {
+                        group.cancelAll()
+                        routeLegTimes[key] = nil
+                        break
+                    }
+                    guard let value else { continue }
+                    if mode == "walking" {
+                        routeLegTimes[key, default: [:]]["walking"] = value
+                        if SharedTravelEstimator.isVerifiedShortWalk(value) {
+                            routeLegShortWalk.insert(key)
+                            routeLegTimes[key]?["taxi"] = nil
+                            routeLegTimes[key]?["transit"] = nil
+                        }
+                    } else if !routeLegShortWalk.contains(key) {
+                        routeLegTimes[key, default: [:]][mode] = value
+                    }
+                }
             }
         } catch {
             if !Task.isCancelled { routeLegTimes[key] = [:] }
