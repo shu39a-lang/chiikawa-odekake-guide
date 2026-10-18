@@ -1,0 +1,201 @@
+
+name: Kyoto Course Repair
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: true
+
+      - name: Repair Kyoto course source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path("OdekakeGuide/OdekakeGuide/ChiikawaGuideApp.swift")
+          s = path.read_text(encoding="utf-8")
+          marker = "// KYOTO_REPAIR_20261018"
+
+          if marker in s:
+              print("Kyoto repair already applied.")
+              raise SystemExit(0)
+
+          def replace_once(old, new):
+              global s
+              count = s.count(old)
+              if count != 1:
+                  raise RuntimeError(
+                      f"Expected one source match, got {count}: {old[:65]}"
+                  )
+              s = s.replace(old, new, 1)
+
+          # 修正1：京都・奥嵯峨の観光順序
+          rows = s.splitlines(keepends=True)
+          indices = [
+              i for i, row in enumerate(rows)
+              if row.startswith('[{"id":"sns-gotokuji"')
+          ]
+          assert len(indices) == 1
+          i = indices[0]
+          routes = json.loads(rows[i])
+          saga = next(x for x in routes if x["id"] == "sns-okusaga")
+
+          old_order = [
+              "Otagi Nenbutsuji Temple",
+              "Saga Toriimoto preserved street",
+              "Lunch near Saga Toriimoto",
+              "Adashino Nenbutsuji Temple",
+              "Saga Arashiyama Station",
+          ]
+          assert [x["choices"][0][0] for x in saga["stops"]] == old_order
+
+          stops = saga["stops"]
+          saga["stops"] = [
+              stops[0], stops[3], stops[1], stops[2], stops[4]
+          ]
+          rows[i] = json.dumps(
+              routes, ensure_ascii=False, separators=(",", ":")
+          ) + "\n"
+          s = "".join(rows)
+
+          # 修正2：奥嵯峨の目的地座標
+          replace_once(
+              '''        case "Otagi Nenbutsuji Temple":
+            return CLLocationCoordinate2D(latitude: 35.0313197, longitude: 135.6611036)''',
+              '''        case "Otagi Nenbutsuji Temple":
+            return CLLocationCoordinate2D(latitude: 35.0313197, longitude: 135.6611036)
+        case "Adashino Nenbutsuji Temple":
+            return CLLocationCoordinate2D(latitude: 35.026806, longitude: 135.664522)
+        case "Saga Toriimoto preserved street":
+            return CLLocationCoordinate2D(latitude: 35.0254, longitude: 135.6679)
+        case "Saga Arashiyama Station":
+            return CLLocationCoordinate2D(latitude: 35.018742, longitude: 135.681305)'''
+          )
+
+          # 修正3：昼食未選択時は仮の場所を経由しない
+          start = s.index("    private func startOfStop(_ index: Int) -> Int {")
+          end = s.index("    private func time(_ minutes: Int) -> String {", start)
+
+          s = s[:start] + '''    // Plan using selected real stops, skipping unselected lunch.
+    private func startOfStop(_ index: Int) -> Int {
+        var clock = startMinutes
+        guard index > 0 else { return clock }
+        var previousActual = 0
+
+        for current in 1...index {
+            let next = selectedVenue(current)
+            if next.name.hasPrefix("Lunch near ") && lunchSelection == nil {
+                if current == index {
+                    clock += duration(route.stops[previousActual],
+                                      venue: selectedVenue(previousActual))
+                }
+                continue
+            }
+            let previous = selectedVenue(previousActual)
+            let source = venueQuery(previous)
+            let target = venueQuery(next)
+            let available = routeLegTimes[
+                routeLegKey(origin: source, destination: target)
+            ] ?? [:]
+            let measured = preferredVerifiedRouteMinutes(available)
+            clock += duration(route.stops[previousActual], venue: previous)
+                + (measured ?? route.gap)
+            previousActual = current
+        }
+        return clock
+    }
+
+''' + s[end:]
+
+          # 修正4：京都で同じ説明が繰り返される問題
+          replace_once(
+              '''            } else if let info = FeaturedRoutes.info[route.id] {
+                Text(info.notes[language.index]).font(.subheadline)''',
+              '''            } else if route.id == "sns-okusaga" {
+                Text([
+                    "選択した2地点間の実際の移動経路を地図で確認してください。",
+                    "선택한 두 장소 사이의 실제 경로를 지도에서 확인하세요.",
+                    "请在地图中查看所选两地之间的实际路线。",
+                    "Check the mapped route between the selected places.",
+                    "ตรวจเส้นทางจริงระหว่างสถานที่ทั้งสองในแผนที่"
+                ][language.index]).font(.subheadline)
+            } else if let info = FeaturedRoutes.info[route.id] {
+                Text(info.notes[language.index]).font(.subheadline)'''
+          )
+
+          # 修正5：仮の20分表示を経路カードから削除
+          replace_once(
+              '''            Text(String(format: extra("planningGap"), locale: language.locale, arguments: [route.gap]))
+                .font(.caption).foregroundStyle(.secondary)
+            routeLinks(origin: venueQuery(from), destination: venueQuery(to))''',
+              '''            routeLinks(origin: venueQuery(from), destination: venueQuery(to))'''
+          )
+
+          # 修正6：昼食候補の検索範囲を調整
+          replace_once(
+              '''    private func nearbyDining(near coordinate: CLLocationCoordinate2D) async -> [DinnerPlace] {''',
+              '''    private func nearbyDining(near coordinate: CLLocationCoordinate2D,
+                              maxDistance: Double = 4_000) async -> [DinnerPlace] {'''
+          )
+          replace_once(
+              '''            guard metres <= 4_000 else { return }''',
+              '''            guard metres <= maxDistance else { return }'''
+          )
+          replace_once(
+              '''                let found = await nearbyDining(near:coordinate)
+                guard lunchSearchID == token, !Task.isCancelled else { return }
+                lunchResults = found''',
+              '''                let radius: Double = route.id == "sns-okusaga" ? 1_800 : 4_000
+                let found = await nearbyDining(near:coordinate, maxDistance:radius)
+                guard lunchSearchID == token, !Task.isCancelled else { return }
+                lunchResults = found'''
+          )
+
+          # 検査してから保存
+          s = marker + "\n" + s
+          assert "Adashino Nenbutsuji Temple" in s
+          assert "Saga Arashiyama Station" in s
+          assert "private func startOfStop" in s
+          path.write_text(s, encoding="utf-8")
+          print("Kyoto repair source prepared successfully.")
+          PY
+
+          git diff --check
+          swiftc -frontend -parse OdekakeGuide/OdekakeGuide/ChiikawaGuideApp.swift
+
+      - name: Compile iPhone app
+        shell: bash
+        run: |
+          xcodebuild \
+            -project OdekakeGuide.xcodeproj \
+            -scheme OdekakeGuide \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Commit only after successful compilation
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add OdekakeGuide/OdekakeGuide/ChiikawaGuideApp.swift
+          if ! git diff --cached --quiet; then
+            git commit -m "Repair Kyoto course route and timing"
+            git pull --rebase origin main
+            git push origin HEAD:main
+          fi
