@@ -245,7 +245,7 @@ private actor GooglePlacesGateway {
             let appCheck = try await AppCheck.appCheck().token(forcingRefresh:false)
             var request = URLRequest(url:base.appendingPathComponent(endpoint))
             request.httpMethod="POST"
-            request.timeoutInterval=5
+            request.timeoutInterval=18
             request.setValue("application/json",forHTTPHeaderField:"Content-Type")
             request.setValue(appCheck.token,forHTTPHeaderField:"X-Firebase-AppCheck")
             request.httpBody=try JSONEncoder().encode(body)
@@ -398,7 +398,7 @@ private struct PlannerView: View {
         if let names = FeaturedRoutes.names[venue.name] {
             return field == 0 ? names[language.index] : FeaturedRoutes.ui["visitNote"]![language.index]
         }
-        if venue.name.hasPrefix("Lunch near ") {
+        if venue.name.hasPrefix("Lunch ") {
             return field == 0 ? journeyText("lunchSearch") : journeyText("lunchNote")
         }
         if NationwideRoutes.japanesePlaces[venue.name] != nil {
@@ -585,14 +585,14 @@ private struct PlannerView: View {
             clock += duration(route.stops[previous], venue: current)
             // No geographic location exists for an unselected lunch slot.
             // Its route cannot be counted twice as an invented gap.
-            if next.name.hasPrefix("Lunch near ") && lunchSelection == nil {
+            if next.name.hasPrefix("Lunch ") && lunchSelection == nil {
                 continue
             }
             let source: String
-            if current.name.hasPrefix("Lunch near ") && lunchSelection == nil {
+            if current.name.hasPrefix("Lunch ") && lunchSelection == nil {
                 var lastRealStop = previous - 1
                 while lastRealStop > 0 &&
-                    selectedVenue(lastRealStop).name.hasPrefix("Lunch near ") {
+                    selectedVenue(lastRealStop).name.hasPrefix("Lunch ") {
                     lastRealStop -= 1
                 }
                 source = venueQuery(selectedVenue(max(0, lastRealStop)))
@@ -637,7 +637,7 @@ private struct PlannerView: View {
         var lines = ["Japan Day Planner · \(routeText(route, 0))"]
         for index in route.stops.indices {
             let venue = selectedVenue(index)
-            if venue.name.hasPrefix("Lunch near "), let place = lunchSelection {
+            if venue.name.hasPrefix("Lunch "), let place = lunchSelection {
                 lines.append("\(time(startOfStop(index))) · \(place.name) · \(place.address)")
             } else {
                 let url = URL(string: venue.url).flatMap { translatedGuideURL($0) }?.absoluteString ?? venue.url
@@ -877,7 +877,7 @@ private struct PlannerView: View {
         }
     }
     private var lunchAnchorKey: String {
-        for index in route.stops.indices where index > 0 && selectedVenue(index).name.hasPrefix("Lunch near ") {
+        for index in route.stops.indices where index > 0 && selectedVenue(index).name.hasPrefix("Lunch ") {
             return venueQuery(selectedVenue(index - 1))
         }
         return ""
@@ -886,7 +886,7 @@ private struct PlannerView: View {
         switch item {
         case .departure: return journeyText("depart")
         case .stop(let index):
-            if selectedVenue(index).name.hasPrefix("Lunch near "), let place = lunchSelection { return place.name }
+            if selectedVenue(index).name.hasPrefix("Lunch "), let place = lunchSelection { return place.name }
             return venueText(selectedVenue(index), 0)
         case .hotelBeforeDinner: return journeyText("hotelFirst")
         case .dinner: return journeyText(dinnerNearHotel ? "dinnerHotel" : "dinnerLast")
@@ -1060,7 +1060,12 @@ private struct PlannerView: View {
             } else {
                 ProgressView(journeyText("searchingHotels"))
             }
-            if hotelSearchError { Text(journeyText("hotelsUnavailable")).font(.footnote) }
+            if hotelSearchError {
+                Text(journeyText("hotelsUnavailable")).font(.footnote)
+                if let url = locationURL("ホテル 旅館 宿泊施設 " + localVenueName(selectedVenue(0)) + " " + routePrefecture) {
+                    journeyLink(journeyText("findHotels"), url: url, systemImage: "map")
+                }
+            }
             if !hotelResults.isEmpty {
                 Text(hotelTravelText(hotelResults.contains(where: { $0.distance < 0 }) ? "registeredStay" : "nearestFive"))
                     .font(.caption).foregroundStyle(.secondary)
@@ -1152,6 +1157,14 @@ private struct PlannerView: View {
             return CLLocationCoordinate2D(latitude: 34.995317, longitude: 135.783285)
         case "Otagi Nenbutsuji Temple":
             return CLLocationCoordinate2D(latitude: 35.0313197, longitude: 135.6611036)
+        // Geographic anchors for the starting places of Hokkaido courses.
+        // The first place must resolve even when a name search times out.
+        case "Odori Park":
+            return CLLocationCoordinate2D(latitude: 43.0595, longitude: 141.3472)
+        case "Hakodate Morning Market":
+            return CLLocationCoordinate2D(latitude: 41.7734, longitude: 140.7251)
+        case "Shirogane Blue Pond":
+            return CLLocationCoordinate2D(latitude: 43.4935, longitude: 142.6136)
         // Verified WGS84 locations for Kyoto Okusaga destinations.
         case "Adashino Nenbutsuji Temple":
             return CLLocationCoordinate2D(latitude: 35.026806, longitude: 135.664522)
@@ -1598,6 +1611,9 @@ private struct PlannerView: View {
         }
         return hotels
     }
+    private func desiredHotelTarget(for prefecture: String) -> Int {
+        ["tokyo", "osaka", "kyoto"].contains(prefecture) ? 5 : 3
+    }
     @MainActor
     private func searchHotels() {
         guard !hotelSearching else { return }
@@ -1634,7 +1650,18 @@ private struct PlannerView: View {
                 // Actual Google accommodation listings, each geofenced to
                 // the selected start, before independent native POI searching.
                 let googleHotels=await GooglePlacesGateway.shared.hotels(near:RoutePoint(coordinate))
-                for found in googleHotels {
+                // A hotels-only endpoint can return no results around rural or
+                // mountain attractions. Search nearby accommodation names too.
+                // Keep the same 30-km geofence and name/category validation.
+                var accommodationPlaces = googleHotels
+                if googleHotels.count < desiredHotelTarget(for: routePrefecture) {
+                    for query in ["ホテル 旅館", "宿泊施設"] {
+                        let additional = await GooglePlacesGateway.shared.search(query,
+                            near: RoutePoint(coordinate), radius: 30_000)
+                        accommodationPlaces.append(contentsOf: additional)
+                    }
+                }
+                for found in accommodationPlaces {
                     guard CLLocationCoordinate2DIsValid(found.coordinate),
                           found.lat.isFinite, found.lng.isFinite,
                           !found.name.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty else { continue }
@@ -1942,17 +1969,18 @@ private struct PlannerView: View {
                 }
                 DisclosureGroup(extra("arrival")) { arrivalCard.padding(.top, 10) }
             case .stop(let index):
-                if selectedVenue(index).name.hasPrefix("Lunch near ") {
+                if route.stops[index].type == "food" && lunchSelection == nil {
                     lunchCard(index)
                 } else {
                     stopCard(index)
                 }
                 if index + 1 < route.stops.count &&
-                    !selectedVenue(index + 1).name.hasPrefix("Lunch near ") {
+                    !(route.stops[index + 1].type == "food" && lunchSelection == nil) {
                     // Unselected lunch is a planning slot, not a real map POI.
                     // Continue routing from the last actual sight instead.
                     transferCard(index + 1)
-                } else if index + 1 < route.stops.count && selectedVenue(index + 1).name.hasPrefix("Lunch near ") {
+                } else if index + 1 < route.stops.count &&
+                    route.stops[index + 1].type == "food" && lunchSelection == nil {
                     journeyPanel { Text(journeyText("lunchNext")).font(.headline).foregroundStyle(journeyGold) }
                 } else if dinnerNearHotel && !hotelQuery.isEmpty {
                     travelPanel(origin: venueQuery(lastVenue), destination: hotelQuery, title: journeyText("nextHotel"), fromName: venueText(lastVenue, 0), toName: hotelName)
@@ -2185,7 +2213,7 @@ private struct PlannerView: View {
         ["asakusa": "Tokyo", "ueno": "Tokyo", "kyoto": "Kyoto", "osaka": "Osaka", "nara": "Nara", "hiroshima": "Hiroshima"][route.id] ?? "Japan"
     }
     private func venueQuery(_ venue: Venue) -> String {
-        if venue.name.hasPrefix("Lunch near "), let place = lunchSelection { return place.query }
+        if venue.name.hasPrefix("Lunch "), let place = lunchSelection { return place.query }
         // Use fixed coordinates for known streets, squares and major sites.
         // This avoids a transient MapKit name-search failure hiding route times.
         if let point = pinnedVenueCoordinate(venue) {
@@ -2460,12 +2488,12 @@ private struct PlannerView: View {
         // calculate a route from the text "Lunch near ..." as if it were a POI.
         var previousIndex = index - 1
         while previousIndex > 0 &&
-            selectedVenue(previousIndex).name.hasPrefix("Lunch near ") && lunchSelection == nil {
+            selectedVenue(previousIndex).name.hasPrefix("Lunch ") && lunchSelection == nil {
             previousIndex -= 1
         }
         let from = selectedVenue(previousIndex)
         let to = selectedVenue(index)
-        let fromTitle = from.name.hasPrefix("Lunch near ")
+        let fromTitle = from.name.hasPrefix("Lunch ")
             ? (lunchSelection?.name ?? venueText(from, 0)) : venueText(from, 0)
         let isOriginalPair = previousIndex == index - 1 &&
             selectedIndex(previousIndex) == 0 && selectedIndex(index) == 0
