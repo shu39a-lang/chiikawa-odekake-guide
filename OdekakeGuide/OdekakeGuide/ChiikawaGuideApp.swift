@@ -191,24 +191,29 @@ private enum SharedTravelEstimator {
         let mode: String = transport == .walking ? "walking"
             : transport == .automobile ? "taxi" : "transit"
         let from = RoutePoint(a), to = RoutePoint(b)
-        // Google and native map lookups are launched concurrently. Do not
-        // block a valid Apple Maps result while awaiting a slow cloud request.
-        // Native transit is preferable because it knows the intended travel time.
-        let googleTask = Task {
-            await GoogleRoutesGateway.shared.minutes(from: from, to: to, mode: mode)
+        // ROUTE_TIME_REPAIR_20261018: multiple provider results and full itinerary refresh.
+        // Both services return independently. The first genuine route duration wins.
+        // MapKit errors must not block an already successful Google Routes result.
+        // No straight-line distance is converted to a false travel duration.
+        return await withTaskGroup(of: TravelTime?.self) { group in
+            group.addTask {
+                await NativeMapDirections.realRoute(
+                    from: from, to: to, mode: mode,
+                    plannedDepartureMinutes: plannedDepartureMinutes)
+            }
+            group.addTask {
+                guard let minutes = await GoogleRoutesGateway.shared.minutes(
+                    from: from, to: to, mode: mode) else { return nil }
+                return TravelTime(minutes: minutes, isApproximate: false)
+            }
+            for await verified in group {
+                if let verified {
+                    group.cancelAll()
+                    return verified
+                }
+            }
+            return nil
         }
-        let nativeResult = await NativeMapDirections.realRoute(
-            from: from, to: to, mode: mode,
-            plannedDepartureMinutes: plannedDepartureMinutes)
-        if let nativeResult {
-            googleTask.cancel()
-            return nativeResult
-        }
-        guard !Task.isCancelled else { googleTask.cancel(); return nil }
-        if let googleMinutes = await googleTask.value {
-            return TravelTime(minutes: googleMinutes, isApproximate: false)
-        }
-        return nil
     }
 }
 
@@ -1084,7 +1089,7 @@ private struct PlannerView: View {
                     if isSelected {
                         hotelTravelSummary
                             .id("selectedHotelTravel")
-                            .task(id: hotelTravelKey) { await updateHotelTravelTimes() }
+                            .task(id: hotelTravelKey) { await updateHotelTravelTimesWithRetry() }
                     }
                 }
                 .padding(12)
@@ -1094,7 +1099,7 @@ private struct PlannerView: View {
             if hotelChoice == "suggested", let hotel = selectedSuggestedHotel, !selectedSearchedHotelVisible {
                 Text(hotelTravelText("selectedHotel")).font(.caption).foregroundStyle(journeyGold)
                 visibleChoice(hotel.name, selected: true) { saveHotelValue("suggested") }
-                hotelTravelSummary.task(id: hotelTravelKey) { await updateHotelTravelTimes() }
+                hotelTravelSummary.task(id: hotelTravelKey) { await updateHotelTravelTimesWithRetry() }
                 Text(hotel.address).font(.subheadline).foregroundStyle(.secondary)
                 if let url = hotel.website.flatMap(URL.init(string:)) { translatedGuideLink(extra("rate"), url: url) }
                 if let url = locationURL(hotel.query) { journeyLink(extra("hotelMap"), url: url, systemImage: "mappin.and.ellipse") }
@@ -1109,7 +1114,7 @@ private struct PlannerView: View {
                     .textFieldStyle(.roundedBorder)
                 Text(journeyText("hotelInputNote")).font(.footnote).foregroundStyle(.secondary)
                 if !hotelQuery.isEmpty {
-                    hotelTravelSummary.task(id: hotelTravelKey) { await updateHotelTravelTimes() }
+                    hotelTravelSummary.task(id: hotelTravelKey) { await updateHotelTravelTimesWithRetry() }
                 }
             }
             Text(hotelTravelText("afterChoosing"))
@@ -1869,6 +1874,17 @@ private struct PlannerView: View {
         .background(PlannerTheme.raised, in: RoundedRectangle(cornerRadius: 12))
     }
     @MainActor
+    private func updateHotelTravelTimesWithRetry() async {
+        let currentKey = hotelTravelKey
+        await updateHotelTravelTimes()
+        guard !Task.isCancelled, currentKey == hotelTravelKey,
+              hotelTravelMinutes["walking"] == nil &&
+              hotelTravelMinutes["taxi"] == nil else { return }
+        try? await Task.sleep(nanoseconds: 1_800_000_000)
+        guard !Task.isCancelled, currentKey == hotelTravelKey else { return }
+        await updateHotelTravelTimes()
+    }
+    @MainActor
     private func updateHotelTravelTimes() async {
         let requestKey = hotelTravelKey
         hotelTravelMinutes = [:]
@@ -2311,6 +2327,15 @@ private struct PlannerView: View {
         .task(id: key) {
             guard let origin, !origin.isEmpty else { return }
             await updateRouteLegTimes(origin: origin, destination: destination, key: key)
+            // One automatic retry for a temporarily unavailable map/service.
+            // Keep a valid route as soon as one real walking or driving result arrives.
+            if !Task.isCancelled,
+               routeLegTimes[key]?["walking"] == nil &&
+               routeLegTimes[key]?["taxi"] == nil {
+                try? await Task.sleep(nanoseconds: 1_800_000_000)
+                guard !Task.isCancelled else { return }
+                await updateRouteLegTimes(origin: origin, destination: destination, key: key)
+            }
         }
     }
     private func isInternalSiteTransfer(origin: String?, destination: String) -> Bool {
@@ -2357,7 +2382,10 @@ private struct PlannerView: View {
     private func updateRouteLegTimes(origin: String, destination: String, key: String) async {
         // Cache only positive results across visits. A failed lookup must be retried
         // when the visitor advances and later returns to this segment.
-        if let previous = routeLegTimes[key], !previous.isEmpty { return }
+        if let previous = routeLegTimes[key],
+           previous["walking"] != nil &&
+           (previous["taxi"] != nil || routeLegShortWalk.contains(key)) &&
+           (previous["transit"] != nil || routeLegShortWalk.contains(key)) { return }
         guard !routeLegLoading.contains(key) else { return }
         // Same-site transfers can still require a path: map it when possible.
         // Never invent a universal five-minute walk.
@@ -2375,7 +2403,8 @@ private struct PlannerView: View {
                 return
             }
             routeLegShortWalk.remove(key)
-            routeLegTimes[key] = [:]
+            // Keep already verified times visible during retries.
+            routeLegTimes[key] = routeLegTimes[key] ?? [:]
             // Publish each verified mode separately; do not wait for walking
             // to finish before showing the already mapped car or rail time.
             let fromPoint = RoutePoint(start.placemark.coordinate)
@@ -4374,7 +4403,7 @@ private enum OriginalCourseText {
     static func get(_ key: String, _ language: GuideLanguage) -> String { strings[key]?[language.index] ?? key }
 }
 
-private struct OriginalStop: Codable, Equatable, Identifiable {
+private struct OriginalStop: Codable, Equatable, Identifiable, Sendable {
     var id = UUID()
     var kind: String
     var name = ""
@@ -4431,7 +4460,7 @@ private struct OriginalCourseView: View {
     }
     private var searchKey: String { stops.map { "\($0.id):\($0.name)" }.joined(separator: "|") }
     private var routeKey: String {
-        stops.map { "\($0.id):\($0.latitude ?? 0):\($0.longitude ?? 0)" }.joined(separator: "|")
+        stops.map { "\($0.id):\($0.name):\($0.address):\($0.latitude ?? 0):\($0.longitude ?? 0)" }.joined(separator: "|")
     }
     private func legKey(_ index: Int) -> String {
         "\(stops[index - 1].id)|\(stops[index].id)"
@@ -4834,44 +4863,53 @@ private struct OriginalCourseView: View {
               abs(coordinate.longitude) > 0.01 else { return nil }
         return coordinate
     }
+    @MainActor
     private func calculateRoutes() async {
         times = [:]
         let snapshot = stops
         guard snapshot.count > 1 else { return }
-        for index in 1..<snapshot.count {
+        // Bound the request fan-out to three journey legs at a time.
+        for batch in stride(from: 1, to: snapshot.count, by: 3) {
             guard !Task.isCancelled else { return }
-            let from = snapshot[index - 1], to = snapshot[index]
-            // Resolve missing coordinates using the stop's actual name and address.
-            // Do not substitute guessed travel durations for map-confirmed routes.
-            guard let origin = await resolvedCoordinate(for: from),
-                  let destination = await resolvedCoordinate(for: to) else { continue }
-            let key = "\(from.id)|\(to.id)"
-            let start = MKMapItem(placemark: MKPlacemark(coordinate: origin))
-            let end = MKMapItem(placemark: MKPlacemark(coordinate: destination))
-            // Start every independent mode at once. A slow/failed walking request
-            // must not postpone car or rail timings for later itinerary stages.
-            let departure = arrival(index - 1) + from.duration
-            async let walking = SharedTravelEstimator.routeTime(from: start, to: end, by: .walking)
-            async let driving = SharedTravelEstimator.routeTime(from: start, to: end, by: .automobile)
-            async let rail = SharedTravelEstimator.routeTime(from: start, to: end, by: .transit,
-                plannedDepartureMinutes: departure)
-            let walkTime = await walking
-            let driveTime = await driving
-            let railTime = await rail
-            guard !Task.isCancelled else { return }
-            // Do not publish a result for a leg that has since been changed.
-            guard index < stops.count,
-                  stops[index - 1].id == from.id,
-                  stops[index].id == to.id,
-                  stops[index - 1].name == from.name,
-                  stops[index - 1].address == from.address,
-                  stops[index].name == to.name,
-                  stops[index].address == to.address else { return }
-            if let walkTime { times[key, default: [:]]["walking"] = walkTime }
-            // A verified walk under 500 m needs no car or rail recommendation.
-            if !SharedTravelEstimator.isVerifiedShortWalk(walkTime) {
-                if let driveTime { times[key, default: [:]]["taxi"] = driveTime }
-                if let railTime { times[key, default: [:]]["transit"] = railTime }
+            await withTaskGroup(of: (Int, String, TravelTime?, TravelTime?, TravelTime?).self) { group in
+                for index in batch..<min(batch + 3, snapshot.count) {
+                    let from = snapshot[index - 1]
+                    let to = snapshot[index]
+                    let key = "\(from.id)|\(to.id)"
+                    let departure = arrival(index - 1) + from.duration
+                    group.addTask {
+                        guard let origin = await resolvedCoordinate(for: from),
+                              let destination = await resolvedCoordinate(for: to) else {
+                            return (index, key, nil, nil, nil)
+                        }
+                        let start = MKMapItem(placemark: MKPlacemark(coordinate: origin))
+                        let end = MKMapItem(placemark: MKPlacemark(coordinate: destination))
+                        async let walking = SharedTravelEstimator.routeTime(from: start, to: end, by: .walking)
+                        async let driving = SharedTravelEstimator.routeTime(from: start, to: end, by: .automobile)
+                        async let rail = SharedTravelEstimator.routeTime(from: start, to: end, by: .transit,
+                            plannedDepartureMinutes: departure)
+                        let walkTime = await walking
+                        let driveTime = await driving
+                        let railTime = await rail
+                        return (index, key, walkTime, driveTime, railTime)
+                    }
+                }
+                for await (index, key, walkTime, driveTime, railTime) in group {
+                    guard !Task.isCancelled else { group.cancelAll(); break }
+                    guard index < stops.count else { continue }
+                    let from = snapshot[index - 1], to = snapshot[index]
+                    guard stops[index - 1].id == from.id,
+                          stops[index].id == to.id,
+                          stops[index - 1].name == from.name,
+                          stops[index - 1].address == from.address,
+                          stops[index].name == to.name,
+                          stops[index].address == to.address else { continue }
+                    if let walkTime { times[key, default: [:]]["walking"] = walkTime }
+                    if !SharedTravelEstimator.isVerifiedShortWalk(walkTime) {
+                        if let driveTime { times[key, default: [:]]["taxi"] = driveTime }
+                        if let railTime { times[key, default: [:]]["transit"] = railTime }
+                    }
+                }
             }
         }
     }
