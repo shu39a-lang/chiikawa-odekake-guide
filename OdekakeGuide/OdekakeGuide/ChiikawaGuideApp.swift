@@ -185,6 +185,31 @@ private enum NativeMapDirections {
     }
 }
 
+// ROUTE_LOCATION_FIRST_20261019_V2
+// One map-confirmed route is reused throughout sightseeing / meal / hotel / return screens.
+// Cache keys include both precise endpoints and transport mode. A railway departure
+// key also includes its scheduled clock time; failed lookups are never cached.
+private actor ConfirmedJourneyTimes {
+    static let shared = ConfirmedJourneyTimes()
+    private var values: [String: (Date, TravelTime)] = [:]
+    func read(_ key: String, rail: Bool) -> TravelTime? {
+        guard let entry = values[key] else { return nil }
+        let lifetime: TimeInterval = rail ? 90 : 900
+        guard Date().timeIntervalSince(entry.0) < lifetime else {
+            values.removeValue(forKey: key)
+            return nil
+        }
+        return entry.1
+    }
+    func save(_ value: TravelTime, key: String) {
+        guard value.minutes > 0 && value.minutes < 10000, !value.isApproximate else { return }
+        values[key] = (Date(), value)
+        if values.count > 360 {
+            values = values.filter { Date().timeIntervalSince($0.value.0) < 900 }
+        }
+    }
+}
+
 private enum SharedTravelEstimator {
     static func metres(from start: CLLocationCoordinate2D, to end: CLLocationCoordinate2D) -> Double? {
         guard CLLocationCoordinate2DIsValid(start), CLLocationCoordinate2DIsValid(end),
@@ -214,11 +239,26 @@ private enum SharedTravelEstimator {
         let mode: String = transport == .walking ? "walking"
             : transport == .automobile ? "taxi" : "transit"
         let from = RoutePoint(a), to = RoutePoint(b)
+        let cacheKey = String(format: "%.6f|%.6f>%.6f|%.6f|%@|%d",
+            from.lat, from.lng, to.lat, to.lng, mode as NSString,
+            mode == "transit" ? (plannedDepartureMinutes ?? 600) : 0)
+        if let saved = await ConfirmedJourneyTimes.shared.read(cacheKey, rail: mode == "transit") {
+            return saved
+        }
+        // Time-dependent public transport must use a route that actually includes
+        // the itinerary departure time. The existing Google backend does NOT accept
+        // departureTime, so do not display its current-time train duration as planned.
+        if mode == "transit" {
+            let mapped = await NativeMapDirections.realRoute(from: from, to: to,
+                mode: mode, plannedDepartureMinutes: plannedDepartureMinutes)
+            if let mapped { await ConfirmedJourneyTimes.shared.save(mapped, key: cacheKey) }
+            return mapped
+        }
         // ROUTE_TIME_REPAIR_20261018: multiple provider results and full itinerary refresh.
         // Both services return independently. The first genuine route duration wins.
         // MapKit errors must not block an already successful Google Routes result.
         // No straight-line distance is converted to a false travel duration.
-        return await withTaskGroup(of: TravelTime?.self) { group in
+        let verified = await withTaskGroup(of: TravelTime?.self) { group in
             group.addTask {
                 await NativeMapDirections.realRoute(
                     from: from, to: to, mode: mode,
@@ -229,20 +269,19 @@ private enum SharedTravelEstimator {
                     from: from, to: to, mode: mode) else { return nil }
                 return TravelTime(minutes: minutes, isApproximate: false)
             }
-            for await verified in group {
-                if let verified {
-                    // Reject impossible route speeds caused by an incorrect pin
-                    // or malformed backend data. This is a plausibility bound,
-                    // never a replacement for a real map route.
-                    let maxMetresPerMinute: Double = mode == "walking" ? 210 :
-                        mode == "taxi" ? 2700 : 8500
-                    guard Double(verified.minutes) * maxMetresPerMinute >= straight else { continue }
+            for await duration in group {
+                if let duration {
+                    // An impossible speed indicates a mismatched route or POI.
+                    let maxMetresPerMinute: Double = mode == "walking" ? 210 : 2700
+                    guard Double(duration.minutes) * maxMetresPerMinute >= straight else { continue }
                     group.cancelAll()
-                    return verified
+                    return duration
                 }
             }
             return nil
         }
+        if let verified { await ConfirmedJourneyTimes.shared.save(verified, key: cacheKey) }
+        return verified
     }
 }
 
@@ -1329,8 +1368,8 @@ private struct PlannerView: View {
             "道頓堀": ["Dotonbori"],
             "祇園の路地": ["祇園", "Gion"],
             "嵯峨鳥居本町並み保存地区": ["嵯峨鳥居本伝統的建造物群保存地区"],
-            "銀山川の橋と遊歩道": ["銀山温泉 銀山川の橋", "銀山温泉 川沿いの遊歩道"],
-            "白銀公園入口": ["銀山温泉 白銀公園入口", "銀山温泉 白銀公園"],
+            "銀山川の橋と遊歩道": ["しろがね橋", "銀山温泉 しろがね橋", "銀山温泉 銀山川の橋", "銀山温泉 川沿いの遊歩道"],
+            "白銀公園入口": ["白銀の滝", "山形県尾花沢市銀山新畑450-1 白銀の滝", "銀山温泉 白銀公園入口", "銀山温泉 白銀公園"],
             "小豆島オリーブ公園のギリシャ風車": ["オリーブ公園 ギリシャ風車", "Greek Windmill Shodoshima"],
             "小豆島オリーブ公園のオリーブ畑": ["オリーブ公園 オリーブの路", "小豆島オリーブ公園 オリーブ畑"]
         ]
@@ -1414,11 +1453,8 @@ private struct PlannerView: View {
                    guard let point = mark.location?.coordinate, CLLocationCoordinate2DIsValid(point) else { return false }
                    let item = MKMapItem(placemark: MKPlacemark(placemark: mark))
                    guard isLocalRoutePlace(item, in: prefecture) else { return false }
+                    // Do not accept a nearby but unrelated road or park as the POI.
                     return matchesName(mark.name ?? "") || matchesName(mark.thoroughfare ?? "")
-                        || (pinnedFirstVenueCoordinate.map { anchor in
-                            CLLocation(latitude: point.latitude, longitude: point.longitude)
-                                .distance(from: CLLocation(latitude: anchor.latitude, longitude: anchor.longitude)) < 12_000
-                        } ?? false)
                }) {
                 let item = MKMapItem(placemark: MKPlacemark(placemark: mark))
                 resolvedPlaceCache[cacheKey] = item
@@ -1524,6 +1560,8 @@ private struct PlannerView: View {
                 CLLocationCoordinate2D(latitude: place.latitude, longitude: place.longitude)))
         }
         if let cached = resolvedPlaceCache[clean] { return cached }
+        // Choose a course landmark by its unique registered identity before
+        // attempting a new fuzzy user-input name search.
         if let venue = route.stops.flatMap({ $0.choices }).first(where: { venueQuery($0) == clean }),
            let prefecture = NationwideRoutes.prefectures.first(where: { $0.id == routePrefecture }) {
             return try await venueMapItem(venue, in: prefecture)
@@ -1554,7 +1592,18 @@ private struct PlannerView: View {
                    guard CLLocationCoordinate2DIsValid(p), abs(p.latitude) > 0.01,
                          abs(p.longitude) > 0.01,
                          item.placemark.isoCountryCode == nil || item.placemark.isoCountryCode == "JP" else { return false }
-                   return prefecture.map { isLocalRoutePlace(item, in: $0) } ?? true
+                   guard prefecture.map({ isLocalRoutePlace(item, in: $0) }) ?? true else { return false }
+                   // For hotel names, never return an unrelated local business.
+                   // Exact street-address geocoding is handled separately below.
+                   let expectedName = clean.components(separatedBy: ",").first?
+                       .trimmingCharacters(in: .whitespacesAndNewlines) ?? clean
+                   let normalizedExpected = normalizedPlaceName(expectedName)
+                   let normalizedFound = normalizedPlaceName(item.name ?? "")
+                   guard !normalizedFound.isEmpty else { return false }
+                   if term == clean && normalizedExpected.count >= 3 &&
+                      !normalizedFound.contains(normalizedExpected) &&
+                      !normalizedExpected.contains(normalizedFound) { return false }
+                   return true
                }) {
                 resolvedPlaceCache[clean] = candidate
                 return candidate
@@ -2397,7 +2446,9 @@ private struct PlannerView: View {
             // Keep a valid route as soon as one real walking or driving result arrives.
             if !Task.isCancelled,
                routeLegTimes[key]?["walking"] == nil &&
-               routeLegTimes[key]?["taxi"] == nil {
+               routeLegTimes[key]?["taxi"] == nil &&
+               !(routeLegDiagnostics[key]?.contains("地点") ?? false) &&
+               !(routeLegDiagnostics[key]?.contains("座標") ?? false) {
                 try? await Task.sleep(nanoseconds: 1_800_000_000)
                 guard !Task.isCancelled else { return }
                 await updateRouteLegTimes(origin: origin, destination: destination, key: key)
@@ -2478,7 +2529,9 @@ private struct PlannerView: View {
             let end = try await resolvedAnchorMapItem(destination)
             guard !Task.isCancelled else { return }
             guard let start, let end else {
-                routeLegTimes[key] = [:]
+                // A failed search is not a zero-minute journey.
+                // Keep last valid real map duration, if any.
+                routeLegTimes[key] = routeLegTimes[key] ?? [:]
                 routeLegDiagnostics[key] = "地点を正確に特定できませんでした。出発地・目的地を地図で確認してください。"
                 return
             }
