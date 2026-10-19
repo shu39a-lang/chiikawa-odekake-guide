@@ -52,6 +52,9 @@ private struct RealGoogleResponse: Decodable, Sendable {
         default: value = transit?.minutes
         }
         guard let value, value > 0 && value < 10_000 else { return nil }
+        let origin = (mode == "walking" ? walking?.source : mode == "taxi" ? driving?.source : transit?.source)?.lowercased() ?? ""
+        let inventedMarkers = ["haversine", "straight_line", "heuristic", "synthetic", "fake_route", "distance_estimate"]
+        guard !inventedMarkers.contains(where: { origin.contains($0) }) else { return nil }
         return value
     }
 }
@@ -69,55 +72,75 @@ private final class ProductionAppCheckFactory: NSObject, AppCheckProviderFactory
 private actor GoogleRoutesGateway {
     static let shared = GoogleRoutesGateway()
     private let service = URL(string: "https://japan-day-planner-api-759944709116.asia-northeast1.run.app/api/routes")!
-    // One in-flight response per pair, regardless of walking/car/rail callers.
-    // Previously three simultaneous requests raced and temporarily disabled the
-    // whole routing service on a single timeout.
+    // ROUTE_ARCHITECTURE_REBUILD_20261019
+    // One real request per geographic pair, shared between walking/car/transit.
+    // A partial successful response is refreshed quickly; failed requests never
+    // disable unrelated places or block a legitimate manual retry.
+    private typealias GatewayResult = (response: RealGoogleResponse?, error: String?)
     private var completed: [String: (Date, RealGoogleResponse)] = [:]
-    private var pending: [String: Task<RealGoogleResponse?, Never>] = [:]
-    private var failedUntil: [String: Date] = [:]
-
+    private var pending: [String: Task<GatewayResult, Never>] = [:]
+    private var failures: [String: String] = [:]
+    private func key(_ a: RoutePoint, _ b: RoutePoint) -> String {
+        String(format: "%.6f,%.6f>%.6f,%.6f", a.lat, a.lng, b.lat, b.lng)
+    }
+    func failure(from a: RoutePoint, to b: RoutePoint) -> String? {
+        failures[key(a,b)]
+    }
     private func response(from start: RoutePoint, to end: RoutePoint) async -> RealGoogleResponse? {
-        let key = String(format: "%.6f,%.6f>%.6f,%.6f", start.lat, start.lng, end.lat, end.lng)
-        if let saved = completed[key], Date().timeIntervalSince(saved.0) < 300 {
-            return saved.1
+        let pair = key(start, end)
+        if let saved = completed[pair] {
+            let complete = saved.1.walking != nil && saved.1.driving != nil && saved.1.transit != nil
+            let lifetime: TimeInterval = complete ? 300 : 25
+            if Date().timeIntervalSince(saved.0) < lifetime { return saved.1 }
         }
-        if let existing = pending[key] { return await existing.value }
-        guard Date() >= (failedUntil[key] ?? .distantPast) else { return nil }
+        if let running = pending[pair] { return (await running.value).response }
         struct RequestBody: Encodable { let origin: RoutePoint; let destination: RoutePoint }
-        let task = Task<RealGoogleResponse?, Never> {
+        let endpoint = service
+        let worker = Task<GatewayResult, Never> {
             do {
-                let appCheck = try await AppCheck.appCheck().token(forcingRefresh: false)
-                guard !appCheck.token.isEmpty else { return nil }
-                var request = URLRequest(url: service)
+                let proof = try await AppCheck.appCheck().token(forcingRefresh: false)
+                guard !proof.token.isEmpty else { return (nil, "Firebase App Check トークンなし") }
+                var request = URLRequest(url: endpoint)
                 request.httpMethod = "POST"
-                request.timeoutInterval = 20
+                request.timeoutInterval = 18
                 request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                request.setValue(appCheck.token, forHTTPHeaderField: "X-Firebase-AppCheck")
-                request.httpBody = try JSONEncoder().encode(RequestBody(origin: start, destination: end))
-                let (data, response) = try await URLSession.shared.data(for: request)
-                guard let http = response as? HTTPURLResponse,
-                      (200..<300).contains(http.statusCode) else { return nil }
-                return try JSONDecoder().decode(RealGoogleResponse.self, from: data)
-            } catch { return nil }
+                request.setValue(proof.token, forHTTPHeaderField: "X-Firebase-AppCheck")
+                request.httpBody = try JSONEncoder().encode(RequestBody(origin:start, destination:end))
+                let (data, raw) = try await URLSession.shared.data(for: request)
+                guard let http = raw as? HTTPURLResponse else { return (nil, "GoogleサーバーのHTTP応答なし") }
+                guard (200..<300).contains(http.statusCode) else {
+                    return (nil, "Googleサーバー HTTP \(http.statusCode)（認証・設定・上限などを確認）")
+                }
+                guard let value = try? JSONDecoder().decode(RealGoogleResponse.self, from: data) else {
+                    return (nil, "Googleサーバーの応答形式がアプリと一致しません")
+                }
+                guard value.walking?.minutes != nil || value.driving?.minutes != nil || value.transit?.minutes != nil else {
+                    return (nil, "Googleサーバーは応答しましたが全移動手段の時間が空です")
+                }
+                return (value,nil)
+            } catch {
+                if error is CancellationError { return (nil,"通信がキャンセルされました") }
+                return (nil,"Googleサーバーと通信できません（通信・App Checkを確認）")
+            }
         }
-        pending[key] = task
-        let value = await task.value
-        pending.removeValue(forKey: key)
-        if let value {
-            completed[key] = (Date(), value)
-            failedUntil.removeValue(forKey: key)
-            if completed.count > 300 {
-                completed = completed.filter { Date().timeIntervalSince($0.value.0) < 300 }
+        pending[pair]=worker
+        let outcome=await worker.value
+        pending.removeValue(forKey:pair)
+        if let value=outcome.response {
+            completed[pair]=(Date(),value)
+            failures.removeValue(forKey:pair)
+            if completed.count>300 {
+                completed=completed.filter { Date().timeIntervalSince($0.value.0)<300 }
             }
         } else {
-            // Retry a failed pair shortly without poisoning other destinations.
-            failedUntil[key] = Date().addingTimeInterval(10)
+            failures[pair]=outcome.error ?? "Google経路取得失敗"
+            completed.removeValue(forKey:pair)
         }
-        return value
+        return outcome.response
     }
     func minutes(from start: RoutePoint, to end: RoutePoint, mode: String) async -> Int? {
-        guard let route = await response(from: start, to: end) else { return nil }
-        return route.minutes(for: mode)
+        guard let result=await response(from:start,to:end) else { return nil }
+        return result.minutes(for:mode)
     }
 }
 
@@ -208,6 +231,12 @@ private enum SharedTravelEstimator {
             }
             for await verified in group {
                 if let verified {
+                    // Reject impossible route speeds caused by an incorrect pin
+                    // or malformed backend data. This is a plausibility bound,
+                    // never a replacement for a real map route.
+                    let maxMetresPerMinute: Double = mode == "walking" ? 210 :
+                        mode == "taxi" ? 2700 : 8500
+                    guard Double(verified.minutes) * maxMetresPerMinute >= straight else { continue }
                     group.cancelAll()
                     return verified
                 }
@@ -372,10 +401,12 @@ private struct PlannerView: View {
     @State private var hotelTravelMinutes: [String: TravelTime] = [:]
     @State private var hotelTravelLoading = false
     @State private var hotelTravelShortWalk = false
+    @State private var hotelTravelDiagnosis: String? = nil
     @State private var savedSuggestedHotels = "{}"
     @State private var routeLegTimes: [String: [String: TravelTime]] = [:]
     @State private var routeLegLoading: Set<String> = []
     @State private var routeLegShortWalk: Set<String> = []
+    @State private var routeLegDiagnostics: [String: String] = [:]
 
     private var language: GuideLanguage { GuideLanguage(rawValue: languageCode) ?? .ja }
     private func text(_ key: String) -> String { GuideTranslations.ui[key]?[language.index] ?? key }
@@ -1209,9 +1240,8 @@ private struct PlannerView: View {
             // Verified Manai Falls overlook (Takimi-dai); not a car park.
             // Source: ja.wikivoyage.org/wiki/高千穂峡 (滝見台 waypoint)
             return CLLocationCoordinate2D(latitude: 32.702958096262, longitude: 131.30064610897)
-        case "Motonosumi torii path":
-            // Facility entrance anchor; intra-site travel is labelled separately.
-            return pinnedVenueCoordinate(named: "Motonosumi Shrine")
+        // Shrine path and shrine entry are different real points.
+        // Do not silently substitute the parent's coordinates.
         case "Chichibugahama Beach":
             // Beach access area, not a point offshore. Official tourist map:
             // https://www.mitoyo-kanko.com/chichibugahama/
@@ -1222,6 +1252,10 @@ private struct PlannerView: View {
             return CLLocationCoordinate2D(latitude: 34.20401, longitude: 133.6369)
         case "Ginzan Onsen town":
             return CLLocationCoordinate2D(latitude: 38.5699, longitude: 140.5307)
+        case "Ginzan River bridges":
+            // Shirogane-bashi bridge viewpoint, Yamagata prefecture:
+            // https://keikan.pref.yamagata.jp/vp_011/
+            return CLLocationCoordinate2D(latitude: 38.570380, longitude: 140.530397)
         case "Kawagoe Ichibangai":
             return CLLocationCoordinate2D(latitude: 35.9235, longitude: 139.483333)
         case "Kokusai Dori Naha":
@@ -1275,10 +1309,10 @@ private struct PlannerView: View {
             resolvedPlaceCache[cacheKey] = item
             return item
         }
-        if let parent = parentSiteName(venue),
-           let parentVenue = route.stops.flatMap({ $0.choices }).first(where: { $0.name == parent }) {
-            return try await venueMapItem(parentVenue, in: prefecture)
-        }
+        // Separate attractions within a park, hot spring or shopping street
+        // MUST be resolved individually. Copying the parent coordinate caused
+        // misleading zero-distance results for Ginzan Onsen and Shodoshima.
+        // If the precise footpath POI is not known, report an unresolved point.
         let expected = localVenueName(venue)
         let aliases = ["仁尾の港町": "仁尾町", "仁尾八幡神社": "仁尾八幡宮", "銀山温泉街": "銀山温泉",
                        "本町通り（富士みち）": "下吉田本町通り",
@@ -1294,7 +1328,11 @@ private struct PlannerView: View {
             "渋谷スクランブル交差点": ["渋谷駅前交差点", "Shibuya Scramble Crossing"],
             "道頓堀": ["Dotonbori"],
             "祇園の路地": ["祇園", "Gion"],
-            "嵯峨鳥居本町並み保存地区": ["嵯峨鳥居本伝統的建造物群保存地区"]
+            "嵯峨鳥居本町並み保存地区": ["嵯峨鳥居本伝統的建造物群保存地区"],
+            "銀山川の橋と遊歩道": ["銀山温泉 銀山川の橋", "銀山温泉 川沿いの遊歩道"],
+            "白銀公園入口": ["銀山温泉 白銀公園入口", "銀山温泉 白銀公園"],
+            "小豆島オリーブ公園のギリシャ風車": ["オリーブ公園 ギリシャ風車", "Greek Windmill Shodoshima"],
+            "小豆島オリーブ公園のオリーブ畑": ["オリーブ公園 オリーブの路", "小豆島オリーブ公園 オリーブ畑"]
         ]
         var names = [expected]
         if let alias = aliases[expected] { names.append(alias) }
@@ -1861,6 +1899,10 @@ private struct PlannerView: View {
             }
             Text(hotelTravelText("estimateNote"))
                 .font(.caption).foregroundStyle(.secondary)
+            if let diagnosis = hotelTravelDiagnosis, !diagnosis.isEmpty {
+                Text(language == .ja ? diagnosis : "The travel time could not be confirmed. Check the hotel address and map directions.")
+                    .font(.caption).foregroundStyle(PlannerTheme.amber)
+            }
             if !hotelTravelLoading,
                (hotelTravelMinutes["walking"] == nil ||
                 (!hotelTravelShortWalk && hotelTravelMinutes["taxi"] == nil) ||
@@ -1889,12 +1931,16 @@ private struct PlannerView: View {
         let requestKey = hotelTravelKey
         hotelTravelMinutes = [:]
         hotelTravelShortWalk = false
+        hotelTravelDiagnosis = nil
         hotelTravelLoading = true
         do {
             // Pause while a manually entered hotel name is still being typed.
             try await Task.sleep(nanoseconds: 500_000_000)
             guard let origin = try await resolvedAnchorMapItem(hotelQuery) else {
-                if !Task.isCancelled && requestKey == hotelTravelKey { hotelTravelLoading = false }
+                if !Task.isCancelled && requestKey == hotelTravelKey {
+                    hotelTravelLoading = false
+                    hotelTravelDiagnosis = "ホテルの所在地を特定できません。ホテル住所をご確認ください。"
+                }
                 return
             }
             guard let prefecture = NationwideRoutes.prefectures.first(where: { $0.id == routePrefecture }),
@@ -1902,7 +1948,14 @@ private struct PlannerView: View {
                 if !Task.isCancelled && requestKey == hotelTravelKey { hotelTravelLoading = false }
                 return
             }
-            guard !Task.isCancelled && requestKey == hotelTravelKey else { return }
+            guard !Task.isCancelled, requestKey == hotelTravelKey else { return }
+            let hotelStart = RoutePoint(origin.placemark.coordinate)
+            let hotelEnd = RoutePoint(destination.placemark.coordinate)
+            if (SharedTravelEstimator.metres(from: hotelStart.location, to: hotelEnd.location) ?? 0) < 5 {
+                hotelTravelDiagnosis = "ホテルと観光地が同じ座標として扱われています。住所をご確認ください。"
+                hotelTravelLoading = false
+                return
+            }
             hotelTravelMinutes = planningTimes(from: origin, to: destination)
             // Each successful mode is shown immediately; walking failure must
             // not delay the car or public-transport duration.
@@ -1941,6 +1994,10 @@ private struct PlannerView: View {
                 }
             }
             guard !Task.isCancelled, requestKey == hotelTravelKey else { return }
+            if hotelTravelMinutes["walking"] == nil && hotelTravelMinutes["taxi"] == nil {
+                hotelTravelDiagnosis = await GoogleRoutesGateway.shared.failure(from: fromPoint, to: toPoint)
+                    ?? "地図からホテルへの実経路を取得できませんでした。"
+            } else { hotelTravelDiagnosis = nil }
             hotelTravelLoading = false
         } catch {
             if !Task.isCancelled && requestKey == hotelTravelKey { hotelTravelLoading = false }
@@ -2296,7 +2353,12 @@ private struct PlannerView: View {
             if let url = mapURL(origin: origin, destination: destination, mode: "walking") {
                 timedRouteLink(extra("walkRoute"), url: url, systemImage: "figure.walk", key: key, mode: "walking", canEstimate: origin?.isEmpty == false)
             }
-            if internalWalk { Text(hotelTravelText("siteWalk")).font(.caption).foregroundStyle(PlannerTheme.amber) }
+            if internalWalk {
+                Text(hotelTravelText("siteWalk")).font(.caption).foregroundStyle(PlannerTheme.amber)
+                Text(language == .ja ? "同じ施設内の散策です。移動を滞在時間に含め、電車・タクシーの架空の分数を表示しません。" :
+                    "This is a walk within the same site, included in sightseeing time; no invented train or taxi duration.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             if routeLegShortWalk.contains(key) {
                 Text(hotelTravelText("shortWalk")).font(.caption.bold()).foregroundStyle(PlannerTheme.coral)
             }
@@ -2305,6 +2367,10 @@ private struct PlannerView: View {
                 timedRouteLink(extra("driveRoute"), url: url, systemImage: "car.fill", key: key, mode: "taxi", canEstimate: origin?.isEmpty == false)
             }
             Text(hotelTravelText("estimateNote")).font(.caption).foregroundStyle(.secondary)
+            if let problem = routeLegDiagnostics[key], !problem.isEmpty {
+                Text(language == .ja ? problem : "The travel time could not be confirmed. Check the destination and map directions.")
+                    .font(.caption).foregroundStyle(PlannerTheme.amber)
+            }
             if let omotesando = route.stops.flatMap({ $0.choices }).first(where: { $0.name == "Omotesando Tokyo" }),
                origin == venueQuery(omotesando) || destination == venueQuery(omotesando) {
                 Text(["表参道は青山通り側の地点を基準に計算しています。",
@@ -2340,9 +2406,21 @@ private struct PlannerView: View {
     }
     private func isInternalSiteTransfer(origin: String?, destination: String) -> Bool {
         guard let origin else { return false }
-        let names = ["Motonosumi Shrine", "Motonosumi torii path"]
-        let queries = route.stops.flatMap({ $0.choices }).filter { names.contains($0.name) }.map(venueQuery)
-        return origin != destination && queries.contains(origin) && queries.contains(destination)
+        let sitePairs: [(String, String)] = [
+            ("Motonosumi Shrine", "Motonosumi torii path"),
+            ("Ginzan Onsen town", "Ginzan River bridges"),
+            ("Shodoshima Olive Park", "Olive Park Greek windmill"),
+            ("Shodoshima Olive Park", "Olive Park olive groves"),
+            ("Olive Park Greek windmill", "Olive Park olive groves")
+        ]
+        let venues = route.stops.flatMap { $0.choices }
+        for pair in sitePairs {
+            guard let a = venues.first(where: { $0.name == pair.0 }),
+                  let b = venues.first(where: { $0.name == pair.1 }) else { continue }
+            if (origin == venueQuery(a) && destination == venueQuery(b)) ||
+               (origin == venueQuery(b) && destination == venueQuery(a)) { return true }
+        }
+        return false
     }
     private func routeLegKey(origin: String?, destination: String) -> String {
         "\(route.id)|\(origin ?? "")|\(destination)"
@@ -2390,9 +2468,10 @@ private struct PlannerView: View {
         // Same-site transfers can still require a path: map it when possible.
         // Never invent a universal five-minute walk.
         routeLegLoading.insert(key)
+        routeLegDiagnostics[key] = nil
         defer {
             routeLegLoading.remove(key)
-            if Task.isCancelled { routeLegTimes[key] = nil }
+            // Keep verified time even if another route request is cancelled.
         }
         do {
             let start = try await resolvedAnchorMapItem(origin)
@@ -2400,6 +2479,20 @@ private struct PlannerView: View {
             guard !Task.isCancelled else { return }
             guard let start, let end else {
                 routeLegTimes[key] = [:]
+                routeLegDiagnostics[key] = "地点を正確に特定できませんでした。出発地・目的地を地図で確認してください。"
+                return
+            }
+            let fromPoint = RoutePoint(start.placemark.coordinate)
+            let toPoint = RoutePoint(end.placemark.coordinate)
+            guard let separation = SharedTravelEstimator.metres(from: fromPoint.location,
+                                                                to: toPoint.location) else {
+                routeLegTimes[key] = [:]
+                routeLegDiagnostics[key] = "地点の座標が正しくありません。"
+                return
+            }
+            guard separation >= 5 else {
+                routeLegTimes[key] = [:]
+                routeLegDiagnostics[key] = "出発地と目的地が同一地点として取得されました。別々の施設入口を確認してください。"
                 return
             }
             routeLegShortWalk.remove(key)
@@ -2407,11 +2500,10 @@ private struct PlannerView: View {
             routeLegTimes[key] = routeLegTimes[key] ?? [:]
             // Publish each verified mode separately; do not wait for walking
             // to finish before showing the already mapped car or rail time.
-            let fromPoint = RoutePoint(start.placemark.coordinate)
-            let toPoint = RoutePoint(end.placemark.coordinate)
             let departure = plannedDeparture(for: origin, destination: destination)
             await withTaskGroup(of: (String, TravelTime?).self) { group in
-                for mode in ["walking", "taxi", "transit"] {
+                for mode in (isInternalSiteTransfer(origin: origin, destination: destination)
+                             ? ["walking"] : ["walking", "taxi", "transit"]) {
                     group.addTask {
                         let from = MKMapItem(placemark: MKPlacemark(coordinate: fromPoint.location))
                         let to = MKMapItem(placemark: MKPlacemark(coordinate: toPoint.location))
@@ -2426,7 +2518,7 @@ private struct PlannerView: View {
                 for await (mode, value) in group {
                     guard !Task.isCancelled else {
                         group.cancelAll()
-                        routeLegTimes[key] = nil
+                        // Preserve any route durations verified before cancellation.
                         break
                     }
                     guard let value else { continue }
@@ -2442,8 +2534,15 @@ private struct PlannerView: View {
                     }
                 }
             }
+            if routeLegTimes[key]?["walking"] == nil && routeLegTimes[key]?["taxi"] == nil {
+                let googleError = await GoogleRoutesGateway.shared.failure(from: fromPoint, to: toPoint)
+                routeLegDiagnostics[key] = googleError ?? "地図の実経路を取得できませんでした。経路ボタンで確認してください。"
+            } else { routeLegDiagnostics[key] = nil }
         } catch {
-            if !Task.isCancelled { routeLegTimes[key] = [:] }
+            if !Task.isCancelled {
+                routeLegTimes[key] = [:]
+                routeLegDiagnostics[key] = "地点検索または経路計算でエラーが発生しました。"
+            }
         }
     }
     private var hotelSection: some View {
