@@ -258,7 +258,7 @@ private enum SharedTravelEstimator {
         // Both services return independently. The first genuine route duration wins.
         // MapKit errors must not block an already successful Google Routes result.
         // No straight-line distance is converted to a false travel duration.
-        let verified = await withTaskGroup(of: TravelTime?.self) { group in
+        let verified = await withTaskGroup(of: TravelTime?.self, returning: TravelTime?.self) { group -> TravelTime? in
             group.addTask {
                 await NativeMapDirections.realRoute(
                     from: from, to: to, mode: mode,
