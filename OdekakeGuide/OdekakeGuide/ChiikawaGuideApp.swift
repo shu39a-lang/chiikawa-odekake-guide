@@ -1217,6 +1217,15 @@ private struct PlannerView: View {
             return CLLocationCoordinate2D(latitude: 35.7188786, longitude: 139.7764671)
         case "Gotokuji Temple":
             return CLLocationCoordinate2D(latitude: 35.64868, longitude: 139.64731)
+        // SETAGAYA_VERIFIED_ANCHORS_20261021
+        // Representative visitor navigation points on the actual shopping streets.
+        // Gotokuji shopping street: MapFan 35.6517856,139.64633.
+        // Sangenjaya shopping street: NAVITIME 35.641885,139.672667.
+        // These are endpoints for REAL mapped routes, not time estimates.
+        case "Gotokuji shopping street":
+            return CLLocationCoordinate2D(latitude: 35.6517856, longitude: 139.64633)
+        case "Sangenjaya shopping streets":
+            return CLLocationCoordinate2D(latitude: 35.641885, longitude: 139.672667)
         case "Kuromon Market":
             return CLLocationCoordinate2D(latitude: 34.665277, longitude: 135.506971)
         case "Katsuoji Temple":
@@ -1560,6 +1569,24 @@ private struct PlannerView: View {
                 CLLocationCoordinate2D(latitude: place.latitude, longitude: place.longitude)))
         }
         if let cached = resolvedPlaceCache[clean] { return cached }
+        // SOUTH_HOTEL_CONFIRMED_ADDRESS_20261021
+        // Published accommodation address, resolved to a real map coordinate.
+        if routePrefecture == "tokyo" &&
+           (clean.contains("サウスホテル東京") ||
+            clean.localizedCaseInsensitiveContains("South Hotel Tokyo")),
+           let marks = try? await CLGeocoder().geocodeAddressString(
+               "東京都世田谷区宮坂2-12-4", in: nil,
+               preferredLocale: Locale(identifier: "ja_JP")),
+           let verified = marks.first(where: { mark in
+               guard let c = mark.location?.coordinate, CLLocationCoordinate2DIsValid(c) else { return false }
+               return CLLocation(latitude: c.latitude, longitude: c.longitude).distance(
+                   from: CLLocation(latitude: 35.64868, longitude: 139.64731)) < 6000
+           }) {
+            let item = MKMapItem(placemark: MKPlacemark(placemark: verified))
+            item.name = "サウスホテル東京"
+            resolvedPlaceCache[clean] = item
+            return item
+        }
         // Choose a course landmark by its unique registered identity before
         // attempting a new fuzzy user-input name search.
         if let venue = route.stops.flatMap({ $0.choices }).first(where: { venueQuery($0) == clean }),
@@ -2446,9 +2473,7 @@ private struct PlannerView: View {
             // Keep a valid route as soon as one real walking or driving result arrives.
             if !Task.isCancelled,
                routeLegTimes[key]?["walking"] == nil &&
-               routeLegTimes[key]?["taxi"] == nil &&
-               !(routeLegDiagnostics[key]?.contains("地点") ?? false) &&
-               !(routeLegDiagnostics[key]?.contains("座標") ?? false) {
+               routeLegTimes[key]?["taxi"] == nil {
                 try? await Task.sleep(nanoseconds: 1_800_000_000)
                 guard !Task.isCancelled else { return }
                 await updateRouteLegTimes(origin: origin, destination: destination, key: key)
