@@ -387,7 +387,7 @@ private enum SharedTravelEstimator {
                     from: from, to: to, mode: mode,
                     plannedDepartureMinutes: plannedDepartureMinutes) else { return nil }
                 return mapped
-                return TravelTime(minutes: minutes, isApproximate: false)
+               
             }
             for await duration in group {
                 if let duration {
