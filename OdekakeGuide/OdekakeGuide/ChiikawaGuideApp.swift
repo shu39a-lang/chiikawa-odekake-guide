@@ -40,15 +40,20 @@ private struct RoutePoint: Codable, Sendable {
 }
 
 private struct RealGoogleResponse: Decodable, Sendable {
-    struct Travel: Decodable, Sendable { let minutes: Int; let source: String? }
+    struct Travel: Decodable, Sendable { let minutes: Int; let source: String?; let distanceMeters: Double? }
     let walking: Travel?
     let driving: Travel?
     let transit: Travel?
+    // Cloud Run v12 includes these fields; older gateways omit them.
+    struct RouteDiagnostic: Decodable, Sendable { let status: String }
+    let diagnostics: [String: RouteDiagnostic]?
+    let departureTimeUsed: String?
+    let source: String?
     func minutes(for mode: String) -> Int? {
         let value: Int?
         switch mode {
         case "walking": value = walking?.minutes
-        case "taxi": value = driving?.minutes
+        case "taxi", "driving": value = driving?.minutes
         default: value = transit?.minutes
         }
         guard let value, value > 0 && value < 10_000 else { return nil }
@@ -56,6 +61,20 @@ private struct RealGoogleResponse: Decodable, Sendable {
         let inventedMarkers = ["haversine", "straight_line", "heuristic", "synthetic", "fake_route", "distance_estimate"]
         guard !inventedMarkers.contains(where: { origin.contains($0) }) else { return nil }
         return value
+    }
+    // The server returns genuine road/path distance; do not replace it with
+    // straight-line geometry or silently discard it when Google responds first.
+    func mappedTime(for mode: String) -> TravelTime? {
+        guard let count = minutes(for: mode) else { return nil }
+        let record: Travel?
+        switch mode {
+        case "walking": record = walking
+        case "taxi", "driving": record = driving
+        default: record = transit
+        }
+        let measured = record?.distanceMeters
+        let metres = measured.flatMap { $0.isFinite && $0 >= 0 && $0 < 20_000_000 ? $0 : nil }
+        return TravelTime(minutes: count, isApproximate: false, routeMetres: metres)
     }
 }
 
@@ -158,6 +177,112 @@ private enum JourneyDepartureClock {
     }
 }
 
+// GOOGLE_ROUTES_V12_BATCHED_20261022
+// One Google request for walking + driving, one date-scoped request for transit.
+// The server runs independent route-mode calculations internally. Identical
+// concurrent user-interface requests are deduplicated at the gateway actor.
+private actor VerifiedGoogleRoutesV12 {
+    static let shared = VerifiedGoogleRoutesV12()
+    private let service = URL(string: "https://japan-day-planner-api-759944709116.asia-northeast1.run.app/api/routes")!
+    private typealias Outcome = (response: RealGoogleResponse?, error: String?)
+    private struct RequestBody: Encodable {
+        let origin: RoutePoint
+        let destination: RoutePoint
+        let modes: [String]
+        let departureTime: String?
+    }
+    private var completed: [String: (Date, RealGoogleResponse)] = [:]
+    private var pending: [String: Task<Outcome, Never>] = [:]
+    private var errors: [String: String] = [:]
+    private func pair(_ a: RoutePoint, _ b: RoutePoint) -> String {
+        String(format: "%.6f,%.6f>%.6f,%.6f", a.lat, a.lng, b.lat, b.lng)
+    }
+    func failure(from a: RoutePoint, to b: RoutePoint) -> String? {
+        let key = pair(a, b)
+        return errors[key + "|walking"] ?? errors[key + "|driving"] ?? errors[key + "|transit"]
+    }
+    func route(from start: RoutePoint, to end: RoutePoint,
+               mode: String, plannedDepartureMinutes: Int? = nil) async -> TravelTime? {
+        guard !Task.isCancelled else { return nil }
+        let googleMode = mode == "taxi" ? "driving" : mode
+        guard ["walking", "driving", "transit"].contains(googleMode) else { return nil }
+        let transit = googleMode == "transit"
+        let plannedDate: Date? = transit ? JourneyDepartureClock.nextTravelTime(plannedDepartureMinutes) : nil
+        let epochMinute = plannedDate.map { Int($0.timeIntervalSince1970 / 60) } ?? 0
+        let modes = transit ? ["transit"] : ["walking", "driving"]
+        let pairID = pair(start, end)
+        let groupKey = "\(pairID)|\(transit ? "rail" : "ground")|\(epochMinute)"
+        let ttl: TimeInterval = transit ? 75 : 600
+        if let saved = completed[groupKey], Date().timeIntervalSince(saved.0) < ttl,
+           let confirmed = saved.1.mappedTime(for: mode) {
+            return confirmed
+        }
+        if let running = pending[groupKey] {
+            return (await running.value).response?.mappedTime(for: mode)
+        }
+        let endpoint = service
+        let worker = Task<Outcome, Never> {
+            do {
+                let proof = try await AppCheck.appCheck().token(forcingRefresh: false)
+                guard !proof.token.isEmpty else { return (nil, "Firebase App Checkの認証情報なし") }
+                let fmt = ISO8601DateFormatter()
+                fmt.formatOptions = [.withInternetDateTime]
+                let payload = RequestBody(origin: start, destination: end,
+                    modes: modes, departureTime: plannedDate.map { fmt.string(from: $0) })
+                var request = URLRequest(url: endpoint)
+                request.httpMethod = "POST"
+                request.timeoutInterval = 17
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                request.setValue(proof.token, forHTTPHeaderField: "X-Firebase-AppCheck")
+                request.httpBody = try JSONEncoder().encode(payload)
+                let (data, raw) = try await URLSession.shared.data(for: request)
+                guard let http = raw as? HTTPURLResponse else { return (nil, "Cloud RunからのHTTP応答なし") }
+                guard (200..<300).contains(http.statusCode) else {
+                    return (nil, "Cloud Run HTTP \(http.statusCode)（App Check・通信権限・API設定）")
+                }
+                guard let response = try? JSONDecoder().decode(RealGoogleResponse.self, from: data) else {
+                    return (nil, "Cloud Runの応答形式が不一致")
+                }
+                if transit {
+                    guard response.source?.contains("Google Routes API v12") == true,
+                          let requested = payload.departureTime,
+                          response.departureTimeUsed == requested else {
+                        return (nil, "電車の時刻が送信した時刻と一致しません")
+                    }
+                }
+                return (response, nil)
+            } catch {
+                return (nil, "Cloud Runの通信・Firebase App Checkに失敗")
+            }
+        }
+        pending[groupKey] = worker
+        let result = await worker.value
+        pending.removeValue(forKey: groupKey)
+        if let response = result.response {
+            // Accept only real map routes. Never cache the unavailability of a
+            // different mode as though it had a confirmed travel time.
+            if modes.contains(where: { response.mappedTime(for: $0) != nil }) {
+                completed[groupKey] = (Date(), response)
+                if completed.count > 360 {
+                    completed = completed.filter { Date().timeIntervalSince($0.value.0) < 600 }
+                }
+            }
+            for lookupMode in modes {
+                let issue = response.diagnostics?[lookupMode]?.status ?? "no_route"
+                if response.mappedTime(for: lookupMode) != nil {
+                    errors.removeValue(forKey: pairID + "|" + lookupMode)
+                } else {
+                    errors[pairID + "|" + lookupMode] = "Google Routes \(lookupMode): \(issue)"
+                }
+            }
+            return response.mappedTime(for: mode)
+        }
+        for lookupMode in modes { errors[pairID + "|" + lookupMode] = result.error ?? "Cloud Run通信失敗" }
+        completed.removeValue(forKey: groupKey)
+        return nil
+    }
+}
+
 private enum NativeMapDirections {
     static func realRoute(from start: RoutePoint, to end: RoutePoint, mode: String,
                           plannedDepartureMinutes: Int? = nil) async -> TravelTime? {
@@ -174,14 +299,15 @@ private enum NativeMapDirections {
         case "taxi": request.transportType = .automobile
         default: request.transportType = .transit
         }
+        // A route card needs a verified travel time, not all turn-by-turn steps.
+        // Apple's dedicated ETA API is faster than calculating full directions.
         guard !Task.isCancelled,
-              let reply = try? await MKDirections(request: request).calculate(),
-              let best = reply.routes.filter({ $0.expectedTravelTime.isFinite &&
-                  $0.expectedTravelTime > 0 && $0.distance.isFinite && $0.distance >= 0 })
-                  .min(by: { $0.expectedTravelTime < $1.expectedTravelTime }) else { return nil }
-        let minutes = Int(ceil(best.expectedTravelTime / 60))
+              let eta = try? await MKDirections(request: request).calculateETA(),
+              eta.expectedTravelTime.isFinite, eta.expectedTravelTime > 0,
+              eta.distance.isFinite, eta.distance >= 0 else { return nil }
+        let minutes = Int(ceil(eta.expectedTravelTime / 60))
         guard minutes > 0, minutes < 10_000 else { return nil }
-        return TravelTime(minutes: minutes, isApproximate: false, routeMetres: best.distance)
+        return TravelTime(minutes: minutes, isApproximate: false, routeMetres: eta.distance)
     }
 }
 
@@ -245,17 +371,9 @@ private enum SharedTravelEstimator {
         if let saved = await ConfirmedJourneyTimes.shared.read(cacheKey, rail: mode == "transit") {
             return saved
         }
-        // Time-dependent public transport must use a route that actually includes
-        // the itinerary departure time. The existing Google backend does NOT accept
-        // departureTime, so do not display its current-time train duration as planned.
-        if mode == "transit" {
-            let mapped = await NativeMapDirections.realRoute(from: from, to: to,
-                mode: mode, plannedDepartureMinutes: plannedDepartureMinutes)
-            if let mapped { await ConfirmedJourneyTimes.shared.save(mapped, key: cacheKey) }
-            return mapped
-        }
-        // ROUTE_TIME_REPAIR_20261018: multiple provider results and full itinerary refresh.
-        // Both services return independently. The first genuine route duration wins.
+        // Each mode competes independently between a mapped native route and
+        // Google Routes v12. Google transit uses the planned departure time.
+        // The first genuine route duration wins; failures never invent minutes.
         // MapKit errors must not block an already successful Google Routes result.
         // No straight-line distance is converted to a false travel duration.
         let verified = await withTaskGroup(of: TravelTime?.self, returning: TravelTime?.self) { group -> TravelTime? in
@@ -265,8 +383,10 @@ private enum SharedTravelEstimator {
                     plannedDepartureMinutes: plannedDepartureMinutes)
             }
             group.addTask {
-                guard let minutes = await GoogleRoutesGateway.shared.minutes(
-                    from: from, to: to, mode: mode) else { return nil }
+                guard let mapped = await VerifiedGoogleRoutesV12.shared.route(
+                    from: from, to: to, mode: mode,
+                    plannedDepartureMinutes: plannedDepartureMinutes) else { return nil }
+                return mapped
                 return TravelTime(minutes: minutes, isApproximate: false)
             }
             for await duration in group {
@@ -1782,14 +1902,44 @@ private struct PlannerView: View {
                 var suggestions = knownLocalHotelFallbacks(near: coordinate)
                 var seen = Set(suggestions.map { $0.name.folding(options: [.caseInsensitive, .widthInsensitive], locale: .current) })
                 if !suggestions.isEmpty { hotelResults = suggestions }
-                // Actual Google accommodation listings, each geofenced to
-                // the selected start, before independent native POI searching.
-                let googleHotels=await GooglePlacesGateway.shared.hotels(near:RoutePoint(coordinate))
+                // Start Google early, but never keep the hotel screen blank while
+                // Cloud Run searches up to five geographic rings sequentially.
+                let googleHotelsTask = Task { await GooglePlacesGateway.shared.hotels(near: RoutePoint(coordinate)) }
+                let firstNativeSearch = MKLocalPointsOfInterestRequest(center: coordinate, radius: 8000)
+                firstNativeSearch.pointOfInterestFilter = MKPointOfInterestFilter(including: [.hotel])
+                if let native = try? await MKLocalSearch(request: firstNativeSearch).start() {
+                    for item in native.mapItems {
+                        let point = item.placemark.coordinate
+                        guard CLLocationCoordinate2DIsValid(point),
+                              item.placemark.isoCountryCode == nil || item.placemark.isoCountryCode == "JP",
+                              let name = item.name, !name.isEmpty else { continue }
+                        let distance = center.distance(from: CLLocation(latitude: point.latitude, longitude: point.longitude))
+                        guard distance < 8000 else { continue }
+                        let normalized = name.folding(options: [.caseInsensitive, .widthInsensitive], locale: .current)
+                        let lodgingNames = ["ホテル", "旅館", "民宿", "ゲストハウス", "ペンション", "hostel", "hotel", "inn", "ryokan", "lodge", "resort"]
+                        guard item.pointOfInterestCategory == .hotel ||
+                            lodgingNames.contains(where: { normalized.localizedCaseInsensitiveContains($0) }) else { continue }
+                        guard seen.insert(normalized).inserted else { continue }
+                        suggestions.append(HotelSuggestion(
+                            id: "native|\(normalized)|\(Int(point.latitude * 10000))|\(Int(point.longitude * 10000))",
+                            name: name, address: item.placemark.title ?? name,
+                            latitude: point.latitude, longitude: point.longitude,
+                            phone: item.phoneNumber, website: item.url?.absoluteString,
+                            distance: distance, anchorLatitude: coordinate.latitude, anchorLongitude: coordinate.longitude))
+                    }
+                    guard hotelSearchID == token, !Task.isCancelled else {
+                        googleHotelsTask.cancel(); return
+                    }
+                    if !suggestions.isEmpty { hotelResults = Array(suggestions.sorted { $0.distance < $1.distance }.prefix(5)) }
+                }
+                // Actual Google accommodation listings, each geofenced to the selected start.
+                let googleHotels = await googleHotelsTask.value
+                guard hotelSearchID == token, !Task.isCancelled else { return }
                 // A hotels-only endpoint can return no results around rural or
                 // mountain attractions. Search nearby accommodation names too.
                 // Keep the same 30-km geofence and name/category validation.
                 var accommodationPlaces = googleHotels
-                if googleHotels.count < desiredHotelTarget(for: routePrefecture) {
+                if suggestions.count + googleHotels.count < desiredHotelTarget(for: routePrefecture) {
                     for query in ["ホテル 旅館", "宿泊施設"] {
                         let additional = await GooglePlacesGateway.shared.search(query,
                             near: RoutePoint(coordinate), radius: 30_000)
@@ -1832,8 +1982,9 @@ private struct PlannerView: View {
                 // Try to reach five local hotels in the three main metropolitan
                 // areas; in smaller regions, search outward until three are found.
                 let desiredCount = ["tokyo", "osaka", "kyoto"].contains(routePrefecture) ? 5 : 3
-                for radius in [2000.0, 5000.0, 10000.0, 25000.0, 50000.0] {
+                for radius in [5000.0, 20000.0, 30000.0] {
                     guard hotelSearchID == token, !Task.isCancelled else { return }
+                    if suggestions.count >= desiredCount { break }
                     let poi = MKLocalPointsOfInterestRequest(center: coordinate, radius: radius)
                     poi.pointOfInterestFilter = MKPointOfInterestFilter(including: [.hotel])
                     var nearbyItems: [MKMapItem] = []
@@ -1843,7 +1994,7 @@ private struct PlannerView: View {
                     } catch {
                         guard hotelSearchID == token else { return }
                     }
-                    for term in ["ホテル", "旅館", "宿泊施設"] {
+                    for term in ["ホテル 旅館"] {
                         let request = MKLocalSearch.Request()
                         request.naturalLanguageQuery = term
                         request.resultTypes = [.address, .pointOfInterest]
@@ -2613,7 +2764,7 @@ private struct PlannerView: View {
                 }
             }
             if routeLegTimes[key]?["walking"] == nil && routeLegTimes[key]?["taxi"] == nil {
-                let googleError = await GoogleRoutesGateway.shared.failure(from: fromPoint, to: toPoint)
+                let googleError = await VerifiedGoogleRoutesV12.shared.failure(from: fromPoint, to: toPoint)
                 routeLegDiagnostics[key] = googleError ?? "地図の実経路を取得できませんでした。経路ボタンで確認してください。"
             } else { routeLegDiagnostics[key] = nil }
         } catch {
