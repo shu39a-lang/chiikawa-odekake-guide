@@ -27,8 +27,8 @@ private struct TravelTime: Sendable {
 // The trip's single route engine: the same coordinates and transport modes are
 // used by featured courses, hotel legs, both meals and self-built itineraries.
 // A duration is "confirmed" only after a real Maps route has been obtained.
-// If both map services fail a separate, conspicuously labelled provisional
-// duration is used for walking / driving only. No train timetable is invented.
+// Every displayed duration comes from a map response for that transport mode.
+// Failed requests never become zero minutes or a straight-line estimate.
 private struct RoutePoint: Codable, Sendable {
     let lat: Double
     let lng: Double
@@ -61,7 +61,7 @@ private struct RealGoogleResponse: Decodable, Sendable {
         default: value = transit?.minutes
         }
         guard let value, value > 0 && value < 10_000 else { return nil }
-        let origin = (mode == "walking" ? walking?.source : mode == "taxi" ? driving?.source : transit?.source)?.lowercased() ?? ""
+        let origin = (mode == "walking" ? walking?.source : (mode == "taxi" || mode == "driving") ? driving?.source : transit?.source)?.lowercased() ?? ""
         let inventedMarkers = ["haversine", "straight_line", "heuristic", "synthetic", "fake_route", "distance_estimate"]
         guard !inventedMarkers.contains(where: { origin.contains($0) }) else { return nil }
         return value
@@ -115,84 +115,6 @@ private actor GooglePlaceIdentityRegistry {
     }
 }
 
-private actor GoogleRoutesGateway {
-    static let shared = GoogleRoutesGateway()
-    private let service = URL(string: "https://japan-day-planner-api-759944709116.asia-northeast1.run.app/api/routes")!
-    // ROUTE_ARCHITECTURE_REBUILD_20261019
-    // One real request per geographic pair, shared between walking/car/transit.
-    // A partial successful response is refreshed quickly; failed requests never
-    // disable unrelated places or block a legitimate manual retry.
-    private typealias GatewayResult = (response: RealGoogleResponse?, error: String?)
-    private var completed: [String: (Date, RealGoogleResponse)] = [:]
-    private var pending: [String: Task<GatewayResult, Never>] = [:]
-    private var failures: [String: String] = [:]
-    private func key(_ a: RoutePoint, _ b: RoutePoint) -> String {
-        String(format: "%.6f,%.6f>%.6f,%.6f", a.lat, a.lng, b.lat, b.lng)
-    }
-    func failure(from a: RoutePoint, to b: RoutePoint) -> String? {
-        failures[key(a,b)]
-    }
-    private func response(from start: RoutePoint, to end: RoutePoint) async -> RealGoogleResponse? {
-        let pair = key(start, end) + "|\(start.placeId ?? "")|\(end.placeId ?? "")"
-        if let saved = completed[pair] {
-            let complete = saved.1.walking != nil && saved.1.driving != nil && saved.1.transit != nil
-            let lifetime: TimeInterval = complete ? 300 : 25
-            if Date().timeIntervalSince(saved.0) < lifetime { return saved.1 }
-        }
-        if let running = pending[pair] { return (await running.value).response }
-        struct RequestBody: Encodable { let origin: RoutePoint; let destination: RoutePoint }
-        let endpoint = service
-        let worker = Task<GatewayResult, Never> {
-            do {
-                let proof = try await AppCheck.appCheck().token(forcingRefresh: false)
-                guard !proof.token.isEmpty else { return (nil, "Firebase App Check トークンなし") }
-                var request = URLRequest(url: endpoint)
-                request.httpMethod = "POST"
-                request.timeoutInterval = 18
-                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                request.setValue(proof.token, forHTTPHeaderField: "X-Firebase-AppCheck")
-                request.httpBody = try JSONEncoder().encode(RequestBody(origin:start, destination:end))
-                let (data, raw) = try await URLSession.shared.data(for: request)
-                guard let http = raw as? HTTPURLResponse else { return (nil, "GoogleサーバーのHTTP応答なし") }
-                guard (200..<300).contains(http.statusCode) else {
-                    return (nil, "Googleサーバー HTTP \(http.statusCode)（認証・設定・上限などを確認）")
-                }
-                guard let value = try? JSONDecoder().decode(RealGoogleResponse.self, from: data) else {
-                    return (nil, "Googleサーバーの応答形式がアプリと一致しません")
-                }
-                guard value.walking?.minutes != nil || value.driving?.minutes != nil || value.transit?.minutes != nil else {
-                    return (nil, "Googleサーバーは応答しましたが全移動手段の時間が空です")
-                }
-                return (value,nil)
-            } catch {
-                if error is CancellationError { return (nil,"通信がキャンセルされました") }
-                return (nil,"Googleサーバーと通信できません（通信・App Checkを確認）")
-            }
-        }
-        pending[pair]=worker
-        let outcome=await worker.value
-        pending.removeValue(forKey:pair)
-        if let value=outcome.response {
-            completed[pair]=(Date(),value)
-            failures.removeValue(forKey:pair)
-            if completed.count>300 {
-                completed=completed.filter { Date().timeIntervalSince($0.value.0)<300 }
-            }
-        } else {
-            failures[pair]=outcome.error ?? "Google経路取得失敗"
-            completed.removeValue(forKey:pair)
-        }
-        return outcome.response
-    }
-    func minutes(from start: RoutePoint, to end: RoutePoint, mode: String) async -> Int? {
-        guard let result=await response(from:start,to:end) else { return nil }
-        return result.minutes(for:mode)
-    }
-}
-
-// Schedule transit queries for the intended itinerary time, not the
-// clock time when a visitor browses at night. The date is the next occurrence
-// of that Japanese local time because the app does not yet choose a travel day.
 private enum JourneyDepartureClock {
     static func nextTravelTime(_ minuteOfDay: Int?) -> Date {
         var calendar = Calendar(identifier: .gregorian)
@@ -217,6 +139,18 @@ private actor VerifiedGoogleRoutesV12 {
         let destination: RoutePoint
         let modes: [String]
         let departureTime: String?
+    }
+    private static func sameDeparture(_ requested: String, _ returned: String) -> Bool {
+        if requested == returned { return true }
+        let formatter = ISO8601DateFormatter()
+        func parse(_ value: String) -> Date? {
+            formatter.formatOptions = [.withInternetDateTime]
+            if let date = formatter.date(from: value) { return date }
+            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            return formatter.date(from: value)
+        }
+        guard let a = parse(requested), let b = parse(returned) else { return false }
+        return abs(a.timeIntervalSince(b)) < 1
     }
     private var completed: [String: (Date, RealGoogleResponse)] = [:]
     private var pending: [String: Task<Outcome, Never>] = [:]
@@ -274,7 +208,8 @@ private actor VerifiedGoogleRoutesV12 {
                 if transit {
                     guard response.source?.contains("Google Routes API") == true,
                           let requested = payload.departureTime,
-                          response.departureTimeUsed == requested else {
+                          let returned = response.departureTimeUsed,
+                          Self.sameDeparture(requested, returned) else {
                         return (nil, "電車の時刻が送信した時刻と一致しません")
                     }
                 }
@@ -311,6 +246,126 @@ private actor VerifiedGoogleRoutesV12 {
     }
 }
 
+// SHARED_JOURNEY_ENGINE_20261023
+// View tasks subscribe to shared work. Leaving a screen does not discard a
+// resolved location or cancel a request needed by another journey screen.
+@MainActor
+private final class PlaceLookupAttempt {
+    private var continuation: CheckedContinuation<MKMapItem?, Never>?
+    private var jobs: [Task<Void, Never>] = []
+    private var remaining = 2
+
+    func run(apple: @escaping @MainActor () async -> MKMapItem?,
+             google: @escaping @MainActor () async -> MKMapItem?) async -> MKMapItem? {
+        await withCheckedContinuation { continuation in
+            self.continuation = continuation
+            jobs = [
+                Task { self.accept(await apple()) },
+                Task { self.accept(await google()) },
+                Task {
+                    do { try await Task.sleep(nanoseconds: 25_000_000_000) }
+                    catch { return }
+                    self.finish(nil)
+                }
+            ]
+        }
+    }
+    private func accept(_ item: MKMapItem?) {
+        guard continuation != nil else { return }
+        remaining -= 1
+        if let item { finish(item) }
+        else if remaining == 0 { finish(nil) }
+    }
+    private func finish(_ item: MKMapItem?) {
+        guard let waiter = continuation else { return }
+        continuation = nil
+        for job in jobs { job.cancel() }
+        jobs.removeAll()
+        waiter.resume(returning: item)
+    }
+}
+
+private actor JourneyRouteAttempt {
+    private var continuation: CheckedContinuation<TravelTime?, Never>?
+    private var jobs: [Task<Void, Never>] = []
+    private var remaining = 2
+    private let separation: Double
+    private let mode: String
+    init(separation: Double, mode: String) {
+        self.separation = separation
+        self.mode = mode
+    }
+    func run(from start: RoutePoint, to end: RoutePoint,
+             departure: Int?) async -> TravelTime? {
+        await withCheckedContinuation { continuation in
+            self.continuation = continuation
+            let mode = self.mode
+            jobs = [
+                Task {
+                    let result = await NativeMapDirections.realRoute(from: start, to: end,
+                        mode: mode, plannedDepartureMinutes: departure)
+                    self.accept(result)
+                },
+                Task {
+                    let result = await VerifiedGoogleRoutesV12.shared.route(from: start, to: end,
+                        mode: mode, plannedDepartureMinutes: departure)
+                    self.accept(result)
+                },
+                Task {
+                    do { try await Task.sleep(nanoseconds: 25_000_000_000) }
+                    catch { return }
+                    self.finish(nil)
+                }
+            ]
+        }
+    }
+    private func accept(_ value: TravelTime?) {
+        guard continuation != nil else { return }
+        remaining -= 1
+        if let value, !value.isApproximate, value.minutes > 0, value.minutes < 10_000,
+           separation <= Double(value.minutes) * (mode == "walking" ? 210 : 2700) {
+            finish(value)
+        } else if remaining == 0 { finish(nil) }
+    }
+    private func finish(_ value: TravelTime?) {
+        guard let waiter = continuation else { return }
+        continuation = nil
+        for job in jobs { job.cancel() }
+        jobs.removeAll()
+        waiter.resume(returning: value)
+    }
+}
+
+private actor JourneyRouteStore {
+    static let shared = JourneyRouteStore()
+    private var pending: [String: Task<TravelTime?, Never>] = [:]
+
+    func time(from start: RoutePoint, to end: RoutePoint, mode: String,
+              plannedDepartureMinutes: Int?) async -> TravelTime? {
+        guard let separation = SharedTravelEstimator.metres(from: start.location, to: end.location),
+              separation >= 5 else { return nil }
+        let departure = mode == "transit"
+            ? JourneyDepartureClock.nextTravelTime(plannedDepartureMinutes) : nil
+        let minute = departure.map { Int($0.timeIntervalSince1970 / 60) } ?? 0
+        let key = String(format: "%.6f,%.6f>%.6f,%.6f|%@", locale: Locale(identifier: "en_US_POSIX"),
+                         start.lat, start.lng, end.lat, end.lng, mode as NSString) + "|\(minute)"
+        if let saved = await ConfirmedJourneyTimes.shared.read(key, rail: mode == "transit") {
+            return saved
+        }
+        if let running = pending[key] { return await running.value }
+        let worker = Task<TravelTime?, Never> {
+            let attempt = JourneyRouteAttempt(separation: separation, mode: mode)
+            let result = await attempt.run(from: start, to: end, departure: plannedDepartureMinutes)
+            if let result { await ConfirmedJourneyTimes.shared.save(result, key: key) }
+            return result
+        }
+        pending[key] = worker
+        let result = await worker.value
+        pending.removeValue(forKey: key)
+        return result
+    }
+}
+
 // UNIFIED_ROUTE_PIPELINE_20261022 — one location resolver for EVERY course and stop.
 // No arbitrary first search hit, fictitious position, or straight-line duration.
 @MainActor
@@ -323,6 +378,7 @@ private enum UniversalPlaceResolver {
         let distance: Double?
     }
     private static var confirmed: [String: MKMapItem] = [:]
+    private static var pending: [String: Task<MKMapItem?, Never>] = [:]
 
     private static func normalized(_ value: String) -> String {
         value.folding(options: [.caseInsensitive, .widthInsensitive, .diacriticInsensitive],
@@ -355,7 +411,7 @@ private enum UniversalPlaceResolver {
         var best = 0
         for raw in sought {
             let wanted = normalized(raw)
-            guard wanted.count >= 3 else { continue }
+            guard !wanted.isEmpty else { continue }
             if name == wanted { best = max(best, 100) }
             else if name.hasPrefix(wanted + "(") || name.hasPrefix(wanted + "（") {
                 best = max(best, 94)
@@ -384,8 +440,34 @@ private enum UniversalPlaceResolver {
         names = names.filter { distinct.insert(normalized($0)).inserted }
         // Do not share an ambiguous result between different prefectures or areas.
         let regionKey = center.map { String(format: "%.5f,%.5f", $0.latitude, $0.longitude) } ?? "none"
-        let cacheKey = "\(prefecture ?? "")|\(regionKey)|\(normalized(text))"
+        let cacheKey = "\(prefecture ?? "")|\(regionKey)|\(normalized(text))|" + names.map { normalized($0) }.sorted().joined(separator: "|")
         if let saved = confirmed[cacheKey] { return saved }
+        if let running = pending[cacheKey] { return await running.value }
+        let worker = Task { @MainActor in
+            await lookup(text: text, names: names, prefecture: prefecture, center: center)
+        }
+        pending[cacheKey] = worker
+        let result = await worker.value
+        pending.removeValue(forKey: cacheKey)
+        if let result {
+            if confirmed.count >= 600 { confirmed.removeAll(keepingCapacity: true) }
+            confirmed[cacheKey] = result
+        }
+        return result
+    }
+
+    private static func lookup(text: String, names: [String], prefecture: String?,
+                               center: CLLocationCoordinate2D?) async -> MKMapItem? {
+        let attempt = PlaceLookupAttempt()
+        return await attempt.run(
+            apple: { await providerLookup(text: text, names: names, prefecture: prefecture,
+                                          center: center, google: false) },
+            google: { await providerLookup(text: text, names: names, prefecture: prefecture,
+                                           center: center, google: true) })
+    }
+
+    private static func providerLookup(text: String, names: [String], prefecture: String?,
+                                       center: CLLocationCoordinate2D?, google: Bool) async -> MKMapItem? {
         var candidates: [Candidate] = []
         func admit(_ item: MKMapItem, label: String, address: String,
                    iso: String? = nil, admin: String? = nil) {
@@ -419,9 +501,11 @@ private enum UniversalPlaceResolver {
             }
             let exactness = nameScore(label, sought: names)
             // Full street-address matches are allowed for hotels and hand-entered addresses.
-            let isAddress = text.range(of: #"[0-9０-９]+[-－][0-9０-９]+"#,
-                                       options: .regularExpression) != nil
-            let addressMatch = isAddress && normalized(address).contains(normalized(text))
+            let addressMatch = ([text] + text.components(separatedBy: ",") + names).contains { candidate in
+                candidate.range(of: #"[0-9０-９]+[-－][0-9０-９]+"#,
+                                options: .regularExpression) != nil &&
+                    normalized(address).contains(normalized(candidate))
+            }
             guard exactness >= 77 || addressMatch else { return }
             let confidence = exactness + (inPrefecture ? 6 : 0)
             // Distance is only a tie-breaker, never a substitute for an exact
@@ -431,39 +515,38 @@ private enum UniversalPlaceResolver {
             candidates.append(Candidate(item: item, name: label, address: address,
                                         score: confidence, distance: nearby))
         }
-        // Prefecture-qualified exact name search: do not bias results to a different
-        // first venue located >50km away. Verify identity + prefecture below.
-        // First try the project's existing authenticated Google Places gateway.
-        // Each hit carries its actual Google-derived coordinate and identity.
-        for term in names.prefix(2) {
-            guard !Task.isCancelled else { return nil }
-            let searchText = prefecture.map { "\(term), \($0), Japan" } ?? term
-            let google = await GooglePlacesGateway.shared.search(searchText,
-                             near: nil, radius: 50_000)
-            for p in google {
-                let item = MKMapItem(placemark: MKPlacemark(coordinate: p.coordinate))
-                item.name = p.name
-                admit(item, label: p.name, address: p.address)
-            }
-        }
-        // Native map lookup is independent of Cloud Run / App Check.
-        // A Google outage must not prevent an Apple map route.
+        // Each provider starts independently. Region and identity validation above
+        // apply equally to every itinerary; no location-specific search exceptions.
         for term in names.prefix(3) {
             guard !Task.isCancelled else { return nil }
-            let request = MKLocalSearch.Request()
-            request.naturalLanguageQuery = prefecture.map { "\(term), \($0), Japan" } ?? term
-            request.resultTypes = [.address, .pointOfInterest]
-            if let center {
-                request.region = MKCoordinateRegion(center: center,
-                    latitudinalMeters: 300_000, longitudinalMeters: 300_000)
-            }
-            if let results = try? await MKLocalSearch(request: request).start() {
-                for item in results.mapItems {
+            let qualified = term == names.first && text.contains(",") ? text : term
+            let searchText = prefecture.map { qualified.contains($0) ? qualified : "\(qualified), \($0), Japan" } ?? qualified
+            if google {
+                let places = await GooglePlacesGateway.shared.search(searchText,
+                    near: center.map { RoutePoint($0) }, radius: 50_000)
+                for place in places {
+                    let item = MKMapItem(placemark: MKPlacemark(coordinate: place.coordinate))
+                    item.name = place.name
+                    admit(item, label: place.name, address: place.address)
+                }
+            } else {
+                let request = MKLocalSearch.Request()
+                request.naturalLanguageQuery = searchText
+                request.resultTypes = [.address, .pointOfInterest]
+                if let center {
+                    request.region = MKCoordinateRegion(center: center,
+                        latitudinalMeters: 100_000, longitudinalMeters: 100_000)
+                }
+                let search = MKLocalSearch(request: request)
+                let response = try? await withTaskCancellationHandler(operation: {
+                    try await search.start()
+                }, onCancel: { search.cancel() })
+                for item in response?.mapItems ?? [] {
                     admit(item, label: item.name ?? "", address: item.placemark.title ?? "",
-                          iso: item.placemark.isoCountryCode,
-                          admin: item.placemark.administrativeArea)
+                          iso: item.placemark.isoCountryCode, admin: item.placemark.administrativeArea)
                 }
             }
+            if !candidates.isEmpty { break }
         }
         let ranked = candidates.sorted {
             if $0.score != $1.score { return $0.score > $1.score }
@@ -477,8 +560,6 @@ private enum UniversalPlaceResolver {
             abs($0.score - best.score) <= 6 &&
             metres($0.item.placemark.coordinate, best.item.placemark.coordinate) > 250
         }) { return nil }
-        confirmed[cacheKey] = best.item
-        if confirmed.count > 600 { confirmed.removeAll(keepingCapacity: true) }
         return best.item
     }
 }
@@ -501,8 +582,12 @@ private enum NativeMapDirections {
         }
         // A route card needs a verified travel time, not all turn-by-turn steps.
         // Apple's dedicated ETA API is faster than calculating full directions.
+        let directions = MKDirections(request: request)
         guard !Task.isCancelled,
-              let eta = try? await MKDirections(request: request).calculateETA(),
+              let eta = try? await withTaskCancellationHandler(operation: {
+                  try await directions.calculateETA()
+              }, onCancel: { directions.cancel() }),
+              eta.transportType == request.transportType,
               eta.expectedTravelTime.isFinite, eta.expectedTravelTime > 0,
               eta.distance.isFinite, eta.distance >= 0 else { return nil }
         let minutes = Int(ceil(eta.expectedTravelTime / 60))
@@ -563,44 +648,10 @@ private enum SharedTravelEstimator {
         guard let straight = metres(from: start, to: end), straight >= 5 else { return nil }
         let mode: String = transport == .walking ? "walking"
             : transport == .automobile ? "taxi" : "transit"
-        // The identity lookup is keyed by actual selected coordinates. If no
-        // unambiguous Google ID is available, route the selected coordinates.
-        let originID = await GooglePlaceIdentityRegistry.shared.id(at: start)
-        let destinationID = await GooglePlaceIdentityRegistry.shared.id(at: end)
-        let a = RoutePoint(start, placeId: originID)
-        let b = RoutePoint(end, placeId: destinationID)
-        let clock = mode == "transit" ? (plannedDepartureMinutes ?? 600) : 0
-        let key = String(format: "%.6f|%.6f>%.6f|%.6f|%@|%d", a.lat, a.lng,
-                         b.lat, b.lng, mode as NSString, clock) +
-            "|\(originID ?? "")|\(destinationID ?? "")"
-        if let cached = await ConfirmedJourneyTimes.shared.read(key, rail: mode == "transit") {
-            return cached
-        }
-        // Run both independent map providers; a slower failed provider must
-        // never hide a genuine duration from the other provider.
-        let verified = await withTaskGroup(of: TravelTime?.self,
-                                             returning: TravelTime?.self) { group -> TravelTime? in
-            group.addTask {
-                await NativeMapDirections.realRoute(from: a, to: b, mode: mode,
-                    plannedDepartureMinutes: plannedDepartureMinutes)
-            }
-            group.addTask {
-                await VerifiedGoogleRoutesV12.shared.route(from: a, to: b, mode: mode,
-                    plannedDepartureMinutes: plannedDepartureMinutes)
-            }
-            for await result in group {
-                guard let result, !result.isApproximate,
-                      result.minutes > 0, result.minutes < 10_000 else { continue }
-                // An impossible average speed is evidence of a mismatched route.
-                let maximumMetresPerMinute: Double = mode == "walking" ? 210 : 2700
-                guard straight <= Double(result.minutes) * maximumMetresPerMinute else { continue }
-                group.cancelAll()
-                return result
-            }
-            return nil
-        }
-        if let verified { await ConfirmedJourneyTimes.shared.save(verified, key: key) }
-        return verified
+        // Always route the selected coordinates on both providers. A broad POI ID
+        // must not silently replace the selected entrance with another endpoint.
+        return await JourneyRouteStore.shared.time(from: RoutePoint(start), to: RoutePoint(end),
+            mode: mode, plannedDepartureMinutes: plannedDepartureMinutes)
     }
 }
 
@@ -1224,7 +1275,7 @@ private struct PlannerView: View {
         return value.isEmpty ? "" : "\(value), \(prefecture), Japan"
     }
     private var hotelTravelKey: String {
-        "\(route.id)|\(selectedVenue(0).name)|\(hotelQuery)"
+        "\(route.id)|\(selectedVenue(0).name)|\(hotelQuery)|\(startMinutes)"
     }
     private var finishMinutes: Int {
         guard let index = route.stops.indices.last else { return startMinutes }
@@ -2130,6 +2181,7 @@ private struct PlannerView: View {
         hotelTravelShortWalk = false
         hotelTravelDiagnosis = nil
         hotelTravelLoading = true
+        defer { if requestKey == hotelTravelKey { hotelTravelLoading = false } }
         do {
             // Pause while a manually entered hotel name is still being typed.
             try await Task.sleep(nanoseconds: 500_000_000)
@@ -2192,7 +2244,7 @@ private struct PlannerView: View {
             }
             guard !Task.isCancelled, requestKey == hotelTravelKey else { return }
             if hotelTravelMinutes["walking"] == nil && hotelTravelMinutes["taxi"] == nil {
-                hotelTravelDiagnosis = await GoogleRoutesGateway.shared.failure(from: fromPoint, to: toPoint)
+                hotelTravelDiagnosis = await VerifiedGoogleRoutesV12.shared.failure(from: fromPoint, to: toPoint)
                     ?? "地図からホテルへの実経路を取得できませんでした。"
             } else { hotelTravelDiagnosis = nil }
             hotelTravelLoading = false
@@ -2620,7 +2672,7 @@ private struct PlannerView: View {
         return false
     }
     private func routeLegKey(origin: String?, destination: String) -> String {
-        "\(route.id)|\(origin ?? "")|\(destination)"
+        "\(route.id)|\(origin ?? "")|\(destination)|\(startMinutes)"
     }
     private func timedRouteLink(_ title: String, url: URL, systemImage: String, key: String, mode: String, canEstimate: Bool) -> some View {
         let accent = mode == "walking" ? PlannerTheme.coral : mode == "taxi" ? PlannerTheme.amber : PlannerTheme.cyan
@@ -2739,7 +2791,7 @@ private struct PlannerView: View {
             } else { routeLegDiagnostics[key] = nil }
         } catch {
             if !Task.isCancelled {
-                routeLegTimes[key] = [:]
+                routeLegTimes[key] = routeLegTimes[key] ?? [:]
                 routeLegDiagnostics[key] = "地点検索または経路計算でエラーが発生しました。"
             }
         }
@@ -4745,6 +4797,7 @@ private struct OriginalCourseView: View {
     @State private var loaded = false
     @State private var candidates: [UUID: [OriginalPlace]] = [:]
     @State private var times: [String: [String: TravelTime]] = [:]
+    @State private var routeCalculationID = UUID()
     @State private var nearbyAnchor: UUID?
     @State private var nearbyKind = "sight"
     @State private var nearbyResults: [OriginalNearbyPlace] = []
@@ -4758,7 +4811,7 @@ private struct OriginalCourseView: View {
     }
     private var searchKey: String { stops.map { "\($0.id):\($0.name)" }.joined(separator: "|") }
     private var routeKey: String {
-        stops.map { "\($0.id):\($0.name):\($0.address):\($0.latitude ?? 0):\($0.longitude ?? 0)" }.joined(separator: "|")
+        stops.map { "\($0.id):\($0.name):\($0.address):\($0.latitude ?? 0):\($0.longitude ?? 0):\($0.target):\($0.duration):\($0.mode)" }.joined(separator: "|")
     }
     private func legKey(_ index: Int) -> String {
         "\(stops[index - 1].id)|\(stops[index].id)"
@@ -5159,6 +5212,8 @@ private struct OriginalCourseView: View {
     }
     @MainActor
     private func calculateRoutes() async {
+        let generation = UUID()
+        routeCalculationID = generation
         times = [:]
         let snapshot = stops
         guard snapshot.count > 1 else { return }
@@ -5190,7 +5245,7 @@ private struct OriginalCourseView: View {
                 }
                 for await (index, key, walkTime, driveTime, railTime) in group {
                     guard !Task.isCancelled else { group.cancelAll(); break }
-                    guard index < stops.count else { continue }
+                    guard routeCalculationID == generation, index < stops.count else { continue }
                     let from = snapshot[index - 1], to = snapshot[index]
                     guard stops[index - 1].id == from.id,
                           stops[index].id == to.id,
@@ -6801,3 +6856,4 @@ private enum RegisteredStays {
         "okinawa": "東横INN那覇国際通り美栄橋駅"
     ]
 }
+
