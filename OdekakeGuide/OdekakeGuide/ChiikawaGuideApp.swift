@@ -718,6 +718,139 @@ private actor GooglePlacesGateway {
     }
 }
 
+// ROUTE_ENDPOINT_SELECTION_20261023: retain actual map results, not display labels.
+private struct ConfirmedRoutePlace: Identifiable, Sendable {
+    let id: String
+    let name: String
+    let address: String
+    let latitude: Double
+    let longitude: Double
+    var coordinate: CLLocationCoordinate2D {
+        CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
+    }
+    var query: String { "\(latitude),\(longitude)" }
+    var mapItem: MKMapItem {
+        let item = MKMapItem(placemark: MKPlacemark(coordinate: coordinate))
+        item.name = name
+        return item
+    }
+    init(_ item: MKMapItem) {
+        latitude = item.placemark.coordinate.latitude
+        longitude = item.placemark.coordinate.longitude
+        name = item.name ?? item.placemark.title ?? ""
+        address = item.placemark.title ?? ""
+        id = "\(latitude)|\(longitude)|\(name)"
+    }
+    init(_ place: GoogleMappedPlace) {
+        id = place.id; name = place.name; address = place.address
+        latitude = place.lat; longitude = place.lng
+    }
+}
+private struct RoutePlaceSelection: Identifiable {
+    let id = UUID()
+    let course: String
+    let query: String
+    let prefecture: String
+    let center: CLLocationCoordinate2D?
+}
+@MainActor
+private struct RoutePlaceSelectionView: View {
+    let request: RoutePlaceSelection
+    let japanese: Bool
+    let onSelect: (ConfirmedRoutePlace) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var query = ""
+    @State private var results: [ConfirmedRoutePlace] = []
+    @State private var loading = false
+    @State private var searched = false
+    @State private var searchID = UUID()
+    @State private var searchTask: Task<Void, Never>?
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    Text(japanese ? "実際に行く場所を選ぶと、移動時間を再計算します。" :
+                         "Select the actual destination to recalculate travel times.")
+                    TextField(japanese ? "施設名・住所" : "Place or address", text: $query)
+                        .submitLabel(.search).onSubmit { startSearch() }
+                    Button(japanese ? "検索" : "Search") { startSearch() }
+                        .disabled(query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    if loading { ProgressView() }
+                }
+                ForEach(results) { place in
+                    Button {
+                        onSelect(place)
+                        dismiss()
+                    } label: {
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text(place.name).font(.headline)
+                            Text(place.address).font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                if searched && !loading && results.isEmpty {
+                    Text(japanese ? "見つかりませんでした。施設名に市区町村や住所を加えて検索してください。" :
+                         "No places found. Add the city or street address and search again.")
+                }
+            }
+            .navigationTitle(japanese ? "場所を確定" : "Confirm place")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(japanese ? "閉じる" : "Close") { dismiss() }
+                }
+            }
+        }
+        .onAppear { query = request.query; startSearch() }
+        .onDisappear { searchTask?.cancel() }
+    }
+    private func startSearch() {
+        searchTask?.cancel()
+        let token = UUID(); searchID = token
+        let term = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !term.isEmpty else { return }
+        results = []; loading = true; searched = true
+        searchTask = Task { @MainActor in
+            let qualified = term.contains(request.prefecture) ? term : "\(term), \(request.prefecture), Japan"
+            await withTaskGroup(of: [ConfirmedRoutePlace].self) { group in
+                group.addTask {
+                    await GooglePlacesGateway.shared.search(qualified,
+                        near: request.center.map { RoutePoint($0) }, radius: 50_000)
+                        .map { ConfirmedRoutePlace($0) }
+                }
+                group.addTask {
+                    let native = MKLocalSearch.Request()
+                    native.naturalLanguageQuery = qualified
+                    native.resultTypes = [.address, .pointOfInterest]
+                    if let center = request.center {
+                        native.region = MKCoordinateRegion(center: center,
+                            latitudinalMeters: 100_000, longitudinalMeters: 100_000)
+                    }
+                    let search = MKLocalSearch(request: native)
+                    let response = try? await withTaskCancellationHandler(operation: {
+                        try await search.start()
+                    }, onCancel: { search.cancel() })
+                    return (response?.mapItems ?? []).filter {
+                        $0.placemark.isoCountryCode == nil || $0.placemark.isoCountryCode == "JP"
+                    }.map { ConfirmedRoutePlace($0) }
+                }
+                for await incoming in group {
+                    guard !Task.isCancelled, token == searchID else { group.cancelAll(); break }
+                    for place in incoming {
+                        guard CLLocationCoordinate2DIsValid(place.coordinate),
+                              !place.name.isEmpty else { continue }
+                        if !results.contains(where: { $0.id == place.id ||
+                            ($0.name == place.name && abs($0.latitude - place.latitude) < 0.0003 &&
+                             abs($0.longitude - place.longitude) < 0.0003) }) {
+                            results.append(place)
+                        }
+                    }
+                }
+            }
+            if token == searchID { loading = false }
+        }
+    }
+}
+
 private struct Venue: Decodable {
     let name: String
     let detail: String
@@ -807,6 +940,9 @@ private struct PlannerView: View {
     @State private var lunchSearchError = false
     @State private var lunchSearchID = UUID()
     @State private var resolvedPlaceCache: [String: MKMapItem] = [:]
+    @State private var confirmedRoutePlaces: [String: ConfirmedRoutePlace] = [:]
+    @State private var selectingRoutePlace: RoutePlaceSelection?
+    @State private var routePlaceRevision = 0
     @State private var hotelResults: [HotelSuggestion] = []
     @State private var hotelDriveMinutes: [String: Int] = [:]
     @State private var hotelSearching = false
@@ -1177,6 +1313,14 @@ private struct PlannerView: View {
             }
         }
         .sheet(isPresented: $showingLanguageSelection) { languageSelectionSheet }
+        .sheet(item: $selectingRoutePlace) { request in
+            RoutePlaceSelectionView(request: request, japanese: language == .ja) { place in
+                guard request.course == route.id else { return }
+                confirmedRoutePlaces[routePlaceKey(request.query)] = place
+                resolvedPlaceCache.removeAll()
+                routePlaceRevision += 1
+            }
+        }
         .sheet(item: $presentedMap) { request in
             PlannerMapScreen(request: request, language: language)
         }
@@ -1275,7 +1419,7 @@ private struct PlannerView: View {
         return value.isEmpty ? "" : "\(value), \(prefecture), Japan"
     }
     private var hotelTravelKey: String {
-        "\(route.id)|\(selectedVenue(0).name)|\(hotelQuery)|\(startMinutes)"
+        "\(route.id)|\(selectedVenue(0).name)|\(hotelQuery)|\(startMinutes)|\(routePlaceRevision)"
     }
     private var finishMinutes: Int {
         guard let index = route.stops.indices.last else { return startMinutes }
@@ -1724,6 +1868,9 @@ private struct PlannerView: View {
         return false
     }
     private func venueMapItem(_ venue: Venue, in prefecture: PrefectureOption) async throws -> MKMapItem? {
+        if let confirmed = confirmedRoutePlaces[routePlaceKey(venueQuery(venue))] {
+            return confirmed.mapItem
+        }
         let cacheKey = "\(prefecture.id)|\(venue.name)"
         if let cached = resolvedPlaceCache[cacheKey] { return cached }
         if let coordinate = pinnedVenueCoordinate(venue) {
@@ -1783,7 +1930,18 @@ private struct PlannerView: View {
                                distance: distance, anchorLatitude: coordinate.latitude,
                                anchorLongitude: coordinate.longitude)
     }
+    private func routePlaceKey(_ query: String) -> String {
+        "\(route.id)|\(routePrefecture)|\(query.trimmingCharacters(in: .whitespacesAndNewlines))"
+    }
     private func resolvedAnchorMapItem(_ query: String) async throws -> MKMapItem? {
+        let identity = routePlaceKey(query)
+        if let confirmed = confirmedRoutePlaces[identity] { return confirmed.mapItem }
+        guard let item = try await lookupAnchorMapItem(query) else { return nil }
+        guard !Task.isCancelled, identity == routePlaceKey(query) else { return nil }
+        confirmedRoutePlaces[identity] = ConfirmedRoutePlace(item)
+        return item
+    }
+    private func lookupAnchorMapItem(_ query: String) async throws -> MKMapItem? {
         let clean = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return nil }
         // Coordinates provided by a selected hotel/restaurant take priority.
@@ -2150,6 +2308,7 @@ private struct PlannerView: View {
             if let diagnosis = hotelTravelDiagnosis, !diagnosis.isEmpty {
                 Text(language == .ja ? diagnosis : "The travel time could not be confirmed. Check the hotel address and map directions.")
                     .font(.caption).foregroundStyle(PlannerTheme.amber)
+                routePlaceControls(origin: hotelQuery, destination: venueQuery(selectedVenue(0)))
             }
             if !hotelTravelLoading,
                (hotelTravelMinutes["walking"] == nil ||
@@ -2192,8 +2351,7 @@ private struct PlannerView: View {
                 }
                 return
             }
-            guard let prefecture = NationwideRoutes.prefectures.first(where: { $0.id == routePrefecture }),
-                  let destination = try await firstVenueMapItem(in: prefecture) else {
+            guard let destination = try await resolvedAnchorMapItem(venueQuery(selectedVenue(0))) else {
                 if !Task.isCancelled && requestKey == hotelTravelKey { hotelTravelLoading = false }
                 return
             }
@@ -2581,8 +2739,12 @@ private struct PlannerView: View {
     }
     private func mapURL(origin: String? = nil, destination: String, mode: String) -> URL? {
         var parts = URLComponents(string: "https://www.google.com/maps/dir/")
-        var items = [URLQueryItem(name: "api", value: "1"), URLQueryItem(name: "destination", value: destination), URLQueryItem(name: "travelmode", value: mode)]
-        if let origin = origin { items.append(URLQueryItem(name: "origin", value: origin)) }
+        let target = confirmedRoutePlaces[routePlaceKey(destination)]?.query ?? destination
+        var items = [URLQueryItem(name: "api", value: "1"), URLQueryItem(name: "destination", value: target), URLQueryItem(name: "travelmode", value: mode)]
+        if let origin {
+            let source = confirmedRoutePlaces[routePlaceKey(origin)]?.query ?? origin
+            items.append(URLQueryItem(name: "origin", value: source))
+        }
         parts?.queryItems = items
         return parts?.url
     }
@@ -2620,6 +2782,15 @@ private struct PlannerView: View {
                 Text(language == .ja ? problem : "The travel time could not be confirmed. Check the destination and map directions.")
                     .font(.caption).foregroundStyle(PlannerTheme.amber)
             }
+            if let origin, !origin.isEmpty {
+                if routeLegDiagnostics[key] != nil {
+                    routePlaceControls(origin: origin, destination: destination)
+                } else {
+                    DisclosureGroup(language == .ja ? "出発地・目的地を確認" : "Check route endpoints") {
+                        routePlaceControls(origin: origin, destination: destination)
+                    }.font(.caption)
+                }
+            }
             if let omotesando = route.stops.flatMap({ $0.choices }).first(where: { $0.name == "Omotesando Tokyo" }),
                origin == venueQuery(omotesando) || destination == venueQuery(omotesando) {
                 Text(["表参道は青山通り側の地点を基準に計算しています。",
@@ -2653,6 +2824,27 @@ private struct PlannerView: View {
             }
         }
     }
+    private func routePlaceControls(origin: String, destination: String) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Button(language == .ja ? "出発地を選んで確定" : "Confirm departure place") {
+                selectRoutePlace(origin)
+            }
+            if let place = confirmedRoutePlaces[routePlaceKey(origin)] {
+                Text(place.name).font(.caption).foregroundStyle(.secondary)
+            }
+            Button(language == .ja ? "目的地を選んで確定" : "Confirm destination") {
+                selectRoutePlace(destination)
+            }
+            if let place = confirmedRoutePlaces[routePlaceKey(destination)] {
+                Text(place.name).font(.caption).foregroundStyle(.secondary)
+            }
+        }.font(.subheadline.bold()).foregroundStyle(PlannerTheme.cyan)
+    }
+    private func selectRoutePlace(_ query: String) {
+        let prefecture = NationwideRoutes.prefectures.first(where: { $0.id == routePrefecture })?.ja ?? "日本"
+        selectingRoutePlace = RoutePlaceSelection(course: route.id, query: query,
+            prefecture: prefecture, center: pinnedFirstVenueCoordinate)
+    }
     private func isInternalSiteTransfer(origin: String?, destination: String) -> Bool {
         guard let origin else { return false }
         let sitePairs: [(String, String)] = [
@@ -2672,7 +2864,7 @@ private struct PlannerView: View {
         return false
     }
     private func routeLegKey(origin: String?, destination: String) -> String {
-        "\(route.id)|\(origin ?? "")|\(destination)|\(startMinutes)"
+        "\(route.id)|\(origin ?? "")|\(destination)|\(startMinutes)|\(routePlaceRevision)"
     }
     private func timedRouteLink(_ title: String, url: URL, systemImage: String, key: String, mode: String, canEstimate: Bool) -> some View {
         let accent = mode == "walking" ? PlannerTheme.coral : mode == "taxi" ? PlannerTheme.amber : PlannerTheme.cyan
@@ -2730,7 +2922,8 @@ private struct PlannerView: View {
                 // A failed search is not a zero-minute journey.
                 // Keep last valid real map duration, if any.
                 routeLegTimes[key] = routeLegTimes[key] ?? [:]
-                routeLegDiagnostics[key] = "地点を正確に特定できませんでした。出発地・目的地を地図で確認してください。"
+                let missing = start == nil && end == nil ? "出発地と目的地" : start == nil ? "出発地" : "目的地"
+                routeLegDiagnostics[key] = "\(missing)を特定できませんでした。下のボタンから実際の場所を選ぶと再計算します。"
                 return
             }
             let fromPoint = RoutePoint(start.placemark.coordinate)
