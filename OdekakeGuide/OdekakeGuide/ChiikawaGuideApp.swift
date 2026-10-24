@@ -1052,7 +1052,7 @@ private struct PlannerView: View {
     // UI preview only: additional languages require complete translation packs.
     // Keep the five existing translation indices unchanged.
     private var languageSelectionTitle: String {
-        ["ja":"国・言語を選ぶ", "ko":"국가·언어 선택", "zh":"选择国家和语言", "zht":"選擇國家和語言", "en":"Country / Language", "th":"เลือกประเทศ / ภาษา", "fr":"Pays / langue", "de":"Land / Sprache", "es":"País / idioma", "it":"Paese / lingua", "pt":"País / idioma", "hi":"देश / भाषा", "vi":"Quốc gia / ngôn ngữ", "id":"Negara / bahasa", "ms":"Negara / bahasa", "fil":"Bansa / wika", "ru":"Страна / язык", "nl":"Land / taal", "tr":"Ülke / dil", "pl":"Kraj / język", "ar":"الدولة / اللغة", "my":"နိုင်ငံ / ဘာသာ", "ne":"देश / भाषा", "si":"රට / භාෂාව", "km":"ប្រទេស / ភាសា", "he":"מדינה / שפה", "uk":"Країна / мова"][language.rawValue] ?? "Country / Language"
+        ["ja":"国・言語を選ぶ", "ko":"국가·언어 선택", "zh":"选择国家和语言", "zht":"選擇國家和語言", "en":"Country / Language", "th":"เลือกประเทศ / ภาษา", "fr":"Pays / langue", "de":"Land / Sprache", "es":"País / idioma", "it":"Paese / lingua", "pt":"País / idioma", "hi":"देश / भाषा", "vi":"Quốc gia / ngôn ngữ", "id":"Negara / bahasa", "ms":"Negara / bahasa", "fil":"Bansa / wika", "ru":"Страна / язык", "nl":"Land / taal", "tr":"Ülke / dil", "pl":"Kraj / język", "ar":"الدولة / اللغة", "my":"နိုင်ငံ / ဘာသာ", "ne":"देश / भाषा", "si":"රට / භාෂාව", "km":"ប្រទេស / ភាសា", "he":"מדינה / שפה", "uk":"Країна / мова", "sv":"Land / språk", "mn":"Улс / хэл", "da":"Land / sprog", "fi":"Maa / kieli", "no":"Land / språk", "cs":"Země / jazyk", "el":"Χώρα / γλώσσα", "ro":"Țară / limbă", "hu":"Ország / nyelv", "bn":"দেশ / ভাষা", "ur":"ملک / زبان", "hr":"Država / jezik"][language.rawValue] ?? "Country / Language"
     }
     private var languageSelectionButton: some View {
         Button { showingLanguageSelection = true } label: {
@@ -1077,7 +1077,7 @@ private struct PlannerView: View {
             Button {
                 swapIndex = nil
                 languageCode = item.rawValue
-                showingGuide = true
+                openFreshGuide()
                 showingLanguageSelection = false
             } label: {
                 VStack(alignment: .leading, spacing: 4) {
@@ -1138,7 +1138,7 @@ private struct PlannerView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 22))
                 featuredHomeEntry
                 Button {
-                    showingGuide = true
+                    openFreshGuide()
                 } label: {
                     Label(text("route"), systemImage: "map.fill")
                         .font(.headline).foregroundStyle(.white)
@@ -1170,7 +1170,14 @@ private struct PlannerView: View {
         }
     }
     private func selectPrefecture(_ value: String) {
-        guard value != prefectureID else { return }
+        if value == prefectureID {
+            resetHotelSelection()
+            resetJourney()
+            confirmedRoutePlaces = [:]
+            resolvedPlaceCache = [:]
+            presentedMap = nil
+            return
+        }
         resetHotelSelection()
         resetJourney()
         prefectureID = value
@@ -1400,7 +1407,8 @@ private struct PlannerView: View {
     private let journeyGold = PlannerTheme.cyan
 
     private func journeyText(_ key: String) -> String {
-        VisitorCopy.show(JourneyTranslations.ui[key]?[language.index] ?? key, language: language)
+        if let translated = VisitorActionCopy.text(key, language: language) { return translated }
+        return VisitorCopy.show(JourneyTranslations.ui[key]?[language.index] ?? key, language: language)
     }
     private func storedValues(_ value: String) -> [String: String] {
         guard let data = value.data(using: .utf8) else { return [:] }
@@ -1415,8 +1423,17 @@ private struct PlannerView: View {
         } else {
             if savedHotels != string { savedHotels = string }
         }
-        // Hotel choice changes route data, not the currently viewed itinerary step.
-        // A selected meal remains in place unless its search anchor changes.
+        // Each hotel selection has a distinct origin. Invalidate every old
+        // origin/destination route and map view when that origin changes.
+        presentedMap = nil
+        hotelTravelMinutes = [:]
+        hotelTravelDiagnosis = nil
+        routeLegTimes = [:]
+        routeLegShortWalk = []
+        routeLegLoading = []
+        routeLegDiagnostics = [:]
+        resolvedPlaceCache = [:]
+        routePlaceRevision += 1
     }
     private func resetHotelSelection() {
         savedHotels = "{}"
@@ -1425,6 +1442,15 @@ private struct PlannerView: View {
         hotelTravelMinutes = [:]
         hotelTravelShortWalk = false
         hotelTravelLoading = false
+        hotelTravelDiagnosis = nil
+        routeLegTimes = [:]
+        routeLegLoading = []
+        routeLegShortWalk = []
+        routeLegDiagnostics = [:]
+        confirmedRoutePlaces = [:]
+        resolvedPlaceCache = [:]
+        routePlaceRevision += 1
+        presentedMap = nil
         clearHotelSearch()
     }
     private var availableHotels: [NearbyHotel] { TravelExtras.hotels[route.id] ?? [] }
@@ -1434,6 +1460,17 @@ private struct PlannerView: View {
         return values[route.id]
     }
     private func chooseSuggestedHotel(_ hotel: HotelSuggestion) {
+        if selectedSuggestedHotel?.id != hotel.id {
+            presentedMap = nil
+            hotelTravelMinutes = [:]
+            hotelTravelDiagnosis = nil
+            routeLegTimes = [:]
+            routeLegLoading = []
+            routeLegShortWalk = []
+            routeLegDiagnostics = [:]
+            resolvedPlaceCache = [:]
+            routePlaceRevision += 1
+        }
         var values = (try? JSONDecoder().decode([String: HotelSuggestion].self, from: Data(savedSuggestedHotels.utf8))) ?? [:]
         values[route.id] = hotel
         if let data = try? JSONEncoder().encode(values), let string = String(data: data, encoding: .utf8) {
@@ -1508,8 +1545,23 @@ private struct PlannerView: View {
         return min(stages.count - 1, 0)
     }
     private var currentStage: JourneyStage { stages[journeyIndex] }
+    // Preserve the selected hotel/restaurant for this itinerary, but never
+    // reuse the previous screen's search results in the next screen.
+    private func discardTransientSearchResults() {
+        clearHotelSearch()
+        lunchSearchID = UUID()
+        lunchResults = []
+        lunchSearching = false
+        lunchSearchError = false
+        dinnerSearchID = UUID()
+        dinnerResults = []
+        dinnerSearching = false
+        dinnerSearchError = false
+        presentedMap = nil
+    }
     private func moveToJourneyStage(_ index: Int) {
         guard stages.indices.contains(index) else { return }
+        if selectedJourneyStage != stages[index] { discardTransientSearchResults() }
         selectedJourneyStage = stages[index]
         journeyCompleted = false
     }
@@ -1551,6 +1603,25 @@ private struct PlannerView: View {
         default: return nil
         }
     }
+    // Start a new visit with empty searches and no previously selected hotel.
+    // The course and preferred language stay selected, but past result cards
+    // and map searches must never be shown as a new search.
+    private func openFreshGuide() {
+        resetHotelSelection()
+        resetJourney()
+        savedChoices = "{}"
+        dinnerArea = "auto"
+        routeLegDiagnostics = [:]
+        routeLegLoading = []
+        confirmedRoutePlaces = [:]
+        resolvedPlaceCache = [:]
+        routePlaceRevision += 1
+        selectingRoutePlace = nil
+        presentedMap = nil
+        swapIndex = nil
+        showingGuide = true
+    }
+
     private func resetJourney() {
         selectedJourneyStage = .departure
         journeyCompleted = false
@@ -1606,6 +1677,31 @@ private struct PlannerView: View {
         case .en: return "en"
         case .th: return "th"
         default: return language.webLanguageCode
+        }
+    }
+    // Some legacy attraction descriptions are only authored in the five old
+    // languages. Offer the full excerpt to a visitor in their selected language
+    // instead of silently relying on English in the remaining languages.
+    private func translatedCopyURL(_ source: String) -> URL? {
+        guard language.index == 3, language != .en,
+              !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        var parts = URLComponents(string: "https://translate.google.com/")
+        parts?.queryItems = [
+            URLQueryItem(name: "sl", value: "auto"),
+            URLQueryItem(name: "tl", value: language.webLanguageCode),
+            URLQueryItem(name: "text", value: source),
+            URLQueryItem(name: "op", value: "translate")
+        ]
+        return parts?.url
+    }
+    private func readerTranslationLink(_ source: String) -> some View {
+        Group {
+            if let url = translatedCopyURL(source) {
+                Link(destination: url) {
+                    Label("\(language.title) ↗", systemImage: "character.book.closed.fill")
+                        .font(.caption.bold()).foregroundStyle(PlannerTheme.cyan)
+                }
+            }
         }
     }
     private func translatedGuideURL(_ original: URL) -> URL? {
@@ -2120,6 +2216,17 @@ private struct PlannerView: View {
     @MainActor
     private func searchHotels() {
         guard !hotelSearching else { return }
+        // New hotel search means a fresh choice; never show the previous hotel.
+        clearHotelSearch()
+        savedHotels = "{}"
+        savedCustomHotels = "{}"
+        savedSuggestedHotels = "{}"
+        hotelTravelMinutes = [:]
+        hotelTravelLoading = false
+        hotelTravelShortWalk = false
+        hotelTravelDiagnosis = nil
+        routeLegTimes = [:]
+        routeLegDiagnostics = [:]
         guard let prefecture = NationwideRoutes.prefectures.first(where: { $0.id == routePrefecture }) else {
             hotelSearchError = true
             return
@@ -2641,6 +2748,10 @@ private struct PlannerView: View {
     @MainActor
     private func searchLunch(near anchor: String) {
         guard !lunchSearching else { return }
+        // A fresh lunch search cannot inherit the previous restaurant.
+        lunchSelection = nil
+        routeLegTimes = [:]
+        routeLegDiagnostics = [:]
         let token = UUID()
         lunchSearchID = token
         lunchSearching = true
@@ -2709,6 +2820,10 @@ private struct PlannerView: View {
     @MainActor
     private func searchDinner() {
         guard !dinnerAnchorQuery.isEmpty, !dinnerSearching else { return }
+        // Do not keep showing a restaurant from the previous search.
+        dinnerSelection = nil
+        routeLegTimes = [:]
+        routeLegDiagnostics = [:]
         let anchor = dinnerAnchorQuery
         let token = UUID()
         dinnerSearchID = token
@@ -2791,7 +2906,7 @@ private struct PlannerView: View {
         case .zh: return "在 Google 地图中确认起终点并查看路线及所需时间。"
         case .zht: return "請在 Google 地圖確認起點、終點、路線及所需時間。"
         case .th: return "ตรวจสอบต้นทาง ปลายทาง เส้นทางและเวลาเดินทางใน Google Maps"
-        default: return "Tap a mode above to see the actual route and travel time in Google Maps. No unverified minutes are displayed here."
+        default: return TravelMapCopy.note(language)
         }
     }
     private var mapTimeLabel: String {
@@ -2801,7 +2916,7 @@ private struct PlannerView: View {
         case .zh: return "在 Google 地图查看时间 ↗"
         case .zht: return "在 Google 地圖查看時間 ↗"
         case .th: return "ดูเวลาใน Google Maps ↗"
-        default: return "See time in Google Maps ↗"
+        default: return TravelMapCopy.time(language)
         }
     }
     private var routeLoadingLabel: String {
@@ -3214,7 +3329,14 @@ private struct PlannerView: View {
     }
 
     private func selectCourse(_ item: DayRoute) {
-        guard routeID != item.id else { return }
+        if routeID == item.id {
+            resetHotelSelection()
+            resetJourney()
+            confirmedRoutePlaces = [:]
+            resolvedPlaceCache = [:]
+            presentedMap = nil
+            return
+        }
         resetHotelSelection()
         resetJourney()
         let pref = item.prefecture ?? NationwideRoutes.existingPrefectures[item.id] ?? "tokyo"
@@ -3264,8 +3386,11 @@ private struct PlannerView: View {
             Image(systemName: "map.fill").font(.title2)
                 .foregroundStyle(PlannerTheme.cyan).frame(width: 52, height: 52)
                 .background(PlannerTheme.cyan.opacity(0.14), in: Circle())
-            Text(routeText(route, 0)).font(.title2.bold())
-                .fixedSize(horizontal: false, vertical: true)
+            VStack(alignment: .leading, spacing: 7) {
+                Text(routeText(route, 0)).font(.title2.bold())
+                    .fixedSize(horizontal: false, vertical: true)
+                readerTranslationLink(routeText(route, 0) + ". " + routeText(route, 2))
+            }
         }.padding(16).frame(maxWidth: .infinity, alignment: .leading)
             .background(PlannerTheme.surface, in: RoundedRectangle(cornerRadius: 22))
             .overlay(RoundedRectangle(cornerRadius: 22).stroke(PlannerTheme.cyan.opacity(0.5), lineWidth: 1))
@@ -3354,7 +3479,7 @@ private struct PlannerView: View {
 
     private var featuredHomeEntry: some View {
         Button {
-            showingGuide = true
+            openFreshGuide()
         } label: {
             HStack(spacing: 14) {
                 ZStack {
@@ -3424,6 +3549,7 @@ private struct PlannerView: View {
             }
             Text(venueText(venue, 0)).font(.title3.bold())
             Text(venueText(venue, 1)).font(.subheadline).foregroundStyle(.secondary)
+            readerTranslationLink(venueText(venue, 1))
             if language == .en {
                 Text(guide.notes[venue.name] ?? text("check"))
                     .font(.footnote).padding(10).frame(maxWidth: .infinity, alignment: .leading)
@@ -3684,6 +3810,211 @@ private enum GoogleMapsLocale {
     }
 }
 
+private enum TravelMapCopy {
+    // Focused, native-language map guidance for the additional visitor languages.
+    // The place names themselves remain provided by Google Maps.
+    private static let notes: [String: String] = [
+        "fil": "Tingnan ang ruta at oras ng biyahe sa Google Maps.",
+        "vi": "Xem tuyến đường và thời gian di chuyển trên Google Maps.",
+        "id": "Periksa rute dan waktu tempuh di Google Maps.",
+        "ms": "Semak laluan dan masa perjalanan dalam Google Maps.",
+        "fr": "Vérifiez l'itinéraire et la durée dans Google Maps.",
+        "de": "Prüfen Sie Route und Fahrzeit in Google Maps.",
+        "hi": "Google Maps में रास्ता और यात्रा का समय देखें।",
+        "it": "Controlla il percorso e i tempi su Google Maps.",
+        "es": "Consulta la ruta y el tiempo de viaje en Google Maps.",
+        "ru": "Проверьте маршрут и время в Google Картах.",
+        "nl": "Controleer de route en reistijd in Google Maps.",
+        "pt": "Confira a rota e o tempo de viagem no Google Maps.",
+        "sv": "Kontrollera rutt och restid i Google Maps.",
+        "mn": "Google Maps дээр маршрут болон явах хугацааг шалгана уу.",
+        "ar": "تحقق من المسار ومدة الرحلة في خرائط Google.",
+        "tr": "Rotayı ve yolculuk süresini Google Haritalar'da kontrol edin.",
+        "pl": "Sprawdź trasę i czas przejazdu w Mapach Google.",
+        "my": "Google Maps တွင် လမ်းကြောင်းနှင့် ခရီးကြာချိန်ကို စစ်ဆေးပါ။",
+        "ne": "Google Maps मा मार्ग र यात्रा समय जाँच्नुहोस्।",
+        "si": "Google Maps හි මාර්ගය සහ ගමන් කාලය පරීක්ෂා කරන්න.",
+        "da": "Kontrollér rute og rejsetid i Google Maps.",
+        "fi": "Tarkista reitti ja matka-aika Google Mapsista.",
+        "no": "Sjekk rute og reisetid i Google Maps.",
+        "km": "ពិនិត្យផ្លូវ និងពេលវេលាធ្វើដំណើរក្នុង Google Maps។",
+        "he": "בדקו את המסלול ואת משך הנסיעה במפות Google.",
+        "cs": "Zkontrolujte trasu a dobu cesty v Mapách Google.",
+        "el": "Ελέγξτε τη διαδρομή και τη διάρκεια στους Χάρτες Google.",
+        "ro": "Verificați traseul și durata călătoriei în Google Maps.",
+        "hu": "Ellenőrizze az útvonalat és a menetidőt a Google Térképen.",
+        "bn": "Google Maps-এ পথ ও ভ্রমণের সময় যাচাই করুন।",
+        "ur": "Google Maps میں راستہ اور سفر کا وقت دیکھیں۔",
+        "uk": "Перевірте маршрут і час поїздки в Google Картах.",
+        "hr": "Provjerite rutu i trajanje putovanja na Google kartama."
+    ]
+    private static let times: [String: String] = [
+        "fil": "Tingnan ang oras sa Google Maps ↗",
+        "vi": "Xem thời gian trên Google Maps ↗",
+        "id": "Lihat waktu di Google Maps ↗",
+        "ms": "Lihat masa di Google Maps ↗",
+        "fr": "Voir la durée sur Google Maps ↗",
+        "de": "Fahrzeit in Google Maps ansehen ↗",
+        "hi": "Google Maps पर समय देखें ↗",
+        "it": "Vedi il tempo su Google Maps ↗",
+        "es": "Ver tiempo en Google Maps ↗",
+        "ru": "Время в Google Картах ↗",
+        "nl": "Bekijk de reistijd in Google Maps ↗",
+        "pt": "Ver o tempo no Google Maps ↗",
+        "sv": "Se restid i Google Maps ↗",
+        "mn": "Google Maps дээр хугацааг харах ↗",
+        "ar": "عرض وقت الرحلة في خرائط Google ↗",
+        "tr": "Google Haritalar'da süreyi gör ↗",
+        "pl": "Sprawdź czas w Mapach Google ↗",
+        "my": "Google Maps တွင် ကြာချိန်ကြည့်ရန် ↗",
+        "ne": "Google Maps मा समय हेर्नुहोस् ↗",
+        "si": "Google Maps හි ගමන් කාලය බලන්න ↗",
+        "da": "Se rejsetid i Google Maps ↗",
+        "fi": "Katso matka-aika Google Mapsissa ↗",
+        "no": "Se reisetid i Google Maps ↗",
+        "km": "មើលរយៈពេលក្នុង Google Maps ↗",
+        "he": "הצגת זמן הנסיעה במפות Google ↗",
+        "cs": "Zobrazit čas na Mapách Google ↗",
+        "el": "Δείτε τη διάρκεια στους Χάρτες Google ↗",
+        "ro": "Vezi durata în Google Maps ↗",
+        "hu": "Menetidő megtekintése a Google Térképen ↗",
+        "bn": "Google Maps-এ ভ্রমণের সময় দেখুন ↗",
+        "ur": "Google Maps میں سفر کا وقت دیکھیں ↗",
+        "uk": "Переглянути час у Google Картах ↗",
+        "hr": "Pogledaj trajanje na Google kartama ↗"
+    ]
+    private static let retries: [String: String] = [
+        "fil": "Subukan muli",
+        "vi": "Thử lại",
+        "id": "Coba lagi",
+        "ms": "Cuba lagi",
+        "fr": "Réessayer",
+        "de": "Erneut versuchen",
+        "hi": "फिर कोशिश करें",
+        "it": "Riprova",
+        "es": "Reintentar",
+        "ru": "Повторить",
+        "nl": "Opnieuw proberen",
+        "pt": "Tentar novamente",
+        "sv": "Försök igen",
+        "mn": "Дахин оролдох",
+        "ar": "إعادة المحاولة",
+        "tr": "Tekrar dene",
+        "pl": "Spróbuj ponownie",
+        "my": "ထပ်မံကြိုးစားပါ",
+        "ne": "फेरि प्रयास गर्नुहोस्",
+        "si": "නැවත උත්සාහ කරන්න",
+        "da": "Prøv igen",
+        "fi": "Yritä uudelleen",
+        "no": "Prøv igjen",
+        "km": "សាកល្បងម្តងទៀត",
+        "he": "נסה שוב",
+        "cs": "Zkusit znovu",
+        "el": "Δοκιμάστε ξανά",
+        "ro": "Încearcă din nou",
+        "hu": "Próbálja újra",
+        "bn": "আবার চেষ্টা করুন",
+        "ur": "دوبارہ کوشش کریں",
+        "uk": "Спробувати ще раз",
+        "hr": "Pokušaj ponovno"
+    ]
+    private static let errors: [String: String] = [
+        "fil": "Hindi mabuksan ang mapa. Suriin ang koneksyon at subukang muli.",
+        "vi": "Không thể tải bản đồ. Kiểm tra kết nối rồi thử lại.",
+        "id": "Peta tidak dapat dimuat. Periksa koneksi lalu coba lagi.",
+        "ms": "Peta tidak dapat dimuat. Semak sambungan dan cuba lagi.",
+        "fr": "Impossible de charger la carte. Vérifiez votre connexion et réessayez.",
+        "de": "Die Karte konnte nicht geladen werden. Verbindung prüfen und erneut versuchen.",
+        "hi": "नक्शा लोड नहीं हो सका। इंटरनेट कनेक्शन जाँचें और फिर कोशिश करें।",
+        "it": "Impossibile caricare la mappa. Controlla la connessione e riprova.",
+        "es": "No se pudo cargar el mapa. Comprueba la conexión e inténtalo de nuevo.",
+        "ru": "Не удалось загрузить карту. Проверьте подключение и попробуйте снова.",
+        "nl": "De kaart kon niet worden geladen. Controleer uw verbinding en probeer opnieuw.",
+        "pt": "Não foi possível carregar o mapa. Confira sua conexão e tente novamente.",
+        "sv": "Kartan kunde inte laddas. Kontrollera anslutningen och försök igen.",
+        "mn": "Газрын зураг ачаалагдсангүй. Холболтоо шалгаад дахин оролдоно уу.",
+        "ar": "تعذر تحميل الخريطة. تحقق من الاتصال وحاول مجددًا.",
+        "tr": "Harita yüklenemedi. Bağlantınızı kontrol edip tekrar deneyin.",
+        "pl": "Nie można wczytać mapy. Sprawdź połączenie i spróbuj ponownie.",
+        "my": "မြေပုံကို မဖွင့်နိုင်ပါ။ အင်တာနက်ချိတ်ဆက်မှုကို စစ်ဆေးပြီး ထပ်မံကြိုးစားပါ။",
+        "ne": "नक्सा लोड गर्न सकिएन। इन्टरनेट जडान जाँचेर फेरि प्रयास गर्नुहोस्।",
+        "si": "සිතියම පූරණය කළ නොහැකි විය. සම්බන්ධතාව පරීක්ෂා කර නැවත උත්සාහ කරන්න.",
+        "da": "Kortet kunne ikke indlæses. Kontrollér forbindelsen, og prøv igen.",
+        "fi": "Karttaa ei voitu ladata. Tarkista verkkoyhteys ja yritä uudelleen.",
+        "no": "Kartet kunne ikke lastes. Sjekk tilkoblingen og prøv igjen.",
+        "km": "មិនអាចផ្ទុកផែនទីបានទេ។ សូមពិនិត្យការតភ្ជាប់ ហើយព្យាយាមម្តងទៀត។",
+        "he": "לא ניתן לטעון את המפה. בדקו את החיבור ונסו שוב.",
+        "cs": "Mapu se nepodařilo načíst. Zkontrolujte připojení a zkuste to znovu.",
+        "el": "Δεν ήταν δυνατή η φόρτωση του χάρτη. Ελέγξτε τη σύνδεση και δοκιμάστε ξανά.",
+        "ro": "Harta nu s-a putut încărca. Verificați conexiunea și încercați din nou.",
+        "hu": "Nem sikerült betölteni a térképet. Ellenőrizze a kapcsolatot, majd próbálja újra.",
+        "bn": "মানচিত্র লোড করা যায়নি। সংযোগ পরীক্ষা করে আবার চেষ্টা করুন।",
+        "ur": "نقشہ لوڈ نہیں ہو سکا۔ انٹرنیٹ کنکشن چیک کریں اور دوبارہ کوشش کریں۔",
+        "uk": "Не вдалося завантажити карту. Перевірте з’єднання та повторіть спробу.",
+        "hr": "Karta se nije mogla učitati. Provjerite vezu i pokušajte ponovno."
+    ]
+    static func note(_ language: GuideLanguage) -> String {
+        notes[language.rawValue] ?? "Check the route and travel time in Google Maps."
+    }
+    static func time(_ language: GuideLanguage) -> String {
+        times[language.rawValue] ?? "See time in Google Maps ↗"
+    }
+    static func retry(_ language: GuideLanguage) -> String {
+        retries[language.rawValue] ?? "Retry"
+    }
+    static func error(_ language: GuideLanguage) -> String {
+        errors[language.rawValue] ?? "The map could not load. Check your connection and retry."
+    }
+}
+
+// Frequently used booking and navigation controls must not silently show
+// English for the 33 additional visitor languages. Fully localized guide
+// instructions and map links use the same GuideLanguage country selection.
+private enum VisitorActionCopy {
+    private static let values: [String: [String]] = [
+        "fil": ["Susunod", "Bumalik", "Maghanap ng hotel", "Maghanap ng tanghalian", "Maghanap ng hapunan", "Piliin ang hotel na ito", "Piliin ang tanghalian", "Piliin ang hapunan", "Mapa"],
+        "vi": ["Tiếp theo", "Quay lại", "Tìm khách sạn", "Tìm bữa trưa", "Tìm bữa tối", "Chọn khách sạn này", "Chọn bữa trưa", "Chọn bữa tối", "Bản đồ"],
+        "id": ["Berikutnya", "Kembali", "Cari hotel", "Cari makan siang", "Cari makan malam", "Pilih hotel ini", "Pilih makan siang", "Pilih makan malam", "Peta"],
+        "ms": ["Seterusnya", "Kembali", "Cari hotel", "Cari makan tengah hari", "Cari makan malam", "Pilih hotel ini", "Pilih makan tengah hari", "Pilih makan malam", "Peta"],
+        "fr": ["Suivant", "Précédent", "Chercher un hôtel", "Chercher un déjeuner", "Chercher un dîner", "Choisir cet hôtel", "Choisir le déjeuner", "Choisir le dîner", "Carte"],
+        "de": ["Weiter", "Zurück", "Hotel suchen", "Mittagessen suchen", "Abendessen suchen", "Dieses Hotel wählen", "Mittagessen wählen", "Abendessen wählen", "Karte"],
+        "hi": ["आगे", "पीछे", "होटल खोजें", "दोपहर का भोजन खोजें", "रात का भोजन खोजें", "यह होटल चुनें", "दोपहर का भोजन चुनें", "रात का भोजन चुनें", "मानचित्र"],
+        "it": ["Avanti", "Indietro", "Cerca hotel", "Cerca pranzo", "Cerca cena", "Scegli questo hotel", "Scegli il pranzo", "Scegli la cena", "Mappa"],
+        "es": ["Siguiente", "Anterior", "Buscar hotel", "Buscar almuerzo", "Buscar cena", "Elegir este hotel", "Elegir almuerzo", "Elegir cena", "Mapa"],
+        "ru": ["Далее", "Назад", "Найти отель", "Найти обед", "Найти ужин", "Выбрать этот отель", "Выбрать обед", "Выбрать ужин", "Карта"],
+        "nl": ["Volgende", "Terug", "Hotel zoeken", "Lunch zoeken", "Diner zoeken", "Dit hotel kiezen", "Lunch kiezen", "Diner kiezen", "Kaart"],
+        "pt": ["Próximo", "Voltar", "Buscar hotel", "Buscar almoço", "Buscar jantar", "Escolher este hotel", "Escolher almoço", "Escolher jantar", "Mapa"],
+        "sv": ["Nästa", "Tillbaka", "Sök hotell", "Sök lunch", "Sök middag", "Välj detta hotell", "Välj lunch", "Välj middag", "Karta"],
+        "mn": ["Дараах", "Буцах", "Зочид буудал хайх", "Өдрийн хоол хайх", "Оройн хоол хайх", "Энэ буудлыг сонгох", "Өдрийн хоол сонгох", "Оройн хоол сонгох", "Газрын зураг"],
+        "ar": ["التالي", "رجوع", "البحث عن فندق", "البحث عن غداء", "البحث عن عشاء", "اختيار هذا الفندق", "اختيار الغداء", "اختيار العشاء", "الخريطة"],
+        "tr": ["İleri", "Geri", "Otel ara", "Öğle yemeği ara", "Akşam yemeği ara", "Bu oteli seç", "Öğle yemeğini seç", "Akşam yemeğini seç", "Harita"],
+        "pl": ["Dalej", "Wstecz", "Szukaj hotelu", "Szukaj obiadu", "Szukaj kolacji", "Wybierz ten hotel", "Wybierz obiad", "Wybierz kolację", "Mapa"],
+        "my": ["ရှေ့သို့", "နောက်သို့", "ဟိုတယ်ရှာရန်", "နေ့လယ်စာရှာရန်", "ညစာရှာရန်", "ဤဟိုတယ်ကို ရွေးရန်", "နေ့လယ်စာရွေးရန်", "ညစာရွေးရန်", "မြေပုံ"],
+        "ne": ["अर्को", "पछाडि", "होटल खोज्नुहोस्", "दिउँसोको खाना खोज्नुहोस्", "बेलुकाको खाना खोज्नुहोस्", "यो होटल छान्नुहोस्", "दिउँसोको खाना छान्नुहोस्", "बेलुकाको खाना छान्नुहोस्", "नक्सा"],
+        "si": ["ඊළඟ", "ආපසු", "හෝටල් සොයන්න", "දිවා ආහාරය සොයන්න", "රාත්‍රී ආහාරය සොයන්න", "මෙම හෝටලය තෝරන්න", "දිවා ආහාරය තෝරන්න", "රාත්‍රී ආහාරය තෝරන්න", "සිතියම"],
+        "da": ["Næste", "Tilbage", "Find hotel", "Find frokost", "Find aftensmad", "Vælg dette hotel", "Vælg frokost", "Vælg aftensmad", "Kort"],
+        "fi": ["Seuraava", "Takaisin", "Etsi hotelli", "Etsi lounas", "Etsi illallinen", "Valitse tämä hotelli", "Valitse lounas", "Valitse illallinen", "Kartta"],
+        "no": ["Neste", "Tilbake", "Finn hotell", "Finn lunsj", "Finn middag", "Velg dette hotellet", "Velg lunsj", "Velg middag", "Kart"],
+        "km": ["បន្ទាប់", "ត្រឡប់ក្រោយ", "ស្វែងរកសណ្ឋាគារ", "ស្វែងរកអាហារថ្ងៃត្រង់", "ស្វែងរកអាហារពេលល្ងាច", "ជ្រើសសណ្ឋាគារនេះ", "ជ្រើសអាហារថ្ងៃត្រង់", "ជ្រើសអាហារពេលល្ងាច", "ផែនទី"],
+        "he": ["הבא", "חזרה", "חיפוש מלון", "חיפוש ארוחת צהריים", "חיפוש ארוחת ערב", "בחר במלון הזה", "בחר ארוחת צהריים", "בחר ארוחת ערב", "מפה"],
+        "cs": ["Další", "Zpět", "Najít hotel", "Najít oběd", "Najít večeři", "Vybrat tento hotel", "Vybrat oběd", "Vybrat večeři", "Mapa"],
+        "el": ["Επόμενο", "Πίσω", "Αναζήτηση ξενοδοχείου", "Αναζήτηση μεσημεριανού", "Αναζήτηση δείπνου", "Επιλογή ξενοδοχείου", "Επιλογή μεσημεριανού", "Επιλογή δείπνου", "Χάρτης"],
+        "ro": ["Înainte", "Înapoi", "Caută hotel", "Caută prânz", "Caută cină", "Alege acest hotel", "Alege prânzul", "Alege cina", "Hartă"],
+        "hu": ["Következő", "Vissza", "Szálloda keresése", "Ebéd keresése", "Vacsora keresése", "Szálloda kiválasztása", "Ebéd kiválasztása", "Vacsora kiválasztása", "Térkép"],
+        "bn": ["পরবর্তী", "পিছনে", "হোটেল খুঁজুন", "দুপুরের খাবার খুঁজুন", "রাতের খাবার খুঁজুন", "এই হোটেলটি বেছে নিন", "দুপুরের খাবার বেছে নিন", "রাতের খাবার বেছে নিন", "মানচিত্র"],
+        "ur": ["اگلا", "واپس", "ہوٹل تلاش کریں", "دوپہر کا کھانا تلاش کریں", "رات کا کھانا تلاش کریں", "یہ ہوٹل منتخب کریں", "دوپہر کا کھانا منتخب کریں", "رات کا کھانا منتخب کریں", "نقشہ"],
+        "uk": ["Далі", "Назад", "Знайти готель", "Знайти обід", "Знайти вечерю", "Обрати цей готель", "Обрати обід", "Обрати вечерю", "Мапа"],
+        "hr": ["Dalje", "Natrag", "Pronađi hotel", "Pronađi ručak", "Pronađi večeru", "Odaberi ovaj hotel", "Odaberi ručak", "Odaberi večeru", "Karta"]
+    ]
+    private static let order = ["next", "previous", "findHotels", "findLunch", "findDinner", "chooseThisHotel", "selectLunch", "selectDinner", "map"]
+    static func text(_ key: String, language: GuideLanguage) -> String? {
+        guard let words = values[language.rawValue],
+              let index = order.firstIndex(of: key),
+              index < words.count else { return nil }
+        return words[index]
+    }
+}
+
 private enum VisitorCopy {
     static func show(_ value: String, language: GuideLanguage) -> String {
         guard language == .zht else { return value }
@@ -3738,10 +4069,10 @@ private struct PlannerInstructionsView: View {
 
 private enum PlannerInstructions {
     static func buttonTitle(_ language: GuideLanguage) -> String {
-        ["ja":"使い方", "ko":"사용 방법", "zh":"使用指南", "zht":"使用指南", "en":"Guide", "th":"คู่มือ", "fr":"Guide", "de":"Anleitung", "es":"Guía", "it":"Guida", "pt":"Guia", "hi":"मार्गदर्शिका", "vi":"Hướng dẫn", "id":"Panduan", "ms":"Panduan", "fil":"Gabay", "ru":"Инструкция", "nl":"Handleiding", "tr":"Kılavuz", "pl":"Instrukcja", "ar":"دليل", "my":"လမ်းညွှန်", "ne":"मार्गदर्शन", "si":"මාර්ගෝපදේශය", "km":"មគ្គុទេសក៍", "he":"מדריך", "uk":"Посібник"][language.rawValue] ?? "Guide"
+        ["ja":"使い方", "ko":"사용 방법", "zh":"使用指南", "zht":"使用指南", "en":"Guide", "th":"คู่มือ", "fr":"Guide", "de":"Anleitung", "es":"Guía", "it":"Guida", "pt":"Guia", "hi":"मार्गदर्शिका", "vi":"Hướng dẫn", "id":"Panduan", "ms":"Panduan", "fil":"Gabay", "ru":"Инструкция", "nl":"Handleiding", "tr":"Kılavuz", "pl":"Instrukcja", "ar":"دليل", "my":"လမ်းညွှန်", "ne":"मार्गदर्शन", "si":"මාර්ගෝපදේශය", "km":"មគ្គុទេសក៍", "he":"מדריך", "uk":"Посібник", "sv":"Guide", "mn":"Заавар", "da":"Vejledning", "fi":"Ohje", "no":"Veiledning", "cs":"Návod", "el":"Οδηγός", "ro":"Ghid", "hu":"Útmutató", "bn":"নির্দেশিকা", "ur":"رہنمائی", "hr":"Vodič"][language.rawValue] ?? "Guide"
     }
     static func closeTitle(_ language: GuideLanguage) -> String {
-        ["ja":"閉じる", "ko":"닫기", "zh":"关闭", "zht":"關閉", "en":"Close", "th":"ปิด", "fr":"Fermer", "de":"Schließen", "es":"Cerrar", "it":"Chiudi", "pt":"Fechar", "hi":"बंद करें", "vi":"Đóng", "id":"Tutup", "ms":"Tutup", "fil":"Isara", "ru":"Закрыть", "nl":"Sluiten", "tr":"Kapat", "pl":"Zamknij", "ar":"إغلاق", "my":"ပိတ်ရန်", "ne":"बन्द", "si":"වසන්න", "km":"បិទ", "he":"סגירה", "uk":"Закрити"][language.rawValue] ?? "Close"
+        ["ja":"閉じる", "ko":"닫기", "zh":"关闭", "zht":"關閉", "en":"Close", "th":"ปิด", "fr":"Fermer", "de":"Schließen", "es":"Cerrar", "it":"Chiudi", "pt":"Fechar", "hi":"बंद करें", "vi":"Đóng", "id":"Tutup", "ms":"Tutup", "fil":"Isara", "ru":"Закрыть", "nl":"Sluiten", "tr":"Kapat", "pl":"Zamknij", "ar":"إغلاق", "my":"ပိတ်ရန်", "ne":"बन्द", "si":"වසන්න", "km":"បិទ", "he":"סגירה", "uk":"Закрити", "sv":"Stäng", "mn":"Хаах", "da":"Luk", "fi":"Sulje", "no":"Lukk", "cs":"Zavřít", "el":"Κλείσιμο", "ro":"Închide", "hu":"Bezárás", "bn":"বন্ধ করুন", "ur":"بند کریں", "hr":"Zatvori"][language.rawValue] ?? "Close"
     }
     static func sections(_ language: GuideLanguage) -> [(String, String)] {
         switch language {
@@ -5355,7 +5686,8 @@ private struct OriginalCourseView: View {
     @State private var presentedMap: PlannerMapRequest?
 
     private func t(_ key: String) -> String {
-        VisitorCopy.show(OriginalCourseText.get(key, language), language: language)
+        if let translated = VisitorActionCopy.text(key, language: language) { return translated }
+        return VisitorCopy.show(OriginalCourseText.get(key, language), language: language)
     }
     private func clock(_ minutes: Int) -> String {
         String(format: "%02d:%02d", (minutes / 60) % 24, minutes % 60)
@@ -5423,6 +5755,17 @@ private struct OriginalCourseView: View {
         .onAppear {
             guard !loaded else { return }
             loaded = true
+            // Keep the saved custom itinerary as a draft, but none of the old
+            // candidate search results, route times or open map sessions.
+            candidates = [:]
+            times = [:]
+            nearbyResults = []
+            nearbyAnchor = nil
+            nearbySearching = false
+            nearbyError = nil
+            nearbySearchID = UUID()
+            routeCalculationID = UUID()
+            presentedMap = nil
             if let data = savedCourse.data(using: .utf8), let decoded = try? JSONDecoder().decode([OriginalStop].self, from: data),
                decoded.count >= 2, decoded.first?.kind == "hotel", decoded.last?.kind == "return" { stops = decoded }
         }
@@ -5837,7 +6180,13 @@ private enum PlannerMapText {
         "note": ["選択言語で地図を読み込みます。地名・店舗名は現地表記が残る場合があります。", "선택한 언어로 지도를 요청합니다. 지명·상호는 현지 언어로 남을 수 있습니다.", "以所选语言加载地图；部分地名与店名可能保留当地文字。", "The map is requested in your chosen language. Some place and business names may remain in the local language.", "โหลดแผนที่ตามภาษาที่เลือก ชื่อสถานที่และร้านบางแห่งอาจยังเป็นภาษาท้องถิ่น"]
     ]
     static func text(_ key: String, _ language: GuideLanguage) -> String {
-        VisitorCopy.show(values[key]?[language.index] ?? key, language: language)
+        if key == "close" { return PlannerInstructions.closeTitle(language) }
+        if key == "retry" { return TravelMapCopy.retry(language) }
+        if key == "external" { return TravelMapCopy.time(language) }
+        if key == "note" { return TravelMapCopy.note(language) }
+        if key == "loading" { return "Google Maps…" }
+        if key == "error" { return TravelMapCopy.error(language) }
+        return VisitorCopy.show(values[key]?[language.index] ?? key, language: language)
     }
 }
 
