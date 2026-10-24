@@ -2254,8 +2254,9 @@ private struct PlannerView: View {
     private func travelFailureText(mode: String, missingPlace: Bool) -> String {
         hotelTravelText(missingPlace ? "placeUnavailable" : mode == "transit" ? "transitUnavailable" : "unavailable")
     }
-    // Google Maps, not the iPhone app, displays real travel times and routes.
-    // All hotel screens and sightseeing legs share the same link generator.
+    // Verified minutes are displayed in every journey screen. Google Maps remains
+    // a one-tap source of live directions, and unavailable values are never invented.
+    // The hotel, sightseeing, meals and return journey use the same route cards.
     private var hotelTravelSummary: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("\(extra("toFirst")) · \(venueText(selectedVenue(0), 0))")
@@ -2704,16 +2705,15 @@ private struct PlannerView: View {
         parts?.queryItems = [URLQueryItem(name: "api", value: "1"), URLQueryItem(name: "query", value: query)]
         return parts?.url
     }
-    // The route screen NEVER waits for MapKit, Places or Cloud Run. It opens
-    // Google's actual route UI and lets Google Maps display current travel times.
-    // Every itinerary uses this identical implementation, including hotels/meals.
+    // Google Maps links are independent of route lookup. MapKit/Google Routes
+    // provide measured in-app minutes asynchronously, with maps as fallback.
     private var mapDirectionsNote: String {
         switch language {
-        case .ja: return "出発地と目的地をGoogleマップで確認すると、実際の経路と所要時間が表示されます。"
+        case .ja: return "表示した時間は地図の経路情報に基づく目安です。最新の経路・時刻はGoogleマップで確認できます。"
         case .ko: return "Google 지도에서 출발지와 목적지를 확인하면 경로와 소요 시간이 표시됩니다."
         case .zh, .zht: return "在 Google 地图中确认起终点并查看路线及所需时间。"
         case .th: return "ตรวจสอบต้นทาง ปลายทาง เส้นทางและเวลาเดินทางใน Google Maps"
-        default: return "Google Maps shows the route and travel time. Check the start and destination."
+        default: return "Travel times are based on mapped routes. Check Google Maps for live directions and schedules."
         }
     }
     private var mapTimeLabel: String {
@@ -2725,19 +2725,42 @@ private struct PlannerView: View {
         default: return "See time on map ↗"
         }
     }
+    private var routeLoadingLabel: String {
+        switch language {
+        case .ja: return "取得中…"
+        case .ko: return "조회 중…"
+        case .zh, .zht: return "查询中…"
+        case .th: return "กำลังโหลด…"
+        default: return "Loading…"
+        }
+    }
+    // Triggered by the SAME shared view in hotel, every sightseeing transfer,
+    // lunch, dinner and the way back. State is keyed by the exact endpoint pair.
     private func routeLinks(origin: String?, destination: String) -> some View {
         let internalWalk = isInternalSiteTransfer(origin: origin, destination: destination)
+        let key = routeLegKey(origin: origin, destination: destination)
+        let verified = routeLegTimes[key] ?? [:]
+        let loading = routeLegLoading.contains(key)
+        let shortWalk = routeLegShortWalk.contains(key)
         return VStack(alignment: .leading, spacing: 10) {
-            if !internalWalk, let url = mapURL(origin: origin, destination: destination, mode: "transit") {
-                timedRouteLink(extra("transitRoute"), url: url, systemImage: "tram.fill", mode: "transit")
+            if !internalWalk && !shortWalk,
+               let url = mapURL(origin: origin, destination: destination, mode: "transit") {
+                timedRouteLink(extra("transitRoute"), url: url, systemImage: "tram.fill", mode: "transit",
+                               verifiedTime: verified["transit"], loading: loading)
             }
             if let url = mapURL(origin: origin, destination: destination, mode: "walking") {
-                timedRouteLink(extra("walkRoute"), url: url, systemImage: "figure.walk", mode: "walking")
+                timedRouteLink(extra("walkRoute"), url: url, systemImage: "figure.walk", mode: "walking",
+                               verifiedTime: verified["walking"], loading: loading)
             }
-            if !internalWalk, let url = mapURL(origin: origin, destination: destination, mode: "driving") {
-                timedRouteLink(extra("driveRoute"), url: url, systemImage: "car.fill", mode: "taxi")
+            if !internalWalk && !shortWalk,
+               let url = mapURL(origin: origin, destination: destination, mode: "driving") {
+                timedRouteLink(extra("driveRoute"), url: url, systemImage: "car.fill", mode: "taxi",
+                               verifiedTime: verified["taxi"], loading: loading)
             }
             Text(mapDirectionsNote).font(.caption).foregroundStyle(.secondary)
+            if let diagnostic = routeLegDiagnostics[key], verified.isEmpty {
+                Text(diagnostic).font(.caption).foregroundStyle(PlannerTheme.amber)
+            }
             if internalWalk {
                 Text(hotelTravelText("siteWalk")).font(.caption).foregroundStyle(PlannerTheme.amber)
             }
@@ -2746,6 +2769,10 @@ private struct PlannerView: View {
                     routePlaceControls(origin: origin, destination: destination)
                 }.font(.caption).foregroundStyle(PlannerTheme.cyan)
             }
+        }
+        .task(id: key) {
+            guard let origin, !origin.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+            await updateRouteLegTimes(origin: origin, destination: destination, key: key)
         }
     }
     private func routePlaceControls(origin: String, destination: String) -> some View {
@@ -2790,15 +2817,18 @@ private struct PlannerView: View {
     private func routeLegKey(origin: String?, destination: String) -> String {
         "\(route.id)|\(origin ?? "")|\(destination)|\(startMinutes)|\(routePlaceRevision)"
     }
-    private func timedRouteLink(_ title: String, url: URL, systemImage: String, mode: String) -> some View {
+    private func timedRouteLink(_ title: String, url: URL, systemImage: String, mode: String,
+                                verifiedTime: TravelTime?, loading: Bool) -> some View {
         let accent = mode == "walking" ? PlannerTheme.coral : mode == "taxi" ? PlannerTheme.amber : PlannerTheme.cyan
+        let subtitle = verifiedTime.map { travelTimeText($0) } ?? (loading ? routeLoadingLabel : mapTimeLabel)
         return Link(destination: localizedMapURL(url)) {
             HStack(spacing: 8) {
                 Image(systemName: systemImage).font(.headline)
                     .frame(width: 36, height: 36)
                     .background(accent.opacity(0.15), in: Circle())
                 Text(title).frame(maxWidth: .infinity, alignment: .leading)
-                Text(mapTimeLabel).font(.caption.bold())
+                Text(subtitle).font(verifiedTime == nil ? .caption.bold() : .headline.bold())
+                    .monospacedDigit()
                     .fixedSize(horizontal: false, vertical: true)
                     .multilineTextAlignment(.trailing)
                 Image(systemName: "arrow.up.right.square").font(.caption)
@@ -4991,6 +5021,9 @@ private struct OriginalCourseView: View {
             if loaded, let data = try? JSONEncoder().encode(updated), let value = String(data: data, encoding: .utf8) { savedCourse = value }
         }
         .task(id: searchKey) { await searchPlaces() }
+        // This calculation was previously defined but NEVER called, so all
+        // original-course transfer cards remained stuck on "Check time on map".
+        .task(id: routeKey) { await calculateRoutes() }
     }
 
     private func stopCard(_ index: Int) -> some View {
@@ -5221,7 +5254,12 @@ private struct OriginalCourseView: View {
                                 Image(systemName: mode == "walking" ? "figure.walk" : mode == "taxi" ? "car.fill" : "tram.fill")
                                 Text(t(mode == "walking" ? "walk" : mode))
                                 Spacer()
-                                Text(t("checkTransit")).font(.caption)
+                                if let verifiedTime = times[legKey(index)]?[mode] {
+                                    Text("\(verifiedTime.minutes) \(t("minutes"))")
+                                        .font(.headline.bold()).monospacedDigit()
+                                } else {
+                                    Text(t("checkTransit")).font(.caption)
+                                }
                                 Image(systemName: "arrow.up.right.square")
                             }.font(.subheadline)
                         }
