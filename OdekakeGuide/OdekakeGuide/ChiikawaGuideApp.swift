@@ -1,8 +1,9 @@
-// Japan Day Planner — GOOGLE_MAPS_LINK_FIRST_20261024.
-// Each travel leg opens Google Maps directions and its live travel time directly.
-// No travel-time calculation, geocoding gate or Cloud Run routing request is
-// required just to display a transfer button. Existing sightseeing content,
-// accommodation discovery and language options are preserved.
+// Japan Day Planner — PLACE_IDENTITY_AND_MAP_ROUTE_20261024.
+// Route durations are never synthesized: they are obtained from Apple Maps
+// or a verified Google Routes response for confirmed origin/destination pairs.
+// Official addresses and vetted landmark anchors are resolved before routing.
+// Google Maps directions remain directly accessible if a route is unavailable.
+// Multilingual sightseeing, hotel and original-course content are preserved.
 import SwiftUI
 import UIKit
 import Foundation
@@ -435,6 +436,16 @@ private enum UniversalPlaceResolver {
         if let direct = coordinate(text) {
             return MKMapItem(placemark: MKPlacemark(coordinate: direct))
         }
+        // Hotels often have a valid street address but a map provider uses an
+        // abbreviated hotel label. Geocode the supplied street number directly;
+        // this avoids rejecting a correct address on a POI-name mismatch.
+        if let street = ([text] + alternatives).first(where: { candidate in
+            candidate.range(of: #"[0-9０-９]+[-－−ー番丁目][0-9０-９]+"#,
+                            options: .regularExpression) != nil
+        }), let addressed = await addressLocation(street, name: text,
+                    prefecture: prefecture, near: center) {
+            return addressed
+        }
         let placeName = text.components(separatedBy: ",").first?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? text
         var names = [placeName] + alternatives.filter { !$0.isEmpty }
@@ -456,6 +467,34 @@ private enum UniversalPlaceResolver {
             confirmed[cacheKey] = result
         }
         return result
+    }
+
+    // An address is a different kind of identity from a POI name. Only use an
+    // actual numbered address, validate its prefecture/country, and reject a
+    // geocoder result hundreds of kilometres away. No city-centre substitution.
+    private static func addressLocation(_ street: String, name: String,
+                                        prefecture: String?,
+                                        near center: CLLocationCoordinate2D?) async -> MKMapItem? {
+        let geocoder = CLGeocoder()
+        guard let candidates = try? await geocoder.geocodeAddressString(street),
+              !Task.isCancelled else { return nil }
+        let vetted = candidates.compactMap { place -> CLLocationCoordinate2D? in
+            guard let coordinate = place.location?.coordinate,
+                  valid(coordinate),
+                  place.isoCountryCode == nil || place.isoCountryCode == "JP" else { return nil }
+            if let prefecture, let admin = place.administrativeArea,
+               !admin.isEmpty, admin != prefecture,
+               !admin.contains(prefecture), !prefecture.contains(admin) { return nil }
+            if let center, metres(center, coordinate) > 180_000 { return nil }
+            // A numbered street address must not collapse to a prefecture- or
+            // city-only result in which all businesses share one false point.
+            guard place.thoroughfare != nil || place.subThoroughfare != nil else { return nil }
+            return coordinate
+        }
+        guard vetted.count == 1, let point = vetted.first else { return nil }
+        let item = MKMapItem(placemark: MKPlacemark(coordinate: point))
+        item.name = name.components(separatedBy: ",").first
+        return item
     }
 
     private static func lookup(text: String, names: [String], prefecture: String?,
@@ -582,19 +621,35 @@ private enum NativeMapDirections {
         case "taxi": request.transportType = .automobile
         default: request.transportType = .transit
         }
-        // A route card needs a verified travel time, not all turn-by-turn steps.
-        // Apple's dedicated ETA API is faster than calculating full directions.
+        // ETA is faster, but in some regions it fails even when full
+        // Apple Maps directions can be computed. Use real routed path duration
+        // as a fallback, never a straight-line speed estimate.
         let directions = MKDirections(request: request)
-        guard !Task.isCancelled,
-              let eta = try? await withTaskCancellationHandler(operation: {
-                  try await directions.calculateETA()
-              }, onCancel: { directions.cancel() }),
-              eta.transportType == request.transportType,
-              eta.expectedTravelTime.isFinite, eta.expectedTravelTime > 0,
-              eta.distance.isFinite, eta.distance >= 0 else { return nil }
-        let minutes = Int(ceil(eta.expectedTravelTime / 60))
+        guard !Task.isCancelled else { return nil }
+        if let eta = try? await withTaskCancellationHandler(operation: {
+            try await directions.calculateETA()
+        }, onCancel: { directions.cancel() }),
+           eta.transportType == request.transportType,
+           eta.expectedTravelTime.isFinite, eta.expectedTravelTime > 0,
+           eta.distance.isFinite, eta.distance >= 0 {
+            let minutes = Int(ceil(eta.expectedTravelTime / 60))
+            if minutes > 0 && minutes < 10_000 {
+                return TravelTime(minutes: minutes, isApproximate: false, routeMetres: eta.distance)
+            }
+        }
+        guard !Task.isCancelled else { return nil }
+        let retry = MKDirections(request: request)
+        guard let response = try? await withTaskCancellationHandler(operation: {
+            try await retry.calculate()
+        }, onCancel: { retry.cancel() }) else { return nil }
+        guard let mapped = response.routes.first(where: {
+            $0.transportType == request.transportType &&
+            $0.expectedTravelTime.isFinite && $0.expectedTravelTime > 0 &&
+            $0.distance.isFinite && $0.distance >= 0
+        }) else { return nil }
+        let minutes = Int(ceil(mapped.expectedTravelTime / 60))
         guard minutes > 0, minutes < 10_000 else { return nil }
-        return TravelTime(minutes: minutes, isApproximate: false, routeMetres: eta.distance)
+        return TravelTime(minutes: minutes, isApproximate: false, routeMetres: mapped.distance)
     }
 }
 
@@ -1744,6 +1799,11 @@ private struct PlannerView: View {
             return CLLocationCoordinate2D(latitude: 34.665277, longitude: 135.506971)
         case "Katsuoji Temple":
             return CLLocationCoordinate2D(latitude: 34.865736, longitude: 135.491608)
+        case "Minoh Station shopping street":
+            // Representative public point at the verified arcade association,
+            // NOT the station platform or an unrelated city centre.
+            // MapFan: みのお本通り商店街振興組合 (箕面6-1-15).
+            return CLLocationCoordinate2D(latitude: 34.8333154, longitude: 135.4688653)
         case "Kiyomizu-dera Temple":
             return CLLocationCoordinate2D(latitude: 34.995317, longitude: 135.783285)
         case "Otagi Nenbutsuji Temple":
@@ -1876,7 +1936,18 @@ private struct PlannerView: View {
         }
         // The same resolver is used for every region and every stop. No
         // per-city coordinate patches or blind first-match selection.
-        var alternatives = [venue.name]
+        var alternatives: [String] = []
+        // Featured route descriptions are not necessarily registered place
+        // names. The alternative must refer to the SAME public destination.
+        // Never use the nearest unrelated station or prefecture centre.
+        switch venue.name {
+        case "Minoh Station shopping street":
+            alternatives.append("みのお本通り商店街")
+        case "Minoh waterfall trail entrance":
+            alternatives.append(contentsOf: ["一の橋", "箕面公園 一の橋", "箕面公園入口 一の橋"])
+        default: break
+        }
+        alternatives.append(venue.name)
         if let parsed = URLComponents(string: venue.url),
            let query = parsed.queryItems?.first(where: { $0.name == "query" })?.value {
             alternatives.append(query.replacingOccurrences(of: prefecture.ja, with: ""))
@@ -2679,7 +2750,10 @@ private struct PlannerView: View {
         // Japanese names avoid ambiguous translated or romanized businesses.
         let localName = FeaturedRoutes.names[venue.name]?[0] ?? NationwideRoutes.japanesePlaces[venue.name] ?? GuideTranslations.venues[venue.name]?[0][0] ?? venue.name
         let prefecture = NationwideRoutes.prefectures.first(where: { $0.id == routePrefecture })?.ja ?? "日本"
-        return "\(localName), \(prefecture), Japan"
+        // Official park access defines the trail entrance as 一の橋. This is
+        // more specific than the route's editorial name 箕面滝道入口.
+        let mapName = venue.name == "Minoh waterfall trail entrance" ? "箕面公園 一の橋" : localName
+        return "\(mapName), \(prefecture), Japan"
     }
     // Official Google Maps URL format. Place names remain usable even when
     // Apple/Google Places name lookup or our Cloud Run service is unavailable.
