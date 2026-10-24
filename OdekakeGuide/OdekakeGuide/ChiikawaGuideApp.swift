@@ -1,6 +1,8 @@
-// Japan Day Planner — route and place lookup recovery.
-// Shared Google Routes + independent native-map fallback for all journey screens.
-// Existing multilingual and sightseeing content is kept intact.
+// Japan Day Planner — GOOGLE_MAPS_LINK_FIRST_20261024.
+// Each travel leg opens Google Maps directions and its live travel time directly.
+// No travel-time calculation, geocoding gate or Cloud Run routing request is
+// required just to display a transfer button. Existing sightseeing content,
+// accommodation discovery and language options are preserved.
 import SwiftUI
 import UIKit
 import Foundation
@@ -944,7 +946,6 @@ private struct PlannerView: View {
     @State private var selectingRoutePlace: RoutePlaceSelection?
     @State private var routePlaceRevision = 0
     @State private var hotelResults: [HotelSuggestion] = []
-    @State private var hotelDriveMinutes: [String: Int] = [:]
     @State private var hotelSearching = false
     @State private var hotelSearchError = false
     @State private var hotelSearchID = UUID()
@@ -1602,9 +1603,7 @@ private struct PlannerView: View {
     private func journeyLink(_ title: String, url: URL, systemImage: String = "magnifyingglass") -> some View {
         Group {
             if isMapURL(url) {
-                Button {
-                    presentedMap = PlannerMapRequest(url: localizedMapURL(url), title: title)
-                } label: {
+                Link(destination: localizedMapURL(url)) {
                     journeyLinkLabel(title, systemImage: systemImage)
                 }.buttonStyle(.plain)
             } else {
@@ -1662,10 +1661,6 @@ private struct PlannerView: View {
                 VStack(alignment: .leading, spacing: 10) {
                     Text(hotel.name).font(.headline)
                     Text(hotel.address).font(.subheadline).foregroundStyle(.secondary)
-                    if let eta = hotelDriveMinutes[hotel.id] {
-                        Text("\(hotelTravelText("taxi")) · \(travelDurationText(eta))")
-                            .font(.caption.bold()).foregroundStyle(PlannerTheme.amber)
-                    }
                     if hotel.distance < 0 {
                         Text(hotelTravelText("registeredStay")).font(.caption).foregroundStyle(.secondary)
                     }
@@ -1678,7 +1673,7 @@ private struct PlannerView: View {
                     if isSelected {
                         hotelTravelSummary
                             .id("selectedHotelTravel")
-                            .task(id: hotelTravelKey) { await updateHotelTravelTimesWithRetry() }
+
                     }
                 }
                 .padding(12)
@@ -1688,7 +1683,7 @@ private struct PlannerView: View {
             if hotelChoice == "suggested", let hotel = selectedSuggestedHotel, !selectedSearchedHotelVisible {
                 Text(hotelTravelText("selectedHotel")).font(.caption).foregroundStyle(journeyGold)
                 visibleChoice(hotel.name, selected: true) { saveHotelValue("suggested") }
-                hotelTravelSummary.task(id: hotelTravelKey) { await updateHotelTravelTimesWithRetry() }
+                hotelTravelSummary
                 Text(hotel.address).font(.subheadline).foregroundStyle(.secondary)
                 if let url = hotel.website.flatMap(URL.init(string:)) { translatedGuideLink(extra("rate"), url: url) }
                 if let url = locationURL(hotel.query) { journeyLink(extra("hotelMap"), url: url, systemImage: "mappin.and.ellipse") }
@@ -1703,7 +1698,7 @@ private struct PlannerView: View {
                     .textFieldStyle(.roundedBorder)
                 Text(journeyText("hotelInputNote")).font(.footnote).foregroundStyle(.secondary)
                 if !hotelQuery.isEmpty {
-                    hotelTravelSummary.task(id: hotelTravelKey) { await updateHotelTravelTimesWithRetry() }
+                    hotelTravelSummary
                 }
             }
             Text(hotelTravelText("afterChoosing"))
@@ -2059,7 +2054,6 @@ private struct PlannerView: View {
         hotelSearchID = token
         hotelSearching = true
         hotelSearchError = false
-        hotelDriveMinutes = [:]
         // Never offer a prefecture-wide hotel as the closest one. A hotel's
         // coordinates must be known before it is a selectable nearby result.
         hotelResults = knownLocalHotelFallbacks(near: pinnedFirstVenueCoordinate)
@@ -2215,24 +2209,10 @@ private struct PlannerView: View {
                 }
                 hotelSearching = false
                 hotelSearchError = hotelResults.isEmpty
-                // Do not rank mountain inns only by straight-line distance.
-                // Show the hotels now, then update with genuine driving routes.
-                let visibleHotels = hotelResults
-                for hotel in visibleHotels {
-                    guard hotelSearchID == token, !Task.isCancelled else { return }
-                    let hotelItem = MKMapItem(placemark: MKPlacemark(coordinate:
-                        CLLocationCoordinate2D(latitude: hotel.latitude, longitude: hotel.longitude)))
-                    if let minutes = await SharedTravelEstimator.routeTime(from: hotelItem,
-                        to: first, by: .automobile)?.minutes {
-                        hotelDriveMinutes[hotel.id] = minutes
-                    }
-                }
-                guard hotelSearchID == token, !Task.isCancelled else { return }
-                hotelResults = visibleHotels.sorted { left, right in
-                    let a=hotelDriveMinutes[left.id] ?? Int.max
-                    let b=hotelDriveMinutes[right.id] ?? Int.max
-                    return a == b ? left.distance < right.distance : a < b
-                }
+                // Route times are now supplied by the opened Google Maps directions.
+                // Results are sorted by approximate geographic proximity for search only.
+                // No speculative taxi minutes or network route calculations are requested.
+                hotelResults = Array(hotelResults.sorted { $0.distance < $1.distance }.prefix(5))
             } catch {
                 guard hotelSearchID == token else { return }
                 hotelSearching = false
@@ -2274,50 +2254,13 @@ private struct PlannerView: View {
     private func travelFailureText(mode: String, missingPlace: Bool) -> String {
         hotelTravelText(missingPlace ? "placeUnavailable" : mode == "transit" ? "transitUnavailable" : "unavailable")
     }
+    // Google Maps, not the iPhone app, displays real travel times and routes.
+    // All hotel screens and sightseeing legs share the same link generator.
     private var hotelTravelSummary: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
             Text("\(extra("toFirst")) · \(venueText(selectedVenue(0), 0))")
                 .font(.subheadline.bold()).foregroundStyle(journeyGold)
-            if hotelTravelLoading { ProgressView(hotelTravelText("calculating")) }
-            ForEach(["transit", "walking", "taxi"], id: \.self) { mode in
-                HStack {
-                    Text(hotelTravelText(mode))
-                    Spacer(minLength: 8)
-                    if mode != "walking" && hotelTravelShortWalk {
-                        Text(hotelTravelText("shortWalk"))
-                            .fontWeight(.bold)
-                    } else if let minutes = hotelTravelMinutes[mode] {
-                        Text(travelTimeText(minutes))
-                            .fontWeight(.bold).monospacedDigit()
-                    } else if (mode == "transit" || (mode == "taxi" && !hotelTravelLoading)),
-                              let url = mapURL(origin: hotelQuery,
-                                  destination: venueQuery(selectedVenue(0)),
-                                  mode: mode == "taxi" ? "driving" : "transit") {
-                        Button(hotelTravelText("transitUnavailable")) {
-                            presentedMap = PlannerMapRequest(url: localizedMapURL(url), title: hotelTravelText(mode))
-                        }
-                        .font(.caption.bold())
-                        .foregroundStyle(PlannerTheme.cyan)
-                    } else if !hotelTravelLoading {
-                        Text(travelFailureText(mode: mode, missingPlace: hotelTravelMinutes.isEmpty)).foregroundStyle(.secondary)
-                    }
-                }.font(.subheadline)
-            }
-            Text(hotelTravelText("estimateNote"))
-                .font(.caption).foregroundStyle(.secondary)
-            if let diagnosis = hotelTravelDiagnosis, !diagnosis.isEmpty {
-                Text(language == .ja ? diagnosis : "The travel time could not be confirmed. Check the hotel address and map directions.")
-                    .font(.caption).foregroundStyle(PlannerTheme.amber)
-                routePlaceControls(origin: hotelQuery, destination: venueQuery(selectedVenue(0)))
-            }
-            if !hotelTravelLoading,
-               (hotelTravelMinutes["walking"] == nil ||
-                (!hotelTravelShortWalk && hotelTravelMinutes["taxi"] == nil) ||
-                hotelTravelMinutes.values.contains(where: { $0.isApproximate })) {
-                Button(hotelTravelText("retry")) {
-                    Task { await updateHotelTravelTimes() }
-                }.font(.caption.bold()).foregroundStyle(PlannerTheme.cyan)
-            }
+            routeLinks(origin: hotelQuery, destination: venueQuery(selectedVenue(0)))
         }
         .padding(12)
         .background(PlannerTheme.raised, in: RoundedRectangle(cornerRadius: 12))
@@ -2737,14 +2680,22 @@ private struct PlannerView: View {
         let prefecture = NationwideRoutes.prefectures.first(where: { $0.id == routePrefecture })?.ja ?? "日本"
         return "\(localName), \(prefecture), Japan"
     }
+    // Official Google Maps URL format. Place names remain usable even when
+    // Apple/Google Places name lookup or our Cloud Run service is unavailable.
+    // A user's explicitly selected place is passed as its exact lat/lng.
     private func mapURL(origin: String? = nil, destination: String, mode: String) -> URL? {
-        var parts = URLComponents(string: "https://www.google.com/maps/dir/")
         let target = confirmedRoutePlaces[routePlaceKey(destination)]?.query ?? destination
-        var items = [URLQueryItem(name: "api", value: "1"), URLQueryItem(name: "destination", value: target), URLQueryItem(name: "travelmode", value: mode)]
-        if let origin {
+        guard !target.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        var items: [URLQueryItem] = [
+            URLQueryItem(name: "api", value: "1"),
+            URLQueryItem(name: "destination", value: target),
+            URLQueryItem(name: "travelmode", value: mode)
+        ]
+        if let origin, !origin.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             let source = confirmedRoutePlaces[routePlaceKey(origin)]?.query ?? origin
             items.append(URLQueryItem(name: "origin", value: source))
         }
+        var parts = URLComponents(string: "https://www.google.com/maps/dir/")
         parts?.queryItems = items
         return parts?.url
     }
@@ -2753,74 +2704,47 @@ private struct PlannerView: View {
         parts?.queryItems = [URLQueryItem(name: "api", value: "1"), URLQueryItem(name: "query", value: query)]
         return parts?.url
     }
+    // The route screen NEVER waits for MapKit, Places or Cloud Run. It opens
+    // Google's actual route UI and lets Google Maps display current travel times.
+    // Every itinerary uses this identical implementation, including hotels/meals.
+    private var mapDirectionsNote: String {
+        switch language {
+        case .ja: return "出発地と目的地をGoogleマップで確認すると、実際の経路と所要時間が表示されます。"
+        case .ko: return "Google 지도에서 출발지와 목적지를 확인하면 경로와 소요 시간이 표시됩니다."
+        case .zh, .zht: return "在 Google 地图中确认起终点并查看路线及所需时间。"
+        case .th: return "ตรวจสอบต้นทาง ปลายทาง เส้นทางและเวลาเดินทางใน Google Maps"
+        default: return "Google Maps shows the route and travel time. Check the start and destination."
+        }
+    }
+    private var mapTimeLabel: String {
+        switch language {
+        case .ja: return "地図で時間を確認 ↗"
+        case .ko: return "지도에서 시간 확인 ↗"
+        case .zh, .zht: return "在地图查看时间 ↗"
+        case .th: return "ดูเวลาในแผนที่ ↗"
+        default: return "See time on map ↗"
+        }
+    }
     private func routeLinks(origin: String?, destination: String) -> some View {
-        let key = routeLegKey(origin: origin, destination: destination)
         let internalWalk = isInternalSiteTransfer(origin: origin, destination: destination)
         return VStack(alignment: .leading, spacing: 10) {
-            if !internalWalk && !routeLegShortWalk.contains(key),
-               let url = mapURL(origin: origin, destination: destination, mode: "transit") {
-                timedRouteLink(extra("transitRoute"), url: url, systemImage: "tram.fill", key: key, mode: "transit", canEstimate: origin?.isEmpty == false)
+            if !internalWalk, let url = mapURL(origin: origin, destination: destination, mode: "transit") {
+                timedRouteLink(extra("transitRoute"), url: url, systemImage: "tram.fill", mode: "transit")
             }
             if let url = mapURL(origin: origin, destination: destination, mode: "walking") {
-                timedRouteLink(extra("walkRoute"), url: url, systemImage: "figure.walk", key: key, mode: "walking", canEstimate: origin?.isEmpty == false)
+                timedRouteLink(extra("walkRoute"), url: url, systemImage: "figure.walk", mode: "walking")
             }
+            if !internalWalk, let url = mapURL(origin: origin, destination: destination, mode: "driving") {
+                timedRouteLink(extra("driveRoute"), url: url, systemImage: "car.fill", mode: "taxi")
+            }
+            Text(mapDirectionsNote).font(.caption).foregroundStyle(.secondary)
             if internalWalk {
                 Text(hotelTravelText("siteWalk")).font(.caption).foregroundStyle(PlannerTheme.amber)
-                Text(language == .ja ? "同じ施設内の散策です。移動を滞在時間に含め、電車・タクシーの架空の分数を表示しません。" :
-                    "This is a walk within the same site, included in sightseeing time; no invented train or taxi duration.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-            if routeLegShortWalk.contains(key) {
-                Text(hotelTravelText("shortWalk")).font(.caption.bold()).foregroundStyle(PlannerTheme.coral)
-            }
-            if !internalWalk && !routeLegShortWalk.contains(key),
-               let url = mapURL(origin: origin, destination: destination, mode: "driving") {
-                timedRouteLink(extra("driveRoute"), url: url, systemImage: "car.fill", key: key, mode: "taxi", canEstimate: origin?.isEmpty == false)
-            }
-            Text(hotelTravelText("estimateNote")).font(.caption).foregroundStyle(.secondary)
-            if let problem = routeLegDiagnostics[key], !problem.isEmpty {
-                Text(language == .ja ? problem : "The travel time could not be confirmed. Check the destination and map directions.")
-                    .font(.caption).foregroundStyle(PlannerTheme.amber)
             }
             if let origin, !origin.isEmpty {
-                if routeLegDiagnostics[key] != nil {
+                DisclosureGroup(language == .ja ? "出発地・目的地を変更する" : "Change start or destination") {
                     routePlaceControls(origin: origin, destination: destination)
-                } else {
-                    DisclosureGroup(language == .ja ? "出発地・目的地を確認" : "Check route endpoints") {
-                        routePlaceControls(origin: origin, destination: destination)
-                    }.font(.caption)
-                }
-            }
-            if let omotesando = route.stops.flatMap({ $0.choices }).first(where: { $0.name == "Omotesando Tokyo" }),
-               origin == venueQuery(omotesando) || destination == venueQuery(omotesando) {
-                Text(["表参道は青山通り側の地点を基準に計算しています。",
-                      "오모테산도는 아오야마 거리 쪽 지점을 기준으로 계산합니다.",
-                      "表参道以青山通路口一侧为计算基准。",
-                      "Omotesando times use the Aoyama-dori end of the street.",
-                      "เวลาของโอโมเตะซันโดคำนวณจากฝั่งถนนอาโอยามะ"][language.index])
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-            if let origin, !origin.isEmpty, !routeLegLoading.contains(key), let times = routeLegTimes[key],
-               (times["walking"] == nil ||
-                (!routeLegShortWalk.contains(key) && times["taxi"] == nil) ||
-                times.values.contains(where: { $0.isApproximate })) {
-                Button(hotelTravelText("retry")) {
-                    routeLegTimes[key] = nil
-                    Task { await updateRouteLegTimes(origin: origin, destination: destination, key: key) }
-                }.font(.caption.bold()).foregroundStyle(PlannerTheme.cyan)
-            }
-        }
-        .task(id: key) {
-            guard let origin, !origin.isEmpty else { return }
-            await updateRouteLegTimes(origin: origin, destination: destination, key: key)
-            // One automatic retry for a temporarily unavailable map/service.
-            // Keep a valid route as soon as one real walking or driving result arrives.
-            if !Task.isCancelled,
-               routeLegTimes[key]?["walking"] == nil &&
-               routeLegTimes[key]?["taxi"] == nil {
-                try? await Task.sleep(nanoseconds: 1_800_000_000)
-                guard !Task.isCancelled else { return }
-                await updateRouteLegTimes(origin: origin, destination: destination, key: key)
+                }.font(.caption).foregroundStyle(PlannerTheme.cyan)
             }
         }
     }
@@ -2866,28 +2790,18 @@ private struct PlannerView: View {
     private func routeLegKey(origin: String?, destination: String) -> String {
         "\(route.id)|\(origin ?? "")|\(destination)|\(startMinutes)|\(routePlaceRevision)"
     }
-    private func timedRouteLink(_ title: String, url: URL, systemImage: String, key: String, mode: String, canEstimate: Bool) -> some View {
+    private func timedRouteLink(_ title: String, url: URL, systemImage: String, mode: String) -> some View {
         let accent = mode == "walking" ? PlannerTheme.coral : mode == "taxi" ? PlannerTheme.amber : PlannerTheme.cyan
-        return Button {
-            presentedMap = PlannerMapRequest(url: localizedMapURL(url), title: title)
-        } label: {
+        return Link(destination: localizedMapURL(url)) {
             HStack(spacing: 8) {
                 Image(systemName: systemImage).font(.headline)
                     .frame(width: 36, height: 36)
                     .background(accent.opacity(0.15), in: Circle())
                 Text(title).frame(maxWidth: .infinity, alignment: .leading)
-                if let minutes = routeLegTimes[key]?[mode] {
-                    Text(travelTimeText(minutes))
-                        .monospacedDigit().fixedSize(horizontal: false, vertical: true).multilineTextAlignment(.trailing)
-                } else if routeLegLoading.contains(key) {
-                    ProgressView().tint(accent)
-                } else if routeLegTimes[key] != nil {
-                    // The Google Maps direction link still works when Apple's lookup fails.
-                    Text(hotelTravelText("transitUnavailable"))
-                        .font(.caption).multilineTextAlignment(.trailing)
-                } else if canEstimate {
-                    ProgressView().tint(accent)
-                }
+                Text(mapTimeLabel).font(.caption.bold())
+                    .fixedSize(horizontal: false, vertical: true)
+                    .multilineTextAlignment(.trailing)
+                Image(systemName: "arrow.up.right.square").font(.caption)
             }
             .font(.subheadline.bold()).fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
@@ -2895,7 +2809,7 @@ private struct PlannerView: View {
             .foregroundStyle(accent)
             .background(PlannerTheme.raised, in: RoundedRectangle(cornerRadius: 22))
             .overlay(RoundedRectangle(cornerRadius: 22).stroke(accent.opacity(0.35), lineWidth: 1))
-        }.buttonStyle(.plain)
+        }
     }
     @MainActor
     private func updateRouteLegTimes(origin: String, destination: String, key: String) async {
@@ -3136,8 +3050,13 @@ private struct PlannerView: View {
                     translatedGuideLink(extra("officialAccess"), url: url)
                 }
             }
-            // A planning gap is never a map result. Show measured durations only.
-            routeLinks(origin: venueQuery(from), destination: venueQuery(to))
+            // An unselected meal is not a location. The next confirmed stop
+            // will use the preceding real place as its origin.
+            if to.name.hasPrefix("Lunch ") && lunchSelection == nil {
+                Text(journeyText("optionalMeal")).font(.caption).foregroundStyle(.secondary)
+            } else {
+                routeLinks(origin: venueQuery(from), destination: venueQuery(to))
+            }
         }
         .fixedSize(horizontal: false, vertical: true)
         .padding(16)
@@ -4930,7 +4849,7 @@ private enum OriginalCourseText {
         "approx": ["概算", "추정", "估算", "estimate", "ประมาณ"],
         "minutes": ["分", "분", "分钟", "min", "นาที"],
         "route": ["経路を開く", "경로 열기", "打开路线", "Open directions", "เปิดเส้นทาง"],
-        "timeNote": ["時刻は計画用の目安です。徒歩・車・公共交通は実際の地図経路の結果だけを表示します。取得できない場合は地図リンクで確認してください。", "도착 시간은 계획용입니다. 도보·차량·대중교통은 확인된 지도 경로만 표시합니다. 실패하면 지도 링크에서 확인하세요.", "到达时间仅供规划。步行、驾车与公共交通仅显示已取得的地图路线时间，无法获取请打开地图链接。", "Arrival times are for planning. Walk, car and transit times require mapped routes. If unavailable, open the map links.", "เวลาถึงเป็นแผนโดยประมาณ เวลาเดิน รถ และขนส่งสาธารณะอ้างอิงเส้นทางจริง หากไม่มีให้เปิดลิงก์แผนที่"],
+        "timeNote": ["上の時刻は計画用の目安です。正しい出発地・目的地と実際の移動時間はGoogleマップで確認してください。", "위 시간은 계획용입니다. 실제 경로와 소요 시간은 Google 지도에서 확인하세요.", "以上时间仅供规划。请在 Google 地图中确认地点及实际路线时间。", "Displayed schedule times are estimates. Confirm the real route and travel time in Google Maps.", "เวลาในแผนเป็นเพียงการประมาณ โปรดตรวจสอบเส้นทางและเวลาเดินทางจริงใน Google Maps"],
         "return": ["ホテルへ戻る", "호텔로 돌아가기", "返回酒店", "Return to hotel", "กลับโรงแรม"],
         "choose": ["昼食・夕食の枠も観光に変更できます。時刻は15分ずつ調整できます。", "점심·저녁도 관광으로 변경할 수 있습니다. 시간은 15분씩 조정할 수 있습니다.", "午餐和晚餐时段也可改为观光，时间可按15分钟调整。", "Lunch and dinner slots can be sightseeing instead. Adjust times in 15-minute steps.", "ช่วงมื้ออาหารเปลี่ยนเป็นเที่ยวชมได้ ปรับเวลาทีละ 15 นาที"],
         "nearSight": ["近くの観光地", "근처 관광지", "附近景点", "Nearby sights", "ที่เที่ยวใกล้เคียง"],
@@ -5072,7 +4991,6 @@ private struct OriginalCourseView: View {
             if loaded, let data = try? JSONEncoder().encode(updated), let value = String(data: data, encoding: .utf8) { savedCourse = value }
         }
         .task(id: searchKey) { await searchPlaces() }
-        .task(id: routeKey) { await calculateRoutes() }
     }
 
     private func stopCard(_ index: Int) -> some View {
@@ -5295,31 +5213,23 @@ private struct OriginalCourseView: View {
                 }.pickerStyle(.menu)
                 Spacer()
             }
-            let shortWalk = SharedTravelEstimator.isVerifiedShortWalk(times[legKey(index)]?["walking"])
-            ForEach(shortWalk ? ["walking"] : ["walking", "taxi", "transit"], id: \.self) { mode in
-                if let link = directions(index, mode: mode),
-                   !stops[index - 1].name.isEmpty && !stops[index].name.isEmpty {
-                    Link(destination: link) {
-                        HStack {
-                            Image(systemName: mode == "walking" ? "figure.walk" : mode == "taxi" ? "car.fill" : "tram.fill")
-                            Text(t(mode == "walking" ? "walk" : mode))
-                            Spacer()
-                            if let duration = estimatedTime(index, mode: mode) {
-                                Text("\(duration.isApproximate ? t("approx") + " " : "")\(duration.minutes)\(t("minutes"))")
-                            } else if mode == "transit" {
+            if !stops[index - 1].name.isEmpty && !stops[index].name.isEmpty {
+                ForEach(["walking", "taxi", "transit"], id: \.self) { mode in
+                    if let link = directions(index, mode: mode) {
+                        Link(destination: link) {
+                            HStack {
+                                Image(systemName: mode == "walking" ? "figure.walk" : mode == "taxi" ? "car.fill" : "tram.fill")
+                                Text(t(mode == "walking" ? "walk" : mode))
+                                Spacer()
                                 Text(t("checkTransit")).font(.caption)
-                            }
-                            Image(systemName: "arrow.up.right")
-                        }.font(.subheadline)
+                                Image(systemName: "arrow.up.right.square")
+                            }.font(.subheadline)
+                        }
                     }
                 }
-            }
-            if shortWalk {
-                Text(HotelTravelTranslations.ui["shortWalk"]?[language.index] ?? "Within walking distance")
-                    .font(.caption).foregroundStyle(PlannerTheme.cyan)
-            }
-            if estimatedTime(index, mode: "walking") == nil {
-                Text(t("unresolved")).font(.caption).foregroundStyle(.secondary)
+                Text(t("timeNote")).font(.caption).foregroundStyle(.secondary)
+            } else {
+                Text(t("nearNeedsPlace")).font(.caption).foregroundStyle(.secondary)
             }
         }.padding(.horizontal, 14)
     }
