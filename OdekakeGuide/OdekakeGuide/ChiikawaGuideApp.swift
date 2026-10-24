@@ -1,4 +1,4 @@
-// Japan Day Planner — PLACE_IDENTITY_AND_MAP_ROUTE_20261024.
+// Japan Day Planner — MAP_LINK_FIRST_20261024.
 // Route durations are never synthesized: they are obtained from Apple Maps
 // or a verified Google Routes response for confirmed origin/destination pairs.
 // Official addresses and vetted landmark anchors are resolved before routing.
@@ -2783,20 +2783,20 @@ private struct PlannerView: View {
     // provide measured in-app minutes asynchronously, with maps as fallback.
     private var mapDirectionsNote: String {
         switch language {
-        case .ja: return "表示した時間は地図の経路情報に基づく目安です。最新の経路・時刻はGoogleマップで確認できます。"
+        case .ja: return "上のボタンを押すと、出発地と目的地を設定したGoogleマップが開き、実際の移動時間が確認できます。この画面で不確かな分数は表示しません。"
         case .ko: return "Google 지도에서 출발지와 목적지를 확인하면 경로와 소요 시간이 표시됩니다."
         case .zh, .zht: return "在 Google 地图中确认起终点并查看路线及所需时间。"
         case .th: return "ตรวจสอบต้นทาง ปลายทาง เส้นทางและเวลาเดินทางใน Google Maps"
-        default: return "Travel times are based on mapped routes. Check Google Maps for live directions and schedules."
+        default: return "Tap a mode above to see the actual route and travel time in Google Maps. No unverified minutes are displayed here."
         }
     }
     private var mapTimeLabel: String {
         switch language {
-        case .ja: return "地図で時間を確認 ↗"
-        case .ko: return "지도에서 시간 확인 ↗"
-        case .zh, .zht: return "在地图查看时间 ↗"
-        case .th: return "ดูเวลาในแผนที่ ↗"
-        default: return "See time on map ↗"
+        case .ja: return "Googleマップで時間を見る ↗"
+        case .ko: return "Google 지도에서 시간 보기 ↗"
+        case .zh, .zht: return "在 Google 地图查看时间 ↗"
+        case .th: return "ดูเวลาใน Google Maps ↗"
+        default: return "See time in Google Maps ↗"
         }
     }
     private var routeLoadingLabel: String {
@@ -2810,43 +2810,34 @@ private struct PlannerView: View {
     }
     // Triggered by the SAME shared view in hotel, every sightseeing transfer,
     // lunch, dinner and the way back. State is keyed by the exact endpoint pair.
+    // MAP_LINK_FIRST_20261024: each leg directly opens Google Maps directions.
+    // No in-app place verification or Cloud Run/App Check request can block a link.
+    // The same view is used by hotel, sightseeing, lunch, dinner and return legs.
     private func routeLinks(origin: String?, destination: String) -> some View {
-        let internalWalk = isInternalSiteTransfer(origin: origin, destination: destination)
-        let key = routeLegKey(origin: origin, destination: destination)
-        let verified = routeLegTimes[key] ?? [:]
-        let loading = routeLegLoading.contains(key)
-        let shortWalk = routeLegShortWalk.contains(key)
+        let sameSite = isInternalSiteTransfer(origin: origin, destination: destination)
         return VStack(alignment: .leading, spacing: 10) {
-            if !internalWalk && !shortWalk,
+            if !sameSite,
                let url = mapURL(origin: origin, destination: destination, mode: "transit") {
-                timedRouteLink(extra("transitRoute"), url: url, systemImage: "tram.fill", mode: "transit",
-                               verifiedTime: verified["transit"], loading: loading)
+                timedRouteLink(extra("transitRoute"), url: url,
+                               systemImage: "tram.fill", mode: "transit")
             }
             if let url = mapURL(origin: origin, destination: destination, mode: "walking") {
-                timedRouteLink(extra("walkRoute"), url: url, systemImage: "figure.walk", mode: "walking",
-                               verifiedTime: verified["walking"], loading: loading)
+                timedRouteLink(extra("walkRoute"), url: url,
+                               systemImage: "figure.walk", mode: "walking")
             }
-            if !internalWalk && !shortWalk,
+            if !sameSite,
                let url = mapURL(origin: origin, destination: destination, mode: "driving") {
-                timedRouteLink(extra("driveRoute"), url: url, systemImage: "car.fill", mode: "taxi",
-                               verifiedTime: verified["taxi"], loading: loading)
+                timedRouteLink(extra("driveRoute"), url: url,
+                               systemImage: "car.fill", mode: "taxi")
             }
             Text(mapDirectionsNote).font(.caption).foregroundStyle(.secondary)
-            if let diagnostic = routeLegDiagnostics[key], verified.isEmpty {
-                Text(diagnostic).font(.caption).foregroundStyle(PlannerTheme.amber)
-            }
-            if internalWalk {
-                Text(hotelTravelText("siteWalk")).font(.caption).foregroundStyle(PlannerTheme.amber)
-            }
-            if let origin, !origin.isEmpty {
-                DisclosureGroup(language == .ja ? "出発地・目的地を変更する" : "Change start or destination") {
+            if let origin, !origin.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                DisclosureGroup(language == .ja
+                    ? "地図の場所が違う場合はここから変更"
+                    : "Correct start or destination if needed") {
                     routePlaceControls(origin: origin, destination: destination)
                 }.font(.caption).foregroundStyle(PlannerTheme.cyan)
             }
-        }
-        .task(id: key) {
-            guard let origin, !origin.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-            await updateRouteLegTimes(origin: origin, destination: destination, key: key)
         }
     }
     private func routePlaceControls(origin: String, destination: String) -> some View {
@@ -2891,18 +2882,17 @@ private struct PlannerView: View {
     private func routeLegKey(origin: String?, destination: String) -> String {
         "\(route.id)|\(origin ?? "")|\(destination)|\(startMinutes)|\(routePlaceRevision)"
     }
-    private func timedRouteLink(_ title: String, url: URL, systemImage: String, mode: String,
-                                verifiedTime: TravelTime?, loading: Bool) -> some View {
-        let accent = mode == "walking" ? PlannerTheme.coral : mode == "taxi" ? PlannerTheme.amber : PlannerTheme.cyan
-        let subtitle = verifiedTime.map { travelTimeText($0) } ?? (loading ? routeLoadingLabel : mapTimeLabel)
+    private func timedRouteLink(_ title: String, url: URL,
+                                systemImage: String, mode: String) -> some View {
+        let accent = mode == "walking" ? PlannerTheme.coral
+            : mode == "taxi" ? PlannerTheme.amber : PlannerTheme.cyan
         return Link(destination: localizedMapURL(url)) {
             HStack(spacing: 8) {
                 Image(systemName: systemImage).font(.headline)
                     .frame(width: 36, height: 36)
                     .background(accent.opacity(0.15), in: Circle())
                 Text(title).frame(maxWidth: .infinity, alignment: .leading)
-                Text(subtitle).font(verifiedTime == nil ? .caption.bold() : .headline.bold())
-                    .monospacedDigit()
+                Text(mapTimeLabel).font(.caption.bold())
                     .fixedSize(horizontal: false, vertical: true)
                     .multilineTextAlignment(.trailing)
                 Image(systemName: "arrow.up.right.square").font(.caption)
@@ -2912,7 +2902,8 @@ private struct PlannerView: View {
             .padding(.horizontal, 12).padding(.vertical, 8)
             .foregroundStyle(accent)
             .background(PlannerTheme.raised, in: RoundedRectangle(cornerRadius: 22))
-            .overlay(RoundedRectangle(cornerRadius: 22).stroke(accent.opacity(0.35), lineWidth: 1))
+            .overlay(RoundedRectangle(cornerRadius: 22)
+                .stroke(accent.opacity(0.35), lineWidth: 1))
         }
     }
     @MainActor
@@ -4949,7 +4940,7 @@ private enum OriginalCourseText {
         "walk": ["徒歩", "도보", "步行", "Walk", "เดิน"],
         "taxi": ["車・タクシー", "차·택시", "汽车·出租车", "Car / taxi", "รถ/แท็กซี่"],
         "transit": ["公共交通（電車・地下鉄など）", "대중교통(전철·지하철 등)", "公共交通（铁路、地铁等）", "Transit (rail/subway etc.)", "ขนส่งสาธารณะ (รถไฟ/รถไฟใต้ดิน)"],
-        "checkTransit": ["地図で時間を確認 ↗", "지도에서 시간 확인 ↗", "在地图查看时间 ↗", "Check time on map ↗", "ดูเวลาในแผนที่ ↗"],
+        "checkTransit": ["Googleマップで時間を確認 ↗", "지도에서 시간 확인 ↗", "在地图查看时间 ↗", "Check time on map ↗", "ดูเวลาในแผนที่ ↗"],
         "approx": ["概算", "추정", "估算", "estimate", "ประมาณ"],
         "minutes": ["分", "분", "分钟", "min", "นาที"],
         "route": ["経路を開く", "경로 열기", "打开路线", "Open directions", "เปิดเส้นทาง"],
@@ -5095,9 +5086,8 @@ private struct OriginalCourseView: View {
             if loaded, let data = try? JSONEncoder().encode(updated), let value = String(data: data, encoding: .utf8) { savedCourse = value }
         }
         .task(id: searchKey) { await searchPlaces() }
-        // This calculation was previously defined but NEVER called, so all
-        // original-course transfer cards remained stuck on "Check time on map".
-        .task(id: routeKey) { await calculateRoutes() }
+        // Original-course legs use prefilled Google Maps directions links, too.
+        // Route-provider failures cannot block any directions link.
     }
 
     private func stopCard(_ index: Int) -> some View {
