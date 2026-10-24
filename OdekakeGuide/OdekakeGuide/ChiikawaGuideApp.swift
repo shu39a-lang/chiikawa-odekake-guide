@@ -1015,7 +1015,9 @@ private struct PlannerView: View {
     @State private var routeLegDiagnostics: [String: String] = [:]
 
     private var language: GuideLanguage { GuideLanguage(rawValue: languageCode) ?? .ja }
-    private func text(_ key: String) -> String { GuideTranslations.ui[key]?[language.index] ?? key }
+    private func text(_ key: String) -> String {
+        VisitorCopy.show(GuideTranslations.ui[key]?[language.index] ?? key, language: language)
+    }
     private func format(_ key: String, _ arguments: CVarArg...) -> String {
         String(format: text(key), locale: language.locale, arguments: arguments)
     }
@@ -1398,7 +1400,7 @@ private struct PlannerView: View {
     private let journeyGold = PlannerTheme.cyan
 
     private func journeyText(_ key: String) -> String {
-        JourneyTranslations.ui[key]?[language.index] ?? key
+        VisitorCopy.show(JourneyTranslations.ui[key]?[language.index] ?? key, language: language)
     }
     private func storedValues(_ value: String) -> [String: String] {
         guard let data = value.data(using: .utf8) else { return [:] }
@@ -1633,10 +1635,9 @@ private struct PlannerView: View {
         guard isMapURL(original) else { return original }
         var parts = URLComponents(url: original, resolvingAgainstBaseURL: false)
         var items = parts?.queryItems ?? []
-        items.removeAll(where: { $0.name == "hl" })
-        items.append(URLQueryItem(name: "hl", value: targetWebLanguage))
+        items.removeAll(where: { $0.name == "hl" || $0.name == "gl" })
         parts?.queryItems = items
-        return parts?.url ?? original
+        return GoogleMapsLocale.localize(parts?.url ?? original, language: language)
     }
     private func translatedGuideLink(_ title: String, url: URL) -> some View {
         VStack(alignment: .leading, spacing: 7) {
@@ -1658,7 +1659,9 @@ private struct PlannerView: View {
     private func journeyLink(_ title: String, url: URL, systemImage: String = "magnifyingglass") -> some View {
         Group {
             if isMapURL(url) {
-                Link(destination: localizedMapURL(url)) {
+                Button(action: {
+                    presentedMap = PlannerMapRequest(url: localizedMapURL(url), title: title)
+                }) {
                     journeyLinkLabel(title, systemImage: systemImage)
                 }.buttonStyle(.plain)
             } else {
@@ -2304,7 +2307,7 @@ private struct PlannerView: View {
             || area == japaneseName
     }
     private func hotelTravelText(_ key: String) -> String {
-        HotelTravelTranslations.ui[key]?[language.index] ?? key
+        VisitorCopy.show(HotelTravelTranslations.ui[key]?[language.index] ?? key, language: language)
     }
     private func travelDurationText(_ minutes: Int) -> String {
         guard minutes >= 60 else {
@@ -2735,7 +2738,7 @@ private struct PlannerView: View {
     }
 
     private func extra(_ key: String) -> String {
-        TravelExtras.ui[key]?[language.index] ?? key
+        VisitorCopy.show(TravelExtras.ui[key]?[language.index] ?? key, language: language)
     }
     private var cityQuery: String {
         ["asakusa": "Tokyo", "ueno": "Tokyo", "kyoto": "Kyoto", "osaka": "Osaka", "nara": "Nara", "hiroshima": "Hiroshima"][route.id] ?? "Japan"
@@ -2772,12 +2775,12 @@ private struct PlannerView: View {
         }
         var parts = URLComponents(string: "https://www.google.com/maps/dir/")
         parts?.queryItems = items
-        return parts?.url
+        return parts?.url.map { GoogleMapsLocale.localize($0, language: language) }
     }
     private func locationURL(_ query: String) -> URL? {
         var parts = URLComponents(string: "https://www.google.com/maps/search/")
         parts?.queryItems = [URLQueryItem(name: "api", value: "1"), URLQueryItem(name: "query", value: query)]
-        return parts?.url
+        return parts?.url.map { GoogleMapsLocale.localize($0, language: language) }
     }
     // Google Maps links are independent of route lookup. MapKit/Google Routes
     // provide measured in-app minutes asynchronously, with maps as fallback.
@@ -2785,7 +2788,8 @@ private struct PlannerView: View {
         switch language {
         case .ja: return "上のボタンを押すと、出発地と目的地を設定したGoogleマップが開き、実際の移動時間が確認できます。この画面で不確かな分数は表示しません。"
         case .ko: return "Google 지도에서 출발지와 목적지를 확인하면 경로와 소요 시간이 표시됩니다."
-        case .zh, .zht: return "在 Google 地图中确认起终点并查看路线及所需时间。"
+        case .zh: return "在 Google 地图中确认起终点并查看路线及所需时间。"
+        case .zht: return "請在 Google 地圖確認起點、終點、路線及所需時間。"
         case .th: return "ตรวจสอบต้นทาง ปลายทาง เส้นทางและเวลาเดินทางใน Google Maps"
         default: return "Tap a mode above to see the actual route and travel time in Google Maps. No unverified minutes are displayed here."
         }
@@ -2794,7 +2798,8 @@ private struct PlannerView: View {
         switch language {
         case .ja: return "Googleマップで時間を見る ↗"
         case .ko: return "Google 지도에서 시간 보기 ↗"
-        case .zh, .zht: return "在 Google 地图查看时间 ↗"
+        case .zh: return "在 Google 地图查看时间 ↗"
+        case .zht: return "在 Google 地圖查看時間 ↗"
         case .th: return "ดูเวลาใน Google Maps ↗"
         default: return "See time in Google Maps ↗"
         }
@@ -2886,7 +2891,9 @@ private struct PlannerView: View {
                                 systemImage: String, mode: String) -> some View {
         let accent = mode == "walking" ? PlannerTheme.coral
             : mode == "taxi" ? PlannerTheme.amber : PlannerTheme.cyan
-        return Link(destination: localizedMapURL(url)) {
+        return Button(action: {
+            presentedMap = PlannerMapRequest(url: localizedMapURL(url), title: title)
+        }) {
             HStack(spacing: 8) {
                 Image(systemName: systemImage).font(.headline)
                     .frame(width: 36, height: 36)
@@ -2904,7 +2911,7 @@ private struct PlannerView: View {
             .background(PlannerTheme.raised, in: RoundedRectangle(cornerRadius: 22))
             .overlay(RoundedRectangle(cornerRadius: 22)
                 .stroke(accent.opacity(0.35), lineWidth: 1))
-        }
+        }.buttonStyle(.plain)
     }
     @MainActor
     private func updateRouteLegTimes(origin: String, destination: String, key: String) async {
@@ -3630,7 +3637,7 @@ private enum GuideLanguage: String, CaseIterable, Identifiable {
         "es": "es",
         "ru": "ru",
         "nl": "nl",
-        "pt": "pt",
+        "pt": "pt-BR",
         "sv": "sv",
         "mn": "mn",
         "ar": "ar",
@@ -3653,6 +3660,34 @@ private enum GuideLanguage: String, CaseIterable, Identifiable {
         "uk": "uk",
         "hr": "hr",
     ][rawValue] ?? "en"
+    }
+}
+
+
+private enum GoogleMapsLocale {
+    // Region and language are fixed by the visitor's chosen country, never
+    // by the device's Japanese language settings. Native Google Maps may
+    // retain its account's own language; the in-app browser uses this locale.
+    static func localize(_ url: URL, language: GuideLanguage) -> URL {
+        guard let host = url.host?.lowercased(),
+              (host == "www.google.com" || host == "google.com" || host == "maps.google.com"
+                || host == "www.google.co.jp" || host == "maps.google.co.jp"),
+              url.path == "/maps" || url.path.hasPrefix("/maps/") || host.hasPrefix("maps.") else { return url }
+        var parts = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        var query = (parts?.queryItems ?? []).filter { $0.name != "hl" && $0.name != "gl" }
+        query.append(URLQueryItem(name: "hl", value: language.webLanguageCode))
+        if let region = language.locale.region?.identifier {
+            query.append(URLQueryItem(name: "gl", value: region))
+        }
+        parts?.queryItems = query
+        return parts?.url ?? url
+    }
+}
+
+private enum VisitorCopy {
+    static func show(_ value: String, language: GuideLanguage) -> String {
+        guard language == .zht else { return value }
+        return value.applyingTransform(StringTransform(rawValue: "Hans-Hant"), reverse: false) ?? value
     }
 }
 
@@ -3774,6 +3809,312 @@ private enum PlannerInstructions {
                 ("มื้อเย็นและการกลับโรงแรม", "เลือกพื้นที่มื้อเย็นแบบอัตโนมัติ ใกล้โรงแรม หรือใกล้สถานที่สุดท้าย แบบอัตโนมัติจะเลือกใกล้โรงแรมเมื่อเที่ยวเสร็จก่อน 18:00 และใกล้สถานที่สุดท้ายเมื่อเสร็จตั้งแต่ 18:00 เป็นต้นไป กดค้นหามื้อเย็น เลือกร้าน แล้วตรวจสอบเส้นทาง หลังรับประทานอาหารสามารถดูทางกลับโรงแรมที่เลือกไว้ได้"),
                 ("ข้อมูลทางการ คำแปล และการแชร์", "เปิดข้อมูลทางการของสถานที่หรือร้านอาหารเพื่อตรวจสอบเวลาเปิด ราคา ตั๋ว และเงื่อนไขการจอง เมื่อใช้ภาษาอื่นที่ไม่ใช่ญี่ปุ่น แอปจะเปิดหน้าคำแปลก่อน แต่บางหน้าหรือชื่อเฉพาะอาจยังเป็นภาษาต้นฉบับ กดปุ่มแชร์มุมขวาบนของหน้าวางแผนเพื่อส่งแผนทริปไปยังข้อความ โน้ต หรือแอปอื่น"),
                 ("การบันทึกและการแก้ปัญหา", "ภาษา เส้นทาง เวลาเริ่ม และสถานที่เที่ยวที่เลือกจะบันทึกไว้ในอุปกรณ์ ต้องเลือกโรงแรมใหม่ทุกครั้งเมื่อเปลี่ยนเส้นทางหรือจุดเที่ยวแรก และเมื่อเปิดแอปใหม่ ร้านมื้อกลางวันและมื้อเย็นที่ค้นหา รวมถึงความคืบหน้าของทริป อาจต้องเลือกใหม่ หากค้นหาไม่พบ ให้ตรวจสอบอินเทอร์เน็ตและเพิ่มพื้นที่หรือที่อยู่ต่อท้ายชื่อโรงแรมแล้วค้นหาอีกครั้ง เวลา ช่วงการเดินทาง และราคาเป็นค่าประมาณ ก่อนออกเดินทางควรตรวจสอบข้อมูลล่าสุดจากเว็บไซต์ทางการและแผนที่")
+            ]
+        case .zht:
+            return [
+                ("應用程式介紹", "選擇日本各地的一日觀光路線，搭配景點、午餐、飯店及晚餐，規劃專屬行程。也可以選擇推薦路線與社群媒體熱門景點。"),
+                ("選擇語言", "在首頁選擇「台灣／繁體中文」，再按左側語言按鈕進入旅遊畫面；右側的「使用說明」顯示繁體中文指南。"),
+                ("選擇路線與飯店", "依序選擇地區、都道府縣、觀光路線及出發時間。從飯店候選清單選擇住宿，或輸入已預訂飯店的名稱及地址。選擇飯店並不代表完成預訂。"),
+                ("進行旅程", "依序查看飯店出發、觀光、午餐、晚餐及返回飯店。可更換景點與餐廳；按「下一步」繼續，或按「上一步」返回。"),
+                ("查看地圖與交通時間", "點選步行、開車／計程車或大眾運輸，開啟 Google 地圖確認出發地、目的地、實際路線、轉乘資訊及所需時間。地圖介面會要求使用繁體中文，但部分地名可能保留日文。"),
+                ("官方資訊及注意事項", "出發前，請至官方網站確認營業時間、票價、門票及預約資訊。部分外部網站可能無法翻譯。旅程可以分享，但行程時間仍須以當日交通與地圖資訊為準。")
+            ]
+        case .fil:
+            return [
+                ("Gabay sa app", "Pumili ng isang araw na lakbayin sa Japan at magplano ng mga pasyalan, tanghalian, hapunan at hotel."),
+                ("Pagpili ng wika", "Piliin ang Pilipinas / Filipino sa unang pahina. Ang gabay na ito ay nasa Filipino."),
+                ("Plano at hotel", "Pumili ng lugar, ruta at oras ng pag-alis. Pumili ng hotel o ilagay ang pangalan at address ng iyong na-book na hotel."),
+                ("Mga hakbang sa biyahe", "Sundan ang mga hintuan ayon sa pagkakasunod-sunod. Maaari mong palitan ang pasyalan o kainan at magpatuloy sa susunod na hakbang."),
+                ("Mapa at oras ng biyahe", "Buksan ang Google Maps para sa paglalakad, kotse o pampublikong sasakyan. Tingnan ang totoong ruta, oras at mga sakayan."),
+                ("Mahalagang paalala", "Suriin ang oras ng bukas, presyo at mga reserbasyon sa opisyal na website bago bumiyahe. Hindi awtomatikong naka-book ang hotel.")
+            ]
+        case .vi:
+            return [
+                ("Giới thiệu ứng dụng", "Chọn lịch trình tham quan một ngày ở Nhật Bản, kết hợp điểm đến, bữa trưa, bữa tối và khách sạn."),
+                ("Chọn ngôn ngữ", "Chọn Việt Nam / Tiếng Việt trên màn hình đầu tiên. Hướng dẫn này hiển thị bằng tiếng Việt."),
+                ("Lộ trình và khách sạn", "Chọn khu vực, tuyến tham quan và giờ khởi hành. Chọn khách sạn gợi ý hoặc nhập tên và địa chỉ khách sạn đã đặt."),
+                ("Các bước của chuyến đi", "Xem lần lượt các điểm dừng, thay đổi điểm tham quan hoặc nhà hàng và nhấn nút tiếp theo để tiếp tục."),
+                ("Bản đồ và thời gian di chuyển", "Mở Google Maps để xem đường đi bộ, ô tô hoặc phương tiện công cộng cùng thời gian thực tế và điểm chuyển tuyến."),
+                ("Lưu ý", "Kiểm tra giờ mở cửa, giá vé và điều kiện đặt trước trên trang chính thức. Việc chọn khách sạn trong ứng dụng không phải là đặt phòng.")
+            ]
+        case .id:
+            return [
+                ("Tentang aplikasi", "Pilih perjalanan satu hari di Jepang dengan tempat wisata, makan siang, makan malam, dan hotel."),
+                ("Pilih bahasa", "Pilih Indonesia / Bahasa Indonesia di halaman awal. Panduan ini ditampilkan dalam bahasa Indonesia."),
+                ("Rute dan hotel", "Pilih wilayah, rute wisata, serta waktu keberangkatan. Pilih hotel atau masukkan nama dan alamat hotel yang sudah dipesan."),
+                ("Langkah perjalanan", "Ikuti tempat tujuan sesuai urutan. Anda dapat mengganti tempat wisata atau restoran lalu melanjutkan ke tahap berikutnya."),
+                ("Peta dan waktu tempuh", "Buka Google Maps untuk melihat rute jalan kaki, mobil, atau angkutan umum serta waktu tempuh dan perpindahan kendaraan."),
+                ("Catatan penting", "Periksa jam buka, harga tiket, dan reservasi di situs resmi. Memilih hotel di aplikasi tidak berarti melakukan pemesanan.")
+            ]
+        case .ms:
+            return [
+                ("Tentang aplikasi", "Pilih perjalanan sehari di Jepun dengan tempat menarik, makan tengah hari, makan malam dan hotel."),
+                ("Pilih bahasa", "Pilih Malaysia / Bahasa Melayu pada halaman utama. Panduan ini dipaparkan dalam bahasa Melayu."),
+                ("Laluan dan hotel", "Pilih kawasan, laluan pelancongan dan waktu bertolak. Pilih hotel atau masukkan nama serta alamat hotel yang telah ditempah."),
+                ("Langkah perjalanan", "Ikuti tempat persinggahan mengikut turutan. Anda boleh menukar tempat lawatan atau restoran dan meneruskan ke langkah seterusnya."),
+                ("Peta dan masa perjalanan", "Buka Google Maps untuk laluan berjalan kaki, kereta atau pengangkutan awam serta masa perjalanan dan pertukaran."),
+                ("Perhatian", "Semak waktu operasi, harga tiket dan syarat tempahan di laman rasmi. Memilih hotel bukan bermaksud membuat tempahan.")
+            ]
+        case .fr:
+            return [
+                ("Présentation", "Choisissez une excursion d’une journée au Japon avec visites, déjeuner, dîner et hôtel."),
+                ("Choix de la langue", "Sélectionnez France / Français sur l’écran d’accueil. Ce guide est affiché en français."),
+                ("Itinéraire et hôtel", "Choisissez une région, un parcours et une heure de départ. Sélectionnez un hôtel ou saisissez le nom et l’adresse de votre réservation."),
+                ("Déroulement", "Suivez les étapes dans l’ordre. Vous pouvez changer un site ou un restaurant et passer à l’étape suivante."),
+                ("Carte et durée des trajets", "Ouvrez Google Maps pour consulter les trajets à pied, en voiture ou en transports en commun, les correspondances et les durées."),
+                ("À vérifier", "Consultez les horaires, les tarifs et les réservations sur les sites officiels. Choisir un hôtel ne constitue pas une réservation.")
+            ]
+        case .de:
+            return [
+                ("Über die App", "Wählen Sie eine Tagestour durch Japan mit Sehenswürdigkeiten, Mittagessen, Abendessen und Hotel."),
+                ("Sprache wählen", "Wählen Sie Deutschland / Deutsch auf der Startseite. Diese Anleitung erscheint auf Deutsch."),
+                ("Route und Hotel", "Wählen Sie Region, Tour und Startzeit. Wählen Sie ein Hotel oder geben Sie Name und Adresse Ihres gebuchten Hotels ein."),
+                ("Reiseablauf", "Folgen Sie den Stationen der Reihe nach. Sehenswürdigkeiten und Restaurants können geändert werden."),
+                ("Karten und Fahrtzeiten", "Öffnen Sie Google Maps für Fußwege, Autofahrten oder öffentliche Verkehrsmittel sowie Fahrzeiten und Umstiege."),
+                ("Wichtige Hinweise", "Prüfen Sie Öffnungszeiten, Preise und Reservierungen auf offiziellen Websites. Die Hotelauswahl ist keine Buchung.")
+            ]
+        case .hi:
+            return [
+                ("ऐप का परिचय", "जापान में एक दिन की यात्रा चुनें और दर्शनीय स्थल, दोपहर का भोजन, रात का भोजन तथा होटल की योजना बनाएँ।"),
+                ("भाषा चुनें", "मुख्य स्क्रीन पर भारत / हिन्दी चुनें। यह मार्गदर्शिका हिन्दी में है।"),
+                ("मार्ग और होटल", "क्षेत्र, पर्यटन मार्ग और प्रस्थान समय चुनें। होटल चुनें या पहले से बुक होटल का नाम और पता दर्ज करें।"),
+                ("यात्रा के चरण", "ठहरावों को क्रम से देखें। दर्शनीय स्थल या रेस्तराँ बदलकर अगले चरण पर जाएँ।"),
+                ("नक्शा और यात्रा समय", "पैदल, कार या सार्वजनिक परिवहन के मार्ग और समय देखने के लिए Google Maps खोलें।"),
+                ("ध्यान दें", "जाने से पहले आधिकारिक वेबसाइट पर खुलने का समय, टिकट मूल्य और आरक्षण जाँचें। होटल चुनना बुकिंग नहीं है।")
+            ]
+        case .it:
+            return [
+                ("Informazioni sull’app", "Scegli un itinerario giornaliero in Giappone con attrazioni, pranzo, cena e hotel."),
+                ("Selezione della lingua", "Nella schermata iniziale scegli Italia / Italiano. Questa guida è in italiano."),
+                ("Percorso e hotel", "Seleziona zona, itinerario e orario di partenza. Scegli un hotel oppure inserisci nome e indirizzo di quello prenotato."),
+                ("Tappe del viaggio", "Segui le tappe nell’ordine indicato. Puoi cambiare attrazioni o ristoranti e passare alla tappa successiva."),
+                ("Mappe e tempi di viaggio", "Apri Google Maps per percorsi a piedi, in auto o con i mezzi pubblici, tempi reali e coincidenze."),
+                ("Attenzione", "Verifica orari, prezzi dei biglietti e prenotazioni sui siti ufficiali. Scegliere un hotel non effettua una prenotazione.")
+            ]
+        case .es:
+            return [
+                ("Acerca de la aplicación", "Elige una excursión de un día por Japón con visitas, almuerzo, cena y hotel."),
+                ("Elegir idioma", "Selecciona España / Español en la pantalla inicial. Esta guía se muestra en español."),
+                ("Ruta y hotel", "Elige la región, el recorrido y la hora de salida. Selecciona un hotel o introduce el nombre y la dirección del hotel reservado."),
+                ("Etapas del viaje", "Sigue las paradas en orden. Puedes cambiar las atracciones o los restaurantes y avanzar al siguiente paso."),
+                ("Mapa y tiempos", "Abre Google Maps para consultar rutas a pie, en coche o en transporte público, tiempos de viaje y transbordos."),
+                ("Importante", "Comprueba horarios, precios, entradas y reservas en los sitios oficiales. Elegir hotel no realiza ninguna reserva.")
+            ]
+        case .ru:
+            return [
+                ("О приложении", "Выберите однодневный маршрут по Японии с достопримечательностями, обедом, ужином и отелем."),
+                ("Выбор языка", "На главном экране выберите Россия / Русский. Эта инструкция отображается на русском языке."),
+                ("Маршрут и отель", "Выберите регион, маршрут и время отправления. Выберите отель или введите название и адрес уже забронированного отеля."),
+                ("Этапы поездки", "Следуйте остановкам по порядку. Можно изменить достопримечательности или рестораны и перейти дальше."),
+                ("Карта и время в пути", "Откройте Google Карты, чтобы увидеть пеший, автомобильный или общественный маршрут, время и пересадки."),
+                ("Важно", "Проверяйте часы работы, цены и бронирование на официальных сайтах. Выбор отеля не означает бронирование.")
+            ]
+        case .nl:
+            return [
+                ("Over de app", "Kies een dagtocht in Japan met bezienswaardigheden, lunch, diner en hotel."),
+                ("Taal kiezen", "Kies Nederland / Nederlands op het beginscherm. Deze uitleg is in het Nederlands."),
+                ("Route en hotel", "Kies een regio, route en vertrektijd. Selecteer een hotel of vul de naam en het adres van je geboekte hotel in."),
+                ("Reisstappen", "Volg de haltes op volgorde. Je kunt een bezienswaardigheid of restaurant wijzigen en doorgaan."),
+                ("Kaart en reistijd", "Open Google Maps voor looproutes, autoroutes of openbaar vervoer, inclusief reistijden en overstappen."),
+                ("Let op", "Controleer openingstijden, prijzen en reserveringen op officiële websites. Een hotel selecteren is geen boeking.")
+            ]
+        case .pt:
+            return [
+                ("Sobre o aplicativo", "Escolha um passeio de um dia pelo Japão com atrações, almoço, jantar e hotel."),
+                ("Escolha do idioma", "Na tela inicial, selecione Brasil / Português. Este guia está em português do Brasil."),
+                ("Roteiro e hotel", "Selecione a região, o roteiro e o horário de saída. Escolha um hotel ou informe o nome e o endereço do hotel reservado."),
+                ("Etapas da viagem", "Siga as paradas na ordem indicada. Você pode trocar atrações ou restaurantes e avançar para a próxima etapa."),
+                ("Mapa e tempo de deslocamento", "Abra o Google Maps para conferir rotas a pé, de carro ou transporte público, horários e conexões."),
+                ("Atenção", "Confira horários, preços e reservas nos sites oficiais. Selecionar um hotel não faz uma reserva.")
+            ]
+        case .sv:
+            return [
+                ("Om appen", "Välj en dagsutflykt i Japan med sevärdheter, lunch, middag och hotell."),
+                ("Välj språk", "Välj Sverige / Svenska på startsidan. Den här guiden visas på svenska."),
+                ("Rutt och hotell", "Välj region, utflykt och starttid. Välj hotell eller ange namn och adress för ditt bokade hotell."),
+                ("Resans steg", "Följ stoppen i ordning. Du kan ändra sevärdheter eller restauranger och fortsätta till nästa steg."),
+                ("Karta och restid", "Öppna Google Maps för gång, bil eller kollektivtrafik, restider och byten."),
+                ("Observera", "Kontrollera öppettider, priser och bokningar på officiella webbplatser. Att välja hotell är inte en bokning.")
+            ]
+        case .mn:
+            return [
+                ("Аппын тухай", "Японд нэг өдрийн аялал сонгож, үзвэр, өдрийн хоол, оройн хоол болон буудлаа төлөвлөнө."),
+                ("Хэл сонгох", "Эхний дэлгэцээс Монгол / Монгол хэлийг сонгоно. Энэ заавар монгол хэлээр байна."),
+                ("Маршрут ба буудал", "Бүс нутаг, аяллын маршрут, гарах цагаа сонгоно. Буудал сонгох эсвэл захиалсан буудлын нэр, хаягийг оруулна."),
+                ("Аяллын алхмууд", "Зогсоолуудыг дарааллаар үзнэ. Үзэх газар, рестораныг өөрчилж дараагийн алхамд шилжинэ."),
+                ("Газрын зураг ба хугацаа", "Алхах, машинаар эсвэл нийтийн тээврээр явах зам, хугацааг Google Maps-ээс шалгана."),
+                ("Анхааруулга", "Ажлын цаг, үнэ, захиалгыг албан ёсны сайтаас шалгана уу. Буудал сонгох нь захиалга биш.")
+            ]
+        case .ar:
+            return [
+                ("عن التطبيق", "اختر رحلة ليوم واحد في اليابان تضم المعالم السياحية والغداء والعشاء والفندق."),
+                ("اختيار اللغة", "اختر الإمارات / العربية من الشاشة الرئيسية. يظهر هذا الدليل باللغة العربية."),
+                ("المسار والفندق", "اختر المنطقة والمسار ووقت الانطلاق. اختر فندقًا أو أدخل اسم وعنوان الفندق الذي حجزته."),
+                ("مراحل الرحلة", "اتبع المحطات بالترتيب. يمكنك تغيير المعالم أو المطاعم والانتقال إلى الخطوة التالية."),
+                ("الخريطة ومدة التنقل", "افتح خرائط Google لعرض مسارات المشي أو السيارة أو النقل العام والوقت والتحويلات."),
+                ("تنبيه", "تحقق من أوقات العمل والأسعار والحجوزات في المواقع الرسمية. اختيار الفندق لا يعني إجراء حجز.")
+            ]
+        case .tr:
+            return [
+                ("Uygulama hakkında", "Japonya’da gezilecek yerler, öğle yemeği, akşam yemeği ve otel içeren günlük bir gezi seçin."),
+                ("Dil seçimi", "Ana ekranda Türkiye / Türkçe seçin. Bu kılavuz Türkçe görüntülenir."),
+                ("Rota ve otel", "Bölgeyi, gezi rotasını ve hareket saatini seçin. Bir otel seçin veya ayırttığınız otelin adını ve adresini girin."),
+                ("Gezi adımları", "Durakları sırayla takip edin. Gezilecek yeri veya restoranı değiştirebilir, sonraki adıma geçebilirsiniz."),
+                ("Harita ve yolculuk süresi", "Yürüyüş, araba veya toplu taşıma rotalarını ve sürelerini Google Haritalar üzerinden kontrol edin."),
+                ("Önemli", "Çalışma saatlerini, fiyatları ve rezervasyonları resmî sitelerden doğrulayın. Otel seçmek rezervasyon oluşturmaz.")
+            ]
+        case .pl:
+            return [
+                ("O aplikacji", "Wybierz jednodniową wycieczkę po Japonii z atrakcjami, obiadem, kolacją i hotelem."),
+                ("Wybór języka", "Na ekranie głównym wybierz Polska / Polski. Ten poradnik jest w języku polskim."),
+                ("Trasa i hotel", "Wybierz region, trasę i godzinę rozpoczęcia. Wybierz hotel lub wpisz nazwę i adres zarezerwowanego hotelu."),
+                ("Etapy podróży", "Przechodź przez kolejne przystanki. Możesz zmieniać atrakcje lub restauracje i przejść dalej."),
+                ("Mapa i czas przejazdu", "Otwórz Mapy Google, aby sprawdzić trasę pieszą, samochodem lub transportem publicznym, czas i przesiadki."),
+                ("Uwaga", "Sprawdź godziny otwarcia, ceny i rezerwacje na oficjalnych stronach. Wybranie hotelu nie jest rezerwacją.")
+            ]
+        case .my:
+            return [
+                ("အက်ပ်အကြောင်း", "ဂျပန်နိုင်ငံတွင် တစ်နေ့တာခရီးစဉ် ရွေးချယ်ပြီး လည်ပတ်စရာနေရာ၊ နေ့လယ်စာ၊ ညစာနှင့် ဟိုတယ်ကို စီစဉ်နိုင်ပါသည်။"),
+                ("ဘာသာစကားရွေးရန်", "ပင်မစာမျက်နှာတွင် မြန်မာဘာသာကို ရွေးချယ်ပါ။ ဤလမ်းညွှန်ကို မြန်မာဘာသာဖြင့် ဖော်ပြထားသည်။"),
+                ("ခရီးစဉ်နှင့် ဟိုတယ်", "ဒေသ၊ ခရီးလမ်းကြောင်းနှင့် ထွက်ခွာချိန်ကို ရွေးပါ။ ဟိုတယ်ရွေးပါ သို့မဟုတ် ကြိုတင်မှာထားသော ဟိုတယ်၏ အမည်နှင့် လိပ်စာကို ဖြည့်ပါ။"),
+                ("ခရီးစဉ်အဆင့်များ", "သွားမည့်နေရာများကို အစဉ်လိုက် ကြည့်ပြီး လည်ပတ်စရာနေရာ သို့မဟုတ် စားသောက်ဆိုင်ကို ပြောင်းနိုင်ပါသည်။"),
+                ("မြေပုံနှင့် သွားလာချိန်", "လမ်းလျှောက်၊ ကားနှင့် အများပြည်သူသုံးယာဉ် လမ်းကြောင်းများကို Google Maps တွင် ကြည့်ပါ။"),
+                ("သတိပြုရန်", "ဖွင့်ချိန်၊ စျေးနှုန်းနှင့် ကြိုတင်မှာယူမှုကို တရားဝင်ဝဘ်ဆိုက်တွင် စစ်ဆေးပါ။ ဟိုတယ်ရွေးခြင်းသည် ဘွတ်ကင်မဟုတ်ပါ။")
+            ]
+        case .ne:
+            return [
+                ("एपको परिचय", "जापानको एकदिने यात्रा छान्नुहोस् र घुम्ने ठाउँ, दिउँसोको खाना, बेलुकाको खाना र होटलको योजना बनाउनुहोस्।"),
+                ("भाषा छान्नुहोस्", "मुख्य पर्दामा नेपाल / नेपाली छान्नुहोस्। यो निर्देशन नेपालीमा छ।"),
+                ("मार्ग र होटल", "क्षेत्र, भ्रमण मार्ग र प्रस्थान समय छान्नुहोस्। होटल छान्नुहोस् वा बुक गरेको होटलको नाम र ठेगाना लेख्नुहोस्।"),
+                ("यात्राका चरण", "स्थानहरू क्रमअनुसार हेर्नुहोस्। घुम्ने ठाउँ वा रेस्टुरेन्ट परिवर्तन गरी अर्को चरणमा जान सक्नुहुन्छ।"),
+                ("नक्सा र यात्रा समय", "हिँड्ने, कार वा सार्वजनिक यातायातको बाटो र समय हेर्न Google Maps खोल्नुहोस्।"),
+                ("ध्यान दिनुहोस्", "खुल्ने समय, मूल्य र बुकिङ आधिकारिक वेबसाइटमा जाँच्नुहोस्। होटल छान्नु भनेको बुकिङ होइन।")
+            ]
+        case .si:
+            return [
+                ("යෙදුම පිළිබඳව", "ජපානයේ එක්දින සංචාරයක් තෝරා සංචාරක ස්ථාන, දිවා ආහාරය, රාත්‍රී ආහාරය සහ හෝටලය සැලසුම් කරන්න."),
+                ("භාෂාව තෝරන්න", "මුල් පිටුවෙන් ශ්‍රී ලංකාව / සිංහල තෝරන්න. මෙම උපදෙස් සිංහලෙන් දැක්වේ."),
+                ("මාර්ගය සහ හෝටලය", "ප්‍රදේශය, සංචාරක මාර්ගය සහ පිටත්වන වේලාව තෝරන්න. හෝටලයක් තෝරන්න හෝ වෙන් කළ හෝටලයේ නම සහ ලිපිනය ඇතුළත් කරන්න."),
+                ("සංචාරයේ පියවර", "නැවතුම් පිළිවෙළින් බලන්න. සංචාරක ස්ථානයක් හෝ අවන්හලක් වෙනස් කර ඊළඟ පියවරට යන්න."),
+                ("සිතියම සහ ගමන් කාලය", "පා ගමන, මෝටර් රථය හෝ පොදු ප්‍රවාහනය සඳහා මාර්ග සහ කාලය Google Maps තුළ බලන්න."),
+                ("වැදගත්", "විවෘත වේලාවන්, මිල ගණන් සහ වෙන්කිරීම් නිල වෙබ් අඩවිවල තහවුරු කරන්න. හෝටලය තේරීම වෙන් කිරීමක් නොවේ.")
+            ]
+        case .da:
+            return [
+                ("Om appen", "Vælg en endagstur i Japan med seværdigheder, frokost, aftensmad og hotel."),
+                ("Vælg sprog", "Vælg Danmark / Dansk på startsiden. Denne vejledning vises på dansk."),
+                ("Rute og hotel", "Vælg område, tur og afgangstid. Vælg et hotel, eller indtast navn og adresse på dit reserverede hotel."),
+                ("Turens trin", "Følg stoppene i rækkefølge. Du kan ændre seværdigheder eller restauranter og gå til næste trin."),
+                ("Kort og rejsetid", "Åbn Google Maps for gåture, bil eller offentlig transport samt rejsetider og skift."),
+                ("Bemærk", "Tjek åbningstider, priser og reservationer på officielle hjemmesider. Valg af hotel er ikke en reservation.")
+            ]
+        case .fi:
+            return [
+                ("Tietoa sovelluksesta", "Valitse päivän matkareitti Japanissa ja suunnittele nähtävyydet, lounas, illallinen ja hotelli."),
+                ("Kielen valinta", "Valitse aloitusnäytöltä Suomi / Suomi. Tämä opas näkyy suomeksi."),
+                ("Reitti ja hotelli", "Valitse alue, matkareitti ja lähtöaika. Valitse hotelli tai syötä varaamasi hotellin nimi ja osoite."),
+                ("Matkan vaiheet", "Seuraa pysähdyksiä järjestyksessä. Voit vaihtaa nähtävyyksiä tai ravintoloita ja siirtyä eteenpäin."),
+                ("Kartta ja matka-aika", "Avaa Google Maps ja tarkista kävely-, auto- tai joukkoliikennereitit sekä matka-ajat ja vaihdot."),
+                ("Huomio", "Tarkista aukioloajat, hinnat ja varaukset virallisilta sivuilta. Hotellin valinta ei tee varausta.")
+            ]
+        case .no:
+            return [
+                ("Om appen", "Velg en dagstur i Japan med severdigheter, lunsj, middag og hotell."),
+                ("Velg språk", "Velg Norge / Norsk på startsiden. Denne veiledningen vises på norsk."),
+                ("Rute og hotell", "Velg område, tur og avreisetid. Velg et hotell eller oppgi navn og adresse til hotellet du har bestilt."),
+                ("Reisens steg", "Følg stoppene i rekkefølge. Du kan bytte severdigheter eller restauranter og gå videre."),
+                ("Kart og reisetid", "Åpne Google Maps for gange, bil eller kollektivtransport, reisetider og bytter."),
+                ("Viktig", "Sjekk åpningstider, priser og bestillinger på offisielle nettsider. Valg av hotell er ikke en reservasjon.")
+            ]
+        case .km:
+            return [
+                ("អំពីកម្មវិធី", "ជ្រើសរើសដំណើរកម្សាន្តមួយថ្ងៃនៅជប៉ុន និងរៀបចំកន្លែងទស្សនា អាហារថ្ងៃត្រង់ អាហារពេលល្ងាច និងសណ្ឋាគារ។"),
+                ("ជ្រើសរើសភាសា", "នៅទំព័រដើម ជ្រើសរើស កម្ពុជា / ភាសាខ្មែរ។ ការណែនាំនេះជាភាសាខ្មែរ។"),
+                ("ផ្លូវ និងសណ្ឋាគារ", "ជ្រើសរើសតំបន់ ផ្លូវទស្សនា និងម៉ោងចេញដំណើរ។ ជ្រើសសណ្ឋាគារ ឬបញ្ចូលឈ្មោះនិងអាសយដ្ឋានសណ្ឋាគារដែលបានកក់។"),
+                ("ជំហានដំណើរ", "មើលកន្លែងឈប់តាមលំដាប់។ អ្នកអាចប្តូរកន្លែងទស្សនា ឬភោជនីយដ្ឋាន ហើយបន្តទៅជំហានបន្ទាប់។"),
+                ("ផែនទី និងពេលធ្វើដំណើរ", "បើក Google Maps ដើម្បីមើលផ្លូវដើរ ផ្លូវរថយន្ត ឬដឹកជញ្ជូនសាធារណៈ និងពេលធ្វើដំណើរ។"),
+                ("សូមចំណាំ", "ពិនិត្យម៉ោងបើក តម្លៃ និងការកក់នៅគេហទំព័រផ្លូវការ។ ការជ្រើសសណ្ឋាគារមិនមែនជាការកក់ទេ។")
+            ]
+        case .he:
+            return [
+                ("על האפליקציה", "בחרו טיול יום ביפן הכולל אתרים, ארוחת צהריים, ארוחת ערב ומלון."),
+                ("בחירת שפה", "במסך הראשי בחרו ישראל / עברית. מדריך זה מוצג בעברית."),
+                ("מסלול ומלון", "בחרו אזור, מסלול ושעת יציאה. בחרו מלון או הזינו שם וכתובת של מלון שכבר הזמנתם."),
+                ("שלבי הטיול", "עקבו אחר התחנות לפי הסדר. אפשר לשנות אתר או מסעדה ולהמשיך לשלב הבא."),
+                ("מפה וזמני נסיעה", "פתחו Google Maps כדי לבדוק מסלולי הליכה, נסיעה ברכב או תחבורה ציבורית, זמני נסיעה והחלפות."),
+                ("חשוב לדעת", "בדקו שעות פתיחה, מחירים והזמנות באתרים הרשמיים. בחירת מלון אינה הזמנה.")
+            ]
+        case .cs:
+            return [
+                ("O aplikaci", "Vyberte jednodenní výlet po Japonsku s památkami, obědem, večeří a hotelem."),
+                ("Výběr jazyka", "Na úvodní obrazovce zvolte Česko / Čeština. Tento průvodce je česky."),
+                ("Trasa a hotel", "Vyberte oblast, trasu a čas odjezdu. Zvolte hotel nebo zadejte název a adresu již rezervovaného hotelu."),
+                ("Kroky výletu", "Postupujte po zastávkách v daném pořadí. Památky a restaurace můžete změnit a pokračovat."),
+                ("Mapa a doba cesty", "Otevřete Mapy Google pro pěší, automobilové či veřejné spojení, dobu jízdy a přestupy."),
+                ("Upozornění", "Na oficiálních stránkách ověřte otevírací dobu, ceny a rezervace. Výběr hotelu není rezervace.")
+            ]
+        case .el:
+            return [
+                ("Σχετικά με την εφαρμογή", "Επιλέξτε μια ημερήσια εκδρομή στην Ιαπωνία με αξιοθέατα, μεσημεριανό, δείπνο και ξενοδοχείο."),
+                ("Επιλογή γλώσσας", "Στην αρχική οθόνη επιλέξτε Ελλάδα / Ελληνικά. Αυτός ο οδηγός εμφανίζεται στα ελληνικά."),
+                ("Διαδρομή και ξενοδοχείο", "Επιλέξτε περιοχή, διαδρομή και ώρα αναχώρησης. Επιλέξτε ξενοδοχείο ή γράψτε όνομα και διεύθυνση του ξενοδοχείου που έχετε κλείσει."),
+                ("Βήματα ταξιδιού", "Ακολουθήστε τις στάσεις με τη σειρά. Μπορείτε να αλλάξετε αξιοθέατα ή εστιατόρια και να προχωρήσετε."),
+                ("Χάρτης και χρόνος διαδρομής", "Ανοίξτε τους Χάρτες Google για διαδρομές πεζή, με αυτοκίνητο ή δημόσιες συγκοινωνίες, ώρες και μετεπιβιβάσεις."),
+                ("Σημαντικό", "Ελέγξτε ωράρια, τιμές και κρατήσεις στις επίσημες ιστοσελίδες. Η επιλογή ξενοδοχείου δεν αποτελεί κράτηση.")
+            ]
+        case .ro:
+            return [
+                ("Despre aplicație", "Alegeți o excursie de o zi în Japonia, cu obiective turistice, prânz, cină și hotel."),
+                ("Alegerea limbii", "Pe ecranul principal alegeți România / Română. Acest ghid este în română."),
+                ("Traseu și hotel", "Selectați regiunea, traseul și ora plecării. Alegeți un hotel sau introduceți numele și adresa hotelului rezervat."),
+                ("Etapele călătoriei", "Urmați opririle în ordine. Puteți schimba obiectivele sau restaurantele și continua la pasul următor."),
+                ("Hartă și durate", "Deschideți Google Maps pentru trasee pe jos, cu mașina sau transportul public, durate și schimbări."),
+                ("Atenție", "Verificați programul, prețurile și rezervările pe site-urile oficiale. Alegerea hotelului nu înseamnă rezervare.")
+            ]
+        case .hu:
+            return [
+                ("Az alkalmazásról", "Válasszon egynapos japán utat látnivalókkal, ebéddel, vacsorával és szállodával."),
+                ("Nyelvválasztás", "A kezdőlapon válassza Magyarország / Magyar lehetőséget. Ez az útmutató magyarul jelenik meg."),
+                ("Útvonal és szálloda", "Válasszon régiót, útvonalat és indulási időt. Válasszon szállodát, vagy írja be a lefoglalt szálloda nevét és címét."),
+                ("Az utazás lépései", "Kövesse a megállókat sorrendben. Módosíthat látnivalót vagy éttermet, majd továbbléphet."),
+                ("Térkép és menetidő", "Nyissa meg a Google Térképet a gyalogos, autós és tömegközlekedési útvonalak, menetidők és átszállások megtekintéséhez."),
+                ("Figyelem", "A nyitvatartást, árakat és foglalásokat ellenőrizze a hivatalos oldalakon. A szálloda kiválasztása nem foglalás.")
+            ]
+        case .bn:
+            return [
+                ("অ্যাপ সম্পর্কে", "জাপানে এক দিনের ভ্রমণ বেছে নিন এবং দর্শনীয় স্থান, দুপুরের খাবার, রাতের খাবার ও হোটেলের পরিকল্পনা করুন।"),
+                ("ভাষা নির্বাচন", "প্রথম পাতায় বাংলাদেশ / বাংলা নির্বাচন করুন। এই নির্দেশিকা বাংলায় দেখানো হয়।"),
+                ("ভ্রমণপথ ও হোটেল", "এলাকা, ভ্রমণপথ ও যাত্রার সময় নির্বাচন করুন। হোটেল বেছে নিন অথবা আগে বুক করা হোটেলের নাম ও ঠিকানা লিখুন।"),
+                ("ভ্রমণের ধাপ", "গন্তব্যগুলো ক্রমানুসারে দেখুন। দর্শনীয় স্থান বা রেস্তোরাঁ বদলে পরের ধাপে যেতে পারেন।"),
+                ("মানচিত্র ও যাত্রার সময়", "হাঁটা, গাড়ি বা গণপরিবহনের পথ ও সময় দেখতে Google Maps খুলুন।"),
+                ("গুরুত্বপূর্ণ", "যাত্রার আগে সরকারি বা আনুষ্ঠানিক ওয়েবসাইটে খোলার সময়, মূল্য ও বুকিং যাচাই করুন। হোটেল নির্বাচন মানেই বুকিং নয়।")
+            ]
+        case .ur:
+            return [
+                ("ایپ کے بارے میں", "جاپان میں ایک دن کا سفر منتخب کریں اور سیاحتی مقامات، دوپہر کا کھانا، رات کا کھانا اور ہوٹل طے کریں۔"),
+                ("زبان منتخب کریں", "ابتدائی صفحے پر پاکستان / اردو منتخب کریں۔ یہ ہدایت نامہ اردو میں ہے۔"),
+                ("راستہ اور ہوٹل", "علاقہ، سیاحتی راستہ اور روانگی کا وقت منتخب کریں۔ ہوٹل منتخب کریں یا پہلے سے بک شدہ ہوٹل کا نام اور پتہ درج کریں۔"),
+                ("سفر کے مراحل", "مقامات کو ترتیب سے دیکھیں۔ سیاحتی مقام یا ریستوران تبدیل کرکے اگلے مرحلے پر جائیں۔"),
+                ("نقشہ اور سفر کا وقت", "پیدل، کار یا پبلک ٹرانسپورٹ کا راستہ اور وقت دیکھنے کے لیے Google Maps کھولیں۔"),
+                ("اہم بات", "روانگی سے پہلے سرکاری ویب سائٹ پر اوقات، قیمتیں اور بکنگ کی تصدیق کریں۔ ہوٹل منتخب کرنا بکنگ نہیں ہے۔")
+            ]
+        case .uk:
+            return [
+                ("Про застосунок", "Оберіть одноденну подорож Японією з пам’ятками, обідом, вечерею та готелем."),
+                ("Вибір мови", "На головному екрані оберіть Україна / Українська. Ця інструкція українською мовою."),
+                ("Маршрут і готель", "Оберіть регіон, маршрут і час відправлення. Виберіть готель або введіть назву та адресу вже заброньованого готелю."),
+                ("Етапи подорожі", "Переглядайте зупинки послідовно. Можна замінити пам’ятку чи ресторан і перейти далі."),
+                ("Карта та час у дорозі", "Відкрийте Google Карти, щоб переглянути піший, автомобільний або громадський маршрут, час і пересадки."),
+                ("Зверніть увагу", "Перевіряйте години роботи, ціни й бронювання на офіційних сайтах. Вибір готелю не є бронюванням.")
+            ]
+        case .hr:
+            return [
+                ("O aplikaciji", "Odaberite jednodnevni izlet u Japanu sa znamenitostima, ručkom, večerom i hotelom."),
+                ("Odabir jezika", "Na početnom zaslonu odaberite Hrvatska / Hrvatski. Ove su upute na hrvatskom."),
+                ("Ruta i hotel", "Odaberite regiju, rutu i vrijeme polaska. Odaberite hotel ili unesite naziv i adresu već rezerviranog hotela."),
+                ("Koraci putovanja", "Pratite stanice redom. Možete promijeniti znamenitost ili restoran i nastaviti dalje."),
+                ("Karta i trajanje putovanja", "Otvorite Google karte za pješačke, automobilske ili javne prijevozne rute, trajanja i presjedanja."),
+                ("Važno", "Provjerite radno vrijeme, cijene i rezervacije na službenim stranicama. Odabir hotela nije rezervacija.")
             ]
         default:
             return sections(.en)
@@ -5011,8 +5352,11 @@ private struct OriginalCourseView: View {
     @State private var nearbySearching = false
     @State private var nearbyError: String?
     @State private var nearbySearchID = UUID()
+    @State private var presentedMap: PlannerMapRequest?
 
-    private func t(_ key: String) -> String { OriginalCourseText.get(key, language) }
+    private func t(_ key: String) -> String {
+        VisitorCopy.show(OriginalCourseText.get(key, language), language: language)
+    }
     private func clock(_ minutes: Int) -> String {
         String(format: "%02d:%02d", (minutes / 60) % 24, minutes % 60)
     }
@@ -5030,7 +5374,7 @@ private struct OriginalCourseView: View {
     private func url(_ query: String) -> URL? {
         var parts = URLComponents(string: "https://www.google.com/maps/search/")
         parts?.queryItems = [URLQueryItem(name: "api", value: "1"), URLQueryItem(name: "query", value: query)]
-        return parts?.url
+        return parts?.url.map { GoogleMapsLocale.localize($0, language: language) }
     }
     private func directions(_ index: Int, mode: String) -> URL? {
         var parts = URLComponents(string: "https://www.google.com/maps/dir/")
@@ -5038,7 +5382,7 @@ private struct OriginalCourseView: View {
                              URLQueryItem(name: "origin", value: placeQuery(stops[index - 1])),
                              URLQueryItem(name: "destination", value: placeQuery(stops[index])),
                              URLQueryItem(name: "travelmode", value: mode == "taxi" ? "driving" : mode)]
-        return parts?.url
+        return parts?.url.map { GoogleMapsLocale.localize($0, language: language) }
     }
     private func estimatedTime(_ index: Int, mode: String) -> TravelTime? {
         guard index > 0, let a = stops[index - 1].latitude, let b = stops[index - 1].longitude,
@@ -5086,6 +5430,9 @@ private struct OriginalCourseView: View {
             if loaded, let data = try? JSONEncoder().encode(updated), let value = String(data: data, encoding: .utf8) { savedCourse = value }
         }
         .task(id: searchKey) { await searchPlaces() }
+        .sheet(item: $presentedMap) { request in
+            PlannerMapScreen(request: request, language: language)
+        }
         // Original-course legs use prefilled Google Maps directions links, too.
         // Route-provider failures cannot block any directions link.
     }
@@ -5122,7 +5469,11 @@ private struct OriginalCourseView: View {
                 Text(stops[0].name)
             }
             if !item.name.isEmpty {
-                if let link = url(placeQuery(item)) { Link(destination: link) { Label(t("map"), systemImage: "map") } }
+                if let link = url(placeQuery(item)) {
+                    Button(action: { presentedMap = PlannerMapRequest(url: link, title: t("map")) }) {
+                        Label(t("map"), systemImage: "map")
+                    }
+                }
                 if let options = candidates[item.id], !options.isEmpty {
                     Text(t("candidate")).font(.caption).foregroundStyle(.secondary)
                     ForEach(options) { place in
@@ -5313,7 +5664,7 @@ private struct OriginalCourseView: View {
             if !stops[index - 1].name.isEmpty && !stops[index].name.isEmpty {
                 ForEach(["walking", "taxi", "transit"], id: \.self) { mode in
                     if let link = directions(index, mode: mode) {
-                        Link(destination: link) {
+                        Button(action: { presentedMap = PlannerMapRequest(url: link, title: t("route")) }) {
                             HStack {
                                 Image(systemName: mode == "walking" ? "figure.walk" : mode == "taxi" ? "car.fill" : "tram.fill")
                                 Text(t(mode == "walking" ? "walk" : mode))
@@ -5486,7 +5837,7 @@ private enum PlannerMapText {
         "note": ["選択言語で地図を読み込みます。地名・店舗名は現地表記が残る場合があります。", "선택한 언어로 지도를 요청합니다. 지명·상호는 현지 언어로 남을 수 있습니다.", "以所选语言加载地图；部分地名与店名可能保留当地文字。", "The map is requested in your chosen language. Some place and business names may remain in the local language.", "โหลดแผนที่ตามภาษาที่เลือก ชื่อสถานที่และร้านบางแห่งอาจยังเป็นภาษาท้องถิ่น"]
     ]
     static func text(_ key: String, _ language: GuideLanguage) -> String {
-        values[key]?[language.index] ?? key
+        VisitorCopy.show(values[key]?[language.index] ?? key, language: language)
     }
 }
 
@@ -5568,8 +5919,9 @@ private struct PlannerMapWebView: UIViewRepresentable {
         view.uiDelegate = context.coordinator
         view.allowsBackForwardNavigationGestures = true
         var request = URLRequest(url: url)
-        let code = languageCode == "zh" ? "zh-CN" : languageCode
-        request.setValue("\(code),en;q=0.8", forHTTPHeaderField: "Accept-Language")
+        let countryLanguage = GuideLanguage(rawValue: languageCode) ?? .ja
+        let code = countryLanguage.webLanguageCode
+        request.setValue("\(code),en;q=0.5", forHTTPHeaderField: "Accept-Language")
         view.load(request)
         return view
     }
