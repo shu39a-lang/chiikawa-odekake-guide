@@ -1405,7 +1405,7 @@ private struct PlannerView: View {
     private func selectedVenue(_ index: Int) -> Venue { route.stops[index].choices[selectedIndex(index)] }
 
     private func duration(_ stop: Stop, venue: Venue) -> Int {
-        if skipLunch && venue.name.hasPrefix("Lunch ") { return 0 }
+        if stop.type == "food" && (skipLunch || lunchSelection == nil) { return 0 }
         let base: Int
         if let specific = guide.visitMinutes[venue.name] {
             base = specific
@@ -1439,21 +1439,15 @@ private struct PlannerView: View {
             clock += duration(route.stops[previous], venue: current)
             // No geographic location exists for an unselected lunch slot.
             // Its route cannot be counted twice as an invented gap.
-            if next.name.hasPrefix("Lunch ") && lunchSelection == nil {
+            if route.stops[previous + 1].type == "food" && lunchSelection == nil {
                 continue
             }
-            let source: String
-            if current.name.hasPrefix("Lunch ") && lunchSelection == nil {
-                var lastRealStop = previous - 1
-                while lastRealStop > 0 &&
-                    selectedVenue(lastRealStop).name.hasPrefix("Lunch ") {
-                    lastRealStop -= 1
-                }
-                source = venueQuery(selectedVenue(max(0, lastRealStop)))
-            } else {
-                source = venueQuery(current)
+            var priorIndex = previous
+            while priorIndex > 0 && selectedRouteStopQuery(priorIndex) == nil {
+                priorIndex -= 1
             }
-            let target = venueQuery(next)
+            guard let source = selectedRouteStopQuery(priorIndex),
+                  let target = selectedRouteStopQuery(previous + 1) else { continue }
             let available = routeLegTimes[routeLegKey(origin: source, destination: target)] ?? [:]
             let measured = preferredVerifiedRouteMinutes(available)
             // The remaining provisional gap is a schedule allowance only.
@@ -1490,14 +1484,18 @@ private struct PlannerView: View {
     private var sharedPlan: String {
         var lines = ["Japan Day Planner · \(routeText(route, 0))"]
         for index in route.stops.indices {
-            let venue = selectedVenue(index)
-            if skipLunch && venue.name.hasPrefix("Lunch ") { continue }
-            if venue.name.hasPrefix("Lunch "), let place = lunchSelection {
-                lines.append("\(time(startOfStop(index))) · \(place.name) · \(place.address)")
-            } else {
-                let url = URL(string: venue.url).flatMap { translatedGuideURL($0) }?.absoluteString ?? venue.url
-                lines.append("\(time(startOfStop(index))) · \(venueText(venue, 0)) · \(url)")
+            if route.stops[index].type == "food" {
+                if skipLunch { continue }
+                if let place = lunchSelection {
+                    lines.append("\(time(startOfStop(index))) · \(place.name) · \(place.address)")
+                } else {
+                    lines.append("\(time(startOfStop(index))) · \(journeyText("lunchSearch"))")
+                }
+                continue
             }
+            let venue = selectedVenue(index)
+            let url = URL(string: venue.url).flatMap { translatedGuideURL($0) }?.absoluteString ?? venue.url
+            lines.append("\(time(startOfStop(index))) · \(venueText(venue, 0)) · \(url)")
         }
         if !hotelQuery.isEmpty { lines.insert("\(journeyText("chooseHotel")) · \(hotelName)", at: 1) }
         if !skipDinner { lines.append(journeyText(dinnerNearHotel ? "earlyNote" : "lateNote")) }
@@ -1759,13 +1757,16 @@ private struct PlannerView: View {
         if dinnerArea == "last" { return false }
         return finishMinutes < 18 * 60
     }
-    private var lastVenue: Venue { selectedVenue(route.stops.count - 1) }
+    private var lastVenue: Venue {
+        let index = route.stops.indices.reversed().first(where: { route.stops[$0].type != "food" }) ?? route.stops.count - 1
+        return selectedVenue(index)
+    }
     private var dinnerAnchorQuery: String { dinnerNearHotel ? hotelQuery : venueQuery(lastVenue) }
     private var dinnerAnchorName: String { dinnerNearHotel ? hotelName : venueText(lastVenue, 0) }
     private var stages: [JourneyStage] {
         var items: [JourneyStage] = [.departure]
         items.append(contentsOf: route.stops.indices.filter {
-            !(skipLunch && selectedVenue($0).name.hasPrefix("Lunch "))
+            !(skipLunch && route.stops[$0].type == "food")
         }.map { .stop($0) })
         if !skipDinner {
             if dinnerNearHotel && !hotelQuery.isEmpty { items.append(.hotelBeforeDinner) }
@@ -1778,9 +1779,7 @@ private struct PlannerView: View {
         switch stage {
         case .departure: return nil
         case .stop(let index):
-            let venue = selectedVenue(index)
-            if venue.name.hasPrefix("Lunch ") { return lunchSelection?.query }
-            return venueQuery(venue)
+            return selectedRouteStopQuery(index)
         case .hotelBeforeDinner, .hotelAfterDinner:
             return hotelQuery.isEmpty ? nil : hotelQuery
         case .dinner:
@@ -1832,7 +1831,7 @@ private struct PlannerView: View {
         }
     }
     private var lunchAnchorKey: String {
-        for index in route.stops.indices where index > 0 && selectedVenue(index).name.hasPrefix("Lunch ") {
+        for index in route.stops.indices where index > 0 && route.stops[index].type == "food" {
             return venueQuery(selectedVenue(index - 1))
         }
         return ""
@@ -1841,7 +1840,9 @@ private struct PlannerView: View {
         switch item {
         case .departure: return journeyText("depart")
         case .stop(let index):
-            if selectedVenue(index).name.hasPrefix("Lunch "), let place = lunchSelection { return place.name }
+            if route.stops[index].type == "food" {
+                return lunchSelection?.name ?? journeyText("lunchSearch")
+            }
             return venueText(selectedVenue(index), 0)
         case .hotelBeforeDinner: return journeyText("hotelFirst")
         case .dinner: return journeyText(dinnerNearHotel ? "dinnerHotel" : "dinnerLast")
@@ -2814,7 +2815,7 @@ private struct PlannerView: View {
         // Morning hotel -> first stop.
         if origin == hotelQuery && destination == venueQuery(selectedVenue(0)) { return startMinutes }
         // Each attraction -> next stop, restaurant or return to the hotel.
-        for index in route.stops.indices where venueQuery(selectedVenue(index)) == origin {
+        for index in route.stops.indices where selectedRouteStopQuery(index) == origin {
             return startOfStop(index) + duration(route.stops[index], venue: selectedVenue(index))
         }
         // The dinner stage and evening return are not morning transfers.
@@ -2927,7 +2928,7 @@ private struct PlannerView: View {
                 }
                 DisclosureGroup(extra("arrival")) { arrivalCard.padding(.top, 10) }
             case .stop(let index):
-                if route.stops[index].type == "food" && lunchSelection == nil {
+                if route.stops[index].type == "food" {
                     lunchCard(index)
                 } else {
                     stopCard(index)
@@ -3211,8 +3212,16 @@ private struct PlannerView: View {
     private var cityQuery: String {
         ["asakusa": "Tokyo", "ueno": "Tokyo", "kyoto": "Kyoto", "osaka": "Osaka", "nara": "Nara", "hiroshima": "Hiroshima"][route.id] ?? "Japan"
     }
+    private func selectedRouteStopQuery(_ index: Int) -> String? {
+        guard route.stops.indices.contains(index) else { return nil }
+        if route.stops[index].type == "food" {
+            return skipLunch ? nil : lunchSelection?.query
+        }
+        return venueQuery(selectedVenue(index))
+    }
     private func venueQuery(_ venue: Venue) -> String {
-        if venue.name.hasPrefix("Lunch "), let place = lunchSelection { return place.query }
+        if route.stops.contains(where: { $0.type == "food" && $0.choices.contains(where: { $0.name == venue.name }) }),
+           let place = lunchSelection { return place.query }
         // Use fixed coordinates for known streets, squares and major sites.
         // This avoids a transient MapKit name-search failure hiding route times.
         if let point = pinnedVenueCoordinate(venue) {
@@ -3590,22 +3599,27 @@ private struct PlannerView: View {
         // A visitor can skip choosing a lunch restaurant. In that case never
         // calculate a route from the text "Lunch near ..." as if it were a POI.
         var previousIndex = index - 1
-        while previousIndex > 0 &&
-            selectedVenue(previousIndex).name.hasPrefix("Lunch ") && lunchSelection == nil {
+        while previousIndex > 0 && selectedRouteStopQuery(previousIndex) == nil {
             previousIndex -= 1
         }
         let from = selectedVenue(previousIndex)
         let to = selectedVenue(index)
-        let fromTitle = from.name.hasPrefix("Lunch ")
-            ? (lunchSelection?.name ?? venueText(from, 0)) : venueText(from, 0)
+        let fromTitle = route.stops[previousIndex].type == "food"
+            ? (lunchSelection?.name ?? journeyText("lunchSearch")) : venueText(from, 0)
+        let toTitle = route.stops[index].type == "food"
+            ? (lunchSelection?.name ?? journeyText("lunchSearch")) : venueText(to, 0)
+        let fromQuery = selectedRouteStopQuery(previousIndex)
+        let toQuery = selectedRouteStopQuery(index)
         let isOriginalPair = previousIndex == index - 1 &&
             selectedIndex(previousIndex) == 0 && selectedIndex(index) == 0
         let west = Set(["Sensoji Temple", "Asakusa Culture Tourist Information Center", "Nakamise Shopping Street", "Ramen Yoroiya", "Sushizanmai Asakusa Kaminarimon", "Asakusa Imahan"])
         let east = Set(["Tokyo Skytree", "Sumida Aquarium", "Postal Museum Japan", "Tokyo Solamachi"])
         return VStack(alignment: .leading, spacing: 12) {
             Label(journeyText("nextDestination"), systemImage: "arrow.down.circle.fill").font(.headline)
-            Text("\(fromTitle) → \(venueText(to, 0))").font(.subheadline.bold())
-            if isInternalSiteTransfer(origin: venueQuery(from), destination: venueQuery(to)) {
+            Text("\(fromTitle) → \(toTitle)").font(.subheadline.bold())
+            if route.stops[index].type == "food" || route.stops[previousIndex].type == "food" {
+                Text(journeyText("lunchNote")).font(.subheadline)
+            } else if isInternalSiteTransfer(origin: venueQuery(from), destination: venueQuery(to)) {
                 Text(hotelTravelText("siteWalk")).font(.subheadline)
             } else if let note = featuredTransferNote(from: from, to: to) {
                 Text(note).font(.subheadline)
@@ -3622,10 +3636,10 @@ private struct PlannerView: View {
             }
             // An unselected meal is not a location. The next confirmed stop
             // will use the preceding real place as its origin.
-            if to.name.hasPrefix("Lunch ") && lunchSelection == nil {
-                Text(journeyText("optionalMeal")).font(.caption).foregroundStyle(.secondary)
+            if let fromQuery, let toQuery {
+                routeLinks(origin: fromQuery, destination: toQuery)
             } else {
-                routeLinks(origin: venueQuery(from), destination: venueQuery(to))
+                Text(journeyText("optionalMeal")).font(.caption).foregroundStyle(.secondary)
             }
         }
         .fixedSize(horizontal: false, vertical: true)
