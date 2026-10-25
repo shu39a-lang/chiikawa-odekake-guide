@@ -1025,6 +1025,55 @@ private enum PlannerUX {
     }
 }
 
+// Course-picker labels are translated independently of the five legacy content indices.
+private enum CourseSelectionCopy {
+    private static let labels: [String: [String]] = [
+        "ja": ["① 地域を選ぶ", "② 都道府県を選ぶ", "③ 行きたい観光コースを選ぶ", "表示された候補から選んでください。選ぶまで特定のコースは確定しません。"],
+        "en": ["① Choose a region", "② Choose a prefecture", "③ Choose your sightseeing course", "Select one of the courses below. No course is selected automatically."],
+        "ko": ["① 지역 선택", "② 도도부현 선택", "③ 관광 코스 선택", "아래 코스 중 하나를 선택하세요. 자동으로 결정되지 않습니다."],
+        "zh": ["① 选择地区", "② 选择都道府县", "③ 选择观光路线", "请从以下路线中选择，系统不会自动选定路线。"],
+        "zht": ["① 選擇地區", "② 選擇都道府縣", "③ 選擇觀光路線", "請從下列路線選擇，系統不會自動選定。"],
+        "th": ["① เลือกภูมิภาค", "② เลือกจังหวัด", "③ เลือกเส้นทางท่องเที่ยว", "เลือกเส้นทางด้านล่าง ไม่มีการเลือกอัตโนมัติ"],
+        "fil": ["① Pumili ng rehiyon", "② Pumili ng prefecture", "③ Pumili ng rutang panturista", "Pumili ng ruta sa ibaba. Walang awtomatikong pagpili."],
+        "vi": ["① Chọn vùng", "② Chọn tỉnh", "③ Chọn lịch trình tham quan", "Chọn một lịch trình bên dưới. Không tự động chọn."],
+        "id": ["① Pilih wilayah", "② Pilih prefektur", "③ Pilih rute wisata", "Pilih rute di bawah. Tidak ada pilihan otomatis."],
+        "ms": ["① Pilih wilayah", "② Pilih wilayah pentadbiran", "③ Pilih laluan pelancongan", "Pilih laluan di bawah. Tiada pemilihan automatik."],
+        "fr": ["① Choisir une région", "② Choisir une préfecture", "③ Choisir un itinéraire touristique", "Choisissez un itinéraire ci-dessous. Aucun choix automatique."],
+        "de": ["① Region wählen", "② Präfektur wählen", "③ Ausflugstour wählen", "Wählen Sie unten eine Tour. Es wird nichts automatisch ausgewählt."],
+        "hi": ["① क्षेत्र चुनें", "② प्रान्त चुनें", "③ दर्शनीय यात्रा चुनें", "नीचे कोई मार्ग चुनें। कोई स्वचालित चयन नहीं है।"],
+        "it": ["① Scegli una regione", "② Scegli una prefettura", "③ Scegli un itinerario", "Scegli un percorso qui sotto. Nessuna selezione automatica."],
+        "es": ["① Elegir región", "② Elegir prefectura", "③ Elegir ruta turística", "Elige una ruta abajo. No se selecciona ninguna automáticamente."],
+        "ru": ["① Выберите регион", "② Выберите префектуру", "③ Выберите маршрут", "Выберите маршрут ниже. Автоматического выбора нет."],
+        "nl": ["① Kies een regio", "② Kies een prefectuur", "③ Kies een route", "Kies hieronder een route. Er wordt niets automatisch gekozen."],
+        "pt": ["① Escolha uma região", "② Escolha uma prefeitura", "③ Escolha um roteiro", "Escolha um roteiro abaixo. Nada é selecionado automaticamente."],
+        "sv": ["① Välj region", "② Välj prefektur", "③ Välj sightseeingrutt", "Välj en rutt nedan. Ingen automatisk förvald rutt."],
+        "mn": ["① Бүсээ сонгоно уу", "② Мужаа сонгоно уу", "③ Аяллын маршрутаа сонгоно уу", "Доорх маршрутаас сонгоно уу. Автоматаар сонгохгүй."],
+        "ar": ["① اختر المنطقة", "② اختر المحافظة", "③ اختر مسار الزيارة", "اختر مساراً أدناه. لن يُختار أي مسار تلقائياً."],
+        "tr": ["① Bölge seçin", "② Valilik bölgesi seçin", "③ Gezi rotası seçin", "Aşağıdaki rotalardan birini seçin. Otomatik seçim yapılmaz."],
+        "pl": ["① Wybierz region", "② Wybierz prefekturę", "③ Wybierz trasę zwiedzania", "Wybierz trasę poniżej. Brak automatycznego wyboru."],
+        "my": ["① ဒေသရွေးပါ", "② စီရင်စုရွေးပါ", "③ ခရီးစဉ်ရွေးပါ", "အောက်ပါခရီးစဉ်များထဲမှ ရွေးပါ။ အလိုအလျောက် မရွေးပါ။"],
+        "ne": ["① क्षेत्र छान्नुहोस्", "② प्रिफेक्चर छान्नुहोस्", "③ घुम्ने मार्ग छान्नुहोस्", "तलको मार्ग छान्नुहोस्। स्वतः चयन हुँदैन।"],
+        "si": ["① කලාපය තෝරන්න", "② ප්‍රාන්තය තෝරන්න", "③ සංචාරක මාර්ගය තෝරන්න", "පහතින් මාර්ගයක් තෝරන්න. ස්වයංක්‍රීය තේරීමක් නැත."],
+        "da": ["① Vælg region", "② Vælg præfektur", "③ Vælg sightseeingrute", "Vælg en rute nedenfor. Intet vælges automatisk."],
+        "fi": ["① Valitse alue", "② Valitse prefektuuri", "③ Valitse nähtävyysreitti", "Valitse reitti alta. Automaattista valintaa ei tehdä."],
+        "no": ["① Velg region", "② Velg prefektur", "③ Velg sightseeingrute", "Velg en rute nedenfor. Ingen automatisk valg."],
+        "km": ["① ជ្រើសរើសតំបន់", "② ជ្រើសរើសខេត្ត", "③ ជ្រើសរើសដំណើរកម្សាន្ត", "ជ្រើសរើសដំណើរខាងក្រោម។ មិនជ្រើសដោយស្វ័យប្រវត្តិទេ។"],
+        "he": ["① בחרו אזור", "② בחרו מחוז", "③ בחרו מסלול טיול", "בחרו מסלול מהרשימה. לא נבחר מסלול באופן אוטומטי."],
+        "cs": ["① Vyberte oblast", "② Vyberte prefekturu", "③ Vyberte výletní trasu", "Vyberte trasu níže. Nic se nevybere automaticky."],
+        "el": ["① Επιλέξτε περιοχή", "② Επιλέξτε νομό", "③ Επιλέξτε διαδρομή", "Επιλέξτε διαδρομή παρακάτω. Δεν επιλέγεται αυτόματα."],
+        "ro": ["① Alegeți regiunea", "② Alegeți prefectura", "③ Alegeți traseul turistic", "Alegeți un traseu de mai jos. Nimic nu este selectat automat."],
+        "hu": ["① Válasszon régiót", "② Válasszon prefektúrát", "③ Válasszon útvonalat", "Válasszon az alábbi útvonalak közül. Nincs automatikus választás."],
+        "bn": ["① অঞ্চল নির্বাচন করুন", "② প্রিফেকচার নির্বাচন করুন", "③ ভ্রমণপথ নির্বাচন করুন", "নিচের ভ্রমণপথ থেকে বেছে নিন। স্বয়ংক্রিয় নির্বাচন নেই।"],
+        "ur": ["① علاقہ منتخب کریں", "② پریفیکچر منتخب کریں", "③ سیاحتی راستہ منتخب کریں", "نیچے سے راستہ منتخب کریں۔ خودکار انتخاب نہیں ہوگا۔"],
+        "uk": ["① Виберіть регіон", "② Виберіть префектуру", "③ Виберіть туристичний маршрут", "Виберіть маршрут нижче. Автоматичного вибору немає."],
+        "hr": ["① Odaberite regiju", "② Odaberite prefekturu", "③ Odaberite turističku rutu", "Odaberite rutu u nastavku. Nema automatskog odabira."],
+    ]
+    static func get(_ step: Int, _ language: GuideLanguage) -> String {
+        let words = labels[language.rawValue] ?? labels["en"] ?? []
+        return words.indices.contains(step) ? words[step] : "Select a course"
+    }
+}
+
 private struct PlannerView: View {
     private let guide = GuideData.bundled
     @AppStorage("japanDay.route") private var routeID = "asakusa"
@@ -1042,6 +1091,10 @@ private struct PlannerView: View {
     @State private var presentedMap: PlannerMapRequest?
     @AppStorage("japanDay.language") private var languageCode = "ja"
     @State private var showingGuide = false
+    // An existing routeID is only a stored default, never a new selection.
+    @State private var pickedRegion = false
+    @State private var pickedPrefecture = false
+    @State private var pickedCourse = false
     @State private var showingLanguageSelection = false
     @State private var selectionInstructionsLanguage: GuideLanguage?
     @State private var instructionsLanguage: GuideLanguage?
@@ -1123,6 +1176,9 @@ private struct PlannerView: View {
         discardTransientSearchResults()
         selectedJourneyStage = .departure
         journeyCompleted = false
+        pickedRegion = true
+        pickedPrefecture = true
+        pickedCourse = true
         showingGuide = true
     }
     private func routeText(_ item: DayRoute, _ field: Int) -> String {
@@ -1262,11 +1318,12 @@ private struct PlannerView: View {
                     }.buttonStyle(.plain)
                 }
                 Text(ux("popularAreas")).font(.headline).foregroundStyle(.white)
+                Text(CourseSelectionCopy.get(3, language))
+                    .font(.footnote).foregroundStyle(.secondary)
                 HStack(spacing: 10) {
                     ForEach(["tokyo", "kyoto", "osaka"], id: \.self) { place in
                         Button {
                             openFreshGuide()
-                            regionID = NationwideRoutes.prefectures.first(where: { $0.id == place })?.region ?? "kanto"
                             selectPrefecture(place)
                         } label: {
                             VStack(spacing: 6) {
@@ -1296,30 +1353,41 @@ private struct PlannerView: View {
         NationwideRoutes.prefectures.filter { $0.region == regionID }
     }
     private var routesInPrefecture: [DayRoute] {
-        guide.routes.filter { ($0.prefecture ?? NationwideRoutes.existingPrefectures[$0.id]) == prefectureID }
+        let featured = FeaturedRoutes.routes.filter {
+            ($0.prefecture ?? NationwideRoutes.existingPrefectures[$0.id]) == prefectureID
+        }
+        let usual = guide.routes.filter {
+            ($0.prefecture ?? NationwideRoutes.existingPrefectures[$0.id]) == prefectureID
+        }
+        let featuredIDs = Set(featured.map(\.id))
+        return featured + usual.filter { !featuredIDs.contains($0.id) }
     }
     private func selectRegion(_ value: String) {
-        guard value != regionID else { return }
-        regionID = value
-        if let first = NationwideRoutes.prefectures.first(where: { $0.region == value }) {
-            selectPrefecture(first.id)
-        }
-    }
-    private func selectPrefecture(_ value: String) {
-        if value == prefectureID {
+        // Region only reveals prefectures; it never silently chooses a route.
+        if !pickedRegion || regionID != value {
             resetHotelSelection()
             resetJourney()
-            confirmedRoutePlaces = [:]
-            resolvedPlaceCache = [:]
-            presentedMap = nil
-            return
         }
+        regionID = value
+        pickedRegion = true
+        pickedPrefecture = false
+        pickedCourse = false
+        showingSummary = false
+    }
+    private func selectPrefecture(_ value: String) {
+        guard let option = NationwideRoutes.prefectures.first(where: { $0.id == value }) else { return }
         resetHotelSelection()
         resetJourney()
+        confirmedRoutePlaces = [:]
+        resolvedPlaceCache = [:]
+        presentedMap = nil
         prefectureID = value
-        if let first = guide.routes.first(where: { ($0.prefecture ?? NationwideRoutes.existingPrefectures[$0.id]) == value }) {
-            routeID = first.id
-        }
+        regionID = option.region
+        pickedRegion = true
+        pickedPrefecture = true
+        pickedCourse = false
+        showingSummary = false
+        // routeID stays stored for resumption only; no details appear until user taps a course.
     }
     private func label(_ japanese: String, _ english: String) -> String {
         language == .ja ? japanese : english
@@ -1451,7 +1519,9 @@ private struct PlannerView: View {
                         VStack(alignment: .leading, spacing: 18) {
                             plannerHeading
                             controls
+                            if pickedCourse {
                             selectedRouteHeading
+                                .id("selectedCourse")
                             Text(journeyText("opening")).font(.subheadline).foregroundStyle(.secondary)
                             if language != .ja {
                                 Text(journeyText("webTranslationNote")).font(.footnote).foregroundStyle(.secondary)
@@ -1477,6 +1547,7 @@ private struct PlannerView: View {
                                     .background(PlannerTheme.amber, in: RoundedRectangle(cornerRadius: 16))
                             }.buttonStyle(.plain)
                             journeyCurrent.id("currentStage")
+                            }
                             Text(text("footer")).font(.footnote).foregroundStyle(.secondary).padding(.bottom)
                         }.padding()
                     }
@@ -1499,8 +1570,10 @@ private struct PlannerView: View {
                         }.accessibilityLabel(PlannerInstructions.buttonTitle(language))
                     }
                     ToolbarItem(placement: .navigationBarTrailing) {
-                        ShareLink(item: sharedPlan) { Image(systemName: "square.and.arrow.up") }
-                            .accessibilityLabel(text("share"))
+                        if pickedCourse {
+                            ShareLink(item: sharedPlan) { Image(systemName: "square.and.arrow.up") }
+                                .accessibilityLabel(text("share"))
+                        }
                     }
                 }
                 .sheet(isPresented: $showingSummary) { itinerarySummary }
@@ -1511,7 +1584,7 @@ private struct PlannerView: View {
                 // selection actions, before AppStorage is changed. No second reset.
                 .onAppear {
                     let oldPrefecture = routePrefecture
-                    if prefectureID != oldPrefecture {
+                    if pickedCourse && prefectureID != oldPrefecture {
                         prefectureID = oldPrefecture
                         regionID = NationwideRoutes.prefectures.first(where: { $0.id == oldPrefecture })?.region ?? "kanto"
                     }
@@ -1797,6 +1870,9 @@ private struct PlannerView: View {
         visitPace = "standard"
         showingSummary = false
         savedConfirmation = false
+        pickedRegion = false
+        pickedPrefecture = false
+        pickedCourse = false
         resetHotelSelection()
         resetJourney()
         savedChoices = "{}"
@@ -3606,20 +3682,19 @@ private struct PlannerView: View {
     }
 
     private func selectCourse(_ item: DayRoute) {
-        if routeID == item.id {
-            resetHotelSelection()
-            resetJourney()
-            confirmedRoutePlaces = [:]
-            resolvedPlaceCache = [:]
-            presentedMap = nil
-            return
-        }
         resetHotelSelection()
         resetJourney()
+        confirmedRoutePlaces = [:]
+        resolvedPlaceCache = [:]
+        presentedMap = nil
         let pref = item.prefecture ?? NationwideRoutes.existingPrefectures[item.id] ?? "tokyo"
         prefectureID = pref
         regionID = NationwideRoutes.prefectures.first(where: { $0.id == pref })?.region ?? "kanto"
         routeID = item.id
+        pickedRegion = true
+        pickedPrefecture = true
+        pickedCourse = true
+        showingSummary = false
         swapIndex = nil
     }
 
@@ -3628,7 +3703,7 @@ private struct PlannerView: View {
         let rank = FeaturedRoutes.routes.firstIndex(where: { $0.id == item.id })
         let title = rank.map { "\($0 + 1). \(routeText(item, 0))" } ?? routeText(item, 0)
         let accent = PlannerTheme.accent((rank ?? 0) % 5)
-        let selected = routeID == item.id
+        let selected = pickedCourse && routeID == item.id
         return Button { selectCourse(item) } label: {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(alignment: .center, spacing: 12) {
@@ -3675,51 +3750,71 @@ private struct PlannerView: View {
 
     private var controls: some View {
         VStack(alignment: .leading, spacing: 14) {
-            DisclosureGroup {
-                Text(featuredText("featuredNote")).font(.caption).foregroundStyle(.secondary)
-                ForEach(FeaturedRoutes.routes) { item in courseButton(item) }
-                Text(journeyText("region")).font(.headline)
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 105), spacing: 8)], spacing: 8) {
-                    ForEach(NationwideRoutes.regions) { item in
-                        roundChoice(label(item.japanese, item.english), symbol: "globe.asia.australia", selected: regionID == item.id, accent: PlannerTheme.cyan) { selectRegion(item.id) }
+            Text(CourseSelectionCopy.get(0, language))
+                .font(.title3.bold()).foregroundStyle(PlannerTheme.amber)
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 105), spacing: 8)], spacing: 8) {
+                ForEach(NationwideRoutes.regions) { item in
+                    roundChoice(label(item.japanese, item.english), symbol: "globe.asia.australia",
+                        selected: pickedRegion && regionID == item.id, accent: PlannerTheme.cyan) {
+                        selectRegion(item.id)
                     }
                 }
-                Text(journeyText("prefecture")).font(.headline)
+            }
+            if pickedRegion {
+                Divider()
+                Text(CourseSelectionCopy.get(1, language))
+                    .font(.title3.bold()).foregroundStyle(PlannerTheme.amber)
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 105), spacing: 8)], spacing: 8) {
                     ForEach(prefecturesInRegion) { item in
-                        roundChoice(label(item.ja, item.en), symbol: "mappin.and.ellipse", selected: prefectureID == item.id, accent: PlannerTheme.violet) { selectPrefecture(item.id) }
+                        roundChoice(label(item.ja, item.en), symbol: "mappin.and.ellipse",
+                            selected: pickedPrefecture && prefectureID == item.id, accent: PlannerTheme.violet) {
+                            selectPrefecture(item.id)
+                        }
                     }
                 }
-                Text(text("route")).font(.headline)
+            }
+            if pickedPrefecture {
+                Divider()
+                Text(CourseSelectionCopy.get(2, language))
+                    .font(.title3.bold()).foregroundStyle(PlannerTheme.amber)
+                Text(CourseSelectionCopy.get(3, language))
+                    .font(.subheadline).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                 ForEach(routesInPrefecture) { item in courseButton(item) }
-                Text(String(format: journeyText("courseCount"), locale: language.locale, arguments: [routesInPrefecture.count]))
+                Text(String(format: journeyText("courseCount"), locale: language.locale,
+                    arguments: [routesInPrefecture.count]))
                     .font(.footnote).foregroundStyle(.secondary)
-            } label: {
-                Label(ux("changeCourse"), systemImage: "slider.horizontal.3")
-                    .font(.headline).foregroundStyle(PlannerTheme.amber)
             }
-            Text(ux("pace")).font(.headline)
-            Picker(ux("pace"), selection: $visitPace) {
-                Text(ux("relaxed")).tag("relaxed")
-                Text(ux("standard")).tag("standard")
-                Text(ux("full")).tag("full")
-            }.pickerStyle(.segmented)
-            Text(ux("paceHint")).font(.caption).foregroundStyle(.secondary)
-            DisclosureGroup {
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 85), spacing: 8)], spacing: 8) {
-                    ForEach(Array(stride(from: 540, through: 840, by: 60)), id: \.self) { value in
-                        visibleChoice(time(value), selected: startMinutes == value) { startMinutes = value }
+            if pickedCourse {
+                Divider()
+                Text(ux("pace")).font(.headline)
+                Picker(ux("pace"), selection: $visitPace) {
+                    Text(ux("relaxed")).tag("relaxed")
+                    Text(ux("standard")).tag("standard")
+                    Text(ux("full")).tag("full")
+                }.pickerStyle(.segmented)
+                Text(ux("paceHint")).font(.caption).foregroundStyle(.secondary)
+                DisclosureGroup {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 85), spacing: 8)], spacing: 8) {
+                        ForEach(Array(stride(from: 540, through: 840, by: 60)), id: \.self) { value in
+                            visibleChoice(time(value), selected: startMinutes == value) { startMinutes = value }
+                        }
+                    }
+                } label: {
+                    Label(text("start") + " · " + time(startMinutes), systemImage: "clock")
+                        .font(.subheadline.bold()).foregroundStyle(PlannerTheme.amber)
+                }
+                if let info = FeaturedRoutes.info[route.id] {
+                    Text(info.fields[language.index][2]).font(.subheadline).lineLimit(3)
+                    Text(info.notes[language.index]).font(.footnote)
+                        .foregroundStyle(.secondary).lineLimit(3)
+                    if let url = URL(string: info.accessURL) {
+                        translatedGuideLink(featuredText("access"), url: url)
+                    }
+                    if let url = URL(string: info.sourceURL) {
+                        translatedGuideLink(featuredText("source"), url: url)
                     }
                 }
-            } label: {
-                Label(text("start") + " · " + time(startMinutes), systemImage: "clock")
-                    .font(.subheadline.bold()).foregroundStyle(PlannerTheme.amber)
-            }
-            if let info = FeaturedRoutes.info[route.id] {
-                Text(info.fields[language.index][2]).font(.subheadline).lineLimit(3)
-                Text(info.notes[language.index]).font(.footnote).foregroundStyle(.secondary).lineLimit(3)
-                if let url = URL(string: info.accessURL) { translatedGuideLink(featuredText("access"), url: url) }
-                if let url = URL(string: info.sourceURL) { translatedGuideLink(featuredText("source"), url: url) }
             }
         }
         .padding(14).background(journeySurface, in: RoundedRectangle(cornerRadius: 22))
@@ -3816,11 +3911,11 @@ private struct PlannerView: View {
     }
 
     private var featuredHomeTitle: String {
-        ["厳選観光コース", "엄선 관광 코스", "精选观光路线", "Selected Japan Tours", "เส้นทางท่องเที่ยวคัดสรร"][language.index]
+        ["観光コースを選ぶ", "관광 코스 선택", "选择观光路线", "Choose a sightseeing course", "เลือกเส้นทางท่องเที่ยว"][language.index]
     }
 
     private var featuredHomeNote: String {
-        ["SNSで注目のコースをすぐに選べます", "SNS에서 주목받는 코스를 바로 선택하세요", "立即选择社交媒体热门路线", "Choose a social-media favorite", "เลือกเส้นทางยอดนิยมจากโซเชียลได้ทันที"][language.index]
+        ["地域・都道府県を選び、行きたいコースを決めます", "지역·도시를 고른 뒤 코스를 선택하세요", "先选择地区和城市，再选择路线", "Choose an area, city, then an itinerary", "เลือกภูมิภาค เมือง แล้วเลือกเส้นทาง"][language.index]
     }
 
     private func stopCard(_ index: Int) -> some View {
