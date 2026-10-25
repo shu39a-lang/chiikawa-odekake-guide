@@ -967,6 +967,52 @@ struct JapanDayPlannerApp: App {
     }
 }
 
+
+private struct SavedPlannerItinerary: Codable {
+    var routeID: String
+    var regionID: String
+    var prefectureID: String
+    var startMinutes: Int
+    var choices: String
+    var hotels: String
+    var customHotels: String
+    var suggestedHotels: String
+    var dinnerArea: String
+    var pace: String
+    var omitLunch: Bool
+    var omitDinner: Bool
+    var lunch: DinnerPlace?
+    var dinner: DinnerPlace?
+}
+
+private enum PlannerUX {
+    private static let words: [String: [String]] = [
+        "summary": ["完成コースを一覧で見る", "완성된 코스 보기", "查看完整行程", "View full itinerary", "ดูแผนเที่ยวทั้งหมด"],
+        "nextDestination": ["次の目的地へ・地図で案内", "다음 장소 길찾기", "导航至下一站", "Directions to next stop", "นำทางไปจุดหมายถัดไป"],
+        "save": ["このコースを保存", "이 코스 저장", "保存此路线", "Save itinerary", "บันทึกเส้นทาง"],
+        "resume": ["保存したコースを再開", "저장한 코스 이어하기", "继续已保存的路线", "Resume saved itinerary", "ใช้เส้นทางที่บันทึก"],
+        "share": ["家族や友人に共有", "가족·친구에게 공유", "与家人或朋友分享", "Share with family or friends", "แชร์กับครอบครัวหรือเพื่อน"],
+        "pace": ["観光のペース", "관광 속도", "游览节奏", "Travel pace", "จังหวะเที่ยว"],
+        "relaxed": ["ゆったり", "여유롭게", "悠闲", "Relaxed", "สบายๆ"],
+        "standard": ["標準", "보통", "标准", "Standard", "ปกติ"],
+        "full": ["充実", "알차게", "充实", "Active", "เต็มที่"],
+        "paceHint": ["滞在時間の目安を調整します。観光地と経路は変わりません。", "체류 시간만 조정하며 장소와 경로는 유지합니다.", "仅调整停留时间，不改变景点和路线。", "Adjusts visit time only; places and routes stay the same.", "ปรับเวลาพักเท่านั้น สถานที่และเส้นทางไม่เปลี่ยน"],
+        "skipLunch": ["昼食を選ばず次へ", "점심 없이 계속", "跳过午餐继续", "Skip lunch", "ข้ามมื้อกลางวัน"],
+        "skipDinner": ["夕食を選ばず次へ", "저녁 없이 계속", "跳过晚餐继续", "Skip dinner", "ข้ามมื้อเย็น"],
+        "hotelOptional": ["ホテル選択は任意です。地図案内は目的地から利用できます。", "호텔 선택은 선택 사항입니다.", "酒店可不选，仍可查看导航。", "Hotel is optional. Directions still work.", "ไม่จำเป็นต้องเลือกโรงแรม ยังดูเส้นทางได้"],
+        "changeCourse": ["地域・コース・出発時刻を変更", "지역·코스·출발 시간 변경", "修改地区、路线与出发时间", "Change area, route or start time", "เปลี่ยนพื้นที่ เส้นทาง หรือเวลาเริ่ม"],
+        "popularAreas": ["人気のエリア", "인기 지역", "热门地区", "Popular areas", "พื้นที่ยอดนิยม"],
+        "nextMap": ["地図を開く", "지도 열기", "打开地图", "Open map", "เปิดแผนที่"],
+        "saved": ["保存しました", "저장했습니다", "已保存", "Saved", "บันทึกแล้ว"],
+        "close": ["閉じる", "닫기", "关闭", "Close", "ปิด"],
+        "summaryNote": ["時刻は計画用の目安です。移動時間は地図でご確認ください。", "시간은 계획용입니다. 지도에서 이동 시간을 확인하세요.", "时间为规划参考，请在地图确认实际路线。", "Schedule is a guide. Confirm travel times on the map.", "เวลาเป็นเพียงแผน โปรดตรวจเวลาเดินทางบนแผนที่"]
+    ]
+    static func text(_ key: String, _ language: GuideLanguage) -> String {
+        guard let variants = words[key], variants.indices.contains(language.index) else { return key }
+        return VisitorCopy.show(variants[language.index], language: language)
+    }
+}
+
 private struct PlannerView: View {
     private let guide = GuideData.bundled
     @AppStorage("japanDay.route") private var routeID = "asakusa"
@@ -974,6 +1020,12 @@ private struct PlannerView: View {
     @AppStorage("japanDay.prefecture") private var prefectureID = "tokyo"
     @AppStorage("japanDay.start") private var startMinutes = 600
     @AppStorage("japanDay.choices") private var savedChoices = "{}"
+    @AppStorage("japanDay.savedItinerary.v2") private var savedItineraryData = ""
+    @AppStorage("japanDay.visitPace.v2") private var visitPace = "standard"
+    @State private var skipLunch = false
+    @State private var skipDinner = false
+    @State private var showingSummary = false
+    @State private var savedConfirmation = false
     @State private var swapIndex: Int?
     @State private var presentedMap: PlannerMapRequest?
     @AppStorage("japanDay.language") private var languageCode = "ja"
@@ -1020,6 +1072,46 @@ private struct PlannerView: View {
     }
     private func format(_ key: String, _ arguments: CVarArg...) -> String {
         String(format: text(key), locale: language.locale, arguments: arguments)
+    }
+    private func ux(_ key: String) -> String { PlannerUX.text(key, language) }
+    private func saveItinerary() {
+        let state = SavedPlannerItinerary(
+            routeID: routeID, regionID: regionID, prefectureID: prefectureID,
+            startMinutes: startMinutes, choices: savedChoices,
+            hotels: savedHotels, customHotels: savedCustomHotels,
+            suggestedHotels: savedSuggestedHotels, dinnerArea: dinnerArea,
+            pace: visitPace, omitLunch: skipLunch, omitDinner: skipDinner,
+            lunch: lunchSelection, dinner: dinnerSelection
+        )
+        guard let data = try? JSONEncoder().encode(state),
+              let value = String(data: data, encoding: .utf8) else { return }
+        savedItineraryData = value
+        savedConfirmation = true
+    }
+    private func resumeItinerary() {
+        guard let data = savedItineraryData.data(using: .utf8),
+              let saved = try? JSONDecoder().decode(SavedPlannerItinerary.self, from: data),
+              guide.routes.contains(where: { $0.id == saved.routeID }) else { return }
+        resetJourney()
+        resetHotelSelection()
+        routeID = saved.routeID
+        regionID = saved.regionID
+        prefectureID = saved.prefectureID
+        startMinutes = saved.startMinutes
+        savedChoices = saved.choices
+        savedHotels = saved.hotels
+        savedCustomHotels = saved.customHotels
+        savedSuggestedHotels = saved.suggestedHotels
+        dinnerArea = saved.dinnerArea
+        visitPace = saved.pace
+        skipLunch = saved.omitLunch
+        skipDinner = saved.omitDinner
+        lunchSelection = saved.lunch
+        dinnerSelection = saved.dinner
+        discardTransientSearchResults()
+        selectedJourneyStage = .departure
+        journeyCompleted = false
+        showingGuide = true
     }
     private func routeText(_ item: DayRoute, _ field: Int) -> String {
         if let featured = FeaturedRoutes.info[item.id] { return featured.fields[language.index][field] }
@@ -1129,27 +1221,59 @@ private struct PlannerView: View {
     }
     private var languageHome: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 22) {
-                Text("Japan Day Planner").font(.largeTitle.bold()).foregroundStyle(.white)
-                languageSelectionButton
-                Text(language.title).font(.subheadline).foregroundStyle(.white.opacity(0.8))
+            VStack(alignment: .leading, spacing: 18) {
+                HStack(alignment: .center) {
+                    Text("Japan Day Planner")
+                        .font(.title.bold()).foregroundStyle(.white)
+                    Spacer(minLength: 6)
+                    Button { showingLanguageSelection = true } label: {
+                        Label(language.title, systemImage: "globe")
+                            .font(.subheadline.bold())
+                            .lineLimit(1).minimumScaleFactor(0.7)
+                            .padding(.horizontal, 12).padding(.vertical, 11)
+                            .background(PlannerTheme.surface, in: Capsule())
+                    }.buttonStyle(.plain)
+                }
+                PlannerTravelBanner()
+                    .frame(height: 190)
+                    .clipShape(RoundedRectangle(cornerRadius: 20))
+                    .accessibilityHidden(true)
                 Text(text("tagline")).font(.headline).foregroundStyle(.white)
-                PlannerTravelBanner().frame(height: 170)
-                    .clipShape(RoundedRectangle(cornerRadius: 22))
+                    .fixedSize(horizontal: false, vertical: true)
                 featuredHomeEntry
-                Button {
-                    openFreshGuide()
-                } label: {
-                    Label(text("route"), systemImage: "map.fill")
-                        .font(.headline).foregroundStyle(.white)
-                        .padding(18).frame(maxWidth: .infinity)
-                        .background(PlannerTheme.surface, in: RoundedRectangle(cornerRadius: 18))
-                }.buttonStyle(.plain)
                 originalCourseEntry
+                if !savedItineraryData.isEmpty {
+                    Button { resumeItinerary() } label: {
+                        Label(ux("resume"), systemImage: "bookmark.fill")
+                            .font(.headline).frame(maxWidth: .infinity, minHeight: 54)
+                            .background(PlannerTheme.surface, in: RoundedRectangle(cornerRadius: 16))
+                    }.buttonStyle(.plain)
+                }
+                Text(ux("popularAreas")).font(.headline).foregroundStyle(.white)
+                HStack(spacing: 10) {
+                    ForEach(["tokyo", "kyoto", "osaka"], id: \.self) { place in
+                        Button {
+                            openFreshGuide()
+                            regionID = NationwideRoutes.prefectures.first(where: { $0.id == place })?.region ?? "kanto"
+                            selectPrefecture(place)
+                        } label: {
+                            VStack(spacing: 6) {
+                                Image(systemName: "mappin.and.ellipse").font(.title2)
+                                Text(NationwideRoutes.prefectures.first(where: { $0.id == place }).map {
+                                    language == .ja ? $0.ja : $0.en
+                                } ?? place).font(.subheadline.bold()).lineLimit(1)
+                            }
+                            .foregroundStyle(.white)
+                            .frame(maxWidth: .infinity, minHeight: 80)
+                            .background(PlannerTheme.surface, in: RoundedRectangle(cornerRadius: 15))
+                        }.buttonStyle(.plain)
+                    }
+                }
             }
             .padding(20).frame(maxWidth: 650, alignment: .leading)
             .frame(maxWidth: .infinity)
-        }.background(PlannerTheme.background)
+        }
+        .background(PlannerTheme.background)
     }
 
     private var route: DayRoute { guide.routes.first(where: { $0.id == routeID }) ?? guide.routes[0] }
@@ -1201,11 +1325,17 @@ private struct PlannerView: View {
     private func selectedVenue(_ index: Int) -> Venue { route.stops[index].choices[selectedIndex(index)] }
 
     private func duration(_ stop: Stop, venue: Venue) -> Int {
-        if let specific = guide.visitMinutes[venue.name] { return specific }
-        if stop.type == "food" {
-            return ["ramen": 45, "sushi": 60, "japanese": 80][venue.cuisine ?? ""] ?? stop.duration
+        if skipLunch && venue.name.hasPrefix("Lunch ") { return 0 }
+        let base: Int
+        if let specific = guide.visitMinutes[venue.name] {
+            base = specific
+        } else if stop.type == "food" {
+            base = ["ramen": 45, "sushi": 60, "japanese": 80][venue.cuisine ?? ""] ?? stop.duration
+        } else {
+            base = stop.duration
         }
-        return stop.duration
+        let factor = visitPace == "relaxed" ? 1.25 : (visitPace == "full" ? 0.80 : 1.0)
+        return max(15, Int((Double(base) * factor).rounded()))
     }
 
     // Use map-verified travel minutes only. A short walk is preferred to
@@ -1281,6 +1411,7 @@ private struct PlannerView: View {
         var lines = ["Japan Day Planner · \(routeText(route, 0))"]
         for index in route.stops.indices {
             let venue = selectedVenue(index)
+            if skipLunch && venue.name.hasPrefix("Lunch ") { continue }
             if venue.name.hasPrefix("Lunch "), let place = lunchSelection {
                 lines.append("\(time(startOfStop(index))) · \(place.name) · \(place.address)")
             } else {
@@ -1289,8 +1420,8 @@ private struct PlannerView: View {
             }
         }
         if !hotelQuery.isEmpty { lines.insert("\(journeyText("chooseHotel")) · \(hotelName)", at: 1) }
-        lines.append(journeyText(dinnerNearHotel ? "earlyNote" : "lateNote"))
-        if let place = dinnerSelection {
+        if !skipDinner { lines.append(journeyText(dinnerNearHotel ? "earlyNote" : "lateNote")) }
+        if !skipDinner, let place = dinnerSelection {
             lines.append("\(journeyText("selectedDinner")) · \(place.name) · \(place.address)")
             if !hotelQuery.isEmpty, let url = mapURL(origin: place.query, destination: hotelQuery, mode: "transit") {
                 lines.append("\(journeyText("afterDinner")) · \(url.absoluteString)")
@@ -1313,9 +1444,26 @@ private struct PlannerView: View {
                             if language != .ja {
                                 Text(journeyText("webTranslationNote")).font(.footnote).foregroundStyle(.secondary)
                             }
-                            journeyHotelPicker
-                            dinnerAreaPicker
+                            DisclosureGroup {
+                                journeyHotelPicker
+                            } label: {
+                                Label(journeyText("chooseHotel"), systemImage: "bed.double.fill")
+                                    .font(.headline).foregroundStyle(PlannerTheme.amber)
+                            }.padding(12).background(journeySurface, in: RoundedRectangle(cornerRadius: 16))
+                            DisclosureGroup {
+                                dinnerAreaPicker
+                            } label: {
+                                Label(journeyText("dinnerPlan"), systemImage: "fork.knife")
+                                    .font(.headline).foregroundStyle(PlannerTheme.amber)
+                            }.padding(12).background(journeySurface, in: RoundedRectangle(cornerRadius: 16))
                             journeyOverview
+                            Button { showingSummary = true } label: {
+                                Label(ux("summary"), systemImage: "list.bullet.rectangle.portrait")
+                                    .font(.headline)
+                                    .frame(maxWidth: .infinity, minHeight: 54)
+                                    .foregroundStyle(.black)
+                                    .background(PlannerTheme.amber, in: RoundedRectangle(cornerRadius: 16))
+                            }.buttonStyle(.plain)
                             journeyCurrent.id("currentStage")
                             Text(text("footer")).font(.footnote).foregroundStyle(.secondary).padding(.bottom)
                         }.padding()
@@ -1343,6 +1491,7 @@ private struct PlannerView: View {
                             .accessibilityLabel(text("share"))
                     }
                 }
+                .sheet(isPresented: $showingSummary) { itinerarySummary }
                 .sheet(isPresented: Binding(get: { swapIndex != nil }, set: { if !$0 { swapIndex = nil } })) {
                     if let index = swapIndex { swapSheet(index) }
                 }
@@ -1404,7 +1553,7 @@ private struct PlannerView: View {
     }
     private let journeyBackground = PlannerTheme.background
     private let journeySurface = PlannerTheme.surface
-    private let journeyGold = PlannerTheme.cyan
+    private let journeyGold = PlannerTheme.amber
 
     private func journeyText(_ key: String) -> String {
         if let translated = VisitorActionCopy.text(key, language: language) { return translated }
@@ -1530,11 +1679,35 @@ private struct PlannerView: View {
     private var dinnerAnchorName: String { dinnerNearHotel ? hotelName : venueText(lastVenue, 0) }
     private var stages: [JourneyStage] {
         var items: [JourneyStage] = [.departure]
-        items.append(contentsOf: route.stops.indices.map { .stop($0) })
-        if dinnerNearHotel { items.append(.hotelBeforeDinner) }
-        items.append(.dinner)
-        items.append(.hotelAfterDinner)
+        items.append(contentsOf: route.stops.indices.filter {
+            !(skipLunch && selectedVenue($0).name.hasPrefix("Lunch "))
+        }.map { .stop($0) })
+        if !skipDinner {
+            if dinnerNearHotel && !hotelQuery.isEmpty { items.append(.hotelBeforeDinner) }
+            items.append(.dinner)
+        }
+        if !hotelQuery.isEmpty { items.append(.hotelAfterDinner) }
         return items
+    }
+    private func destination(for stage: JourneyStage) -> String? {
+        switch stage {
+        case .departure: return nil
+        case .stop(let index):
+            let venue = selectedVenue(index)
+            if venue.name.hasPrefix("Lunch ") { return lunchSelection?.query }
+            return venueQuery(venue)
+        case .hotelBeforeDinner, .hotelAfterDinner:
+            return hotelQuery.isEmpty ? nil : hotelQuery
+        case .dinner:
+            return dinnerSelection?.query
+        }
+    }
+    private var nextDestination: String? {
+        guard !journeyCompleted else { return nil }
+        for index in (journeyIndex + 1)..<stages.count {
+            if let place = destination(for: stages[index]), !place.isEmpty { return place }
+        }
+        return nil
     }
     // Stage identity survives insertion/removal of the optional pre-dinner hotel step.
     // An index stored as state would otherwise point backward when dinner options change.
@@ -1607,6 +1780,11 @@ private struct PlannerView: View {
     // The course and preferred language stay selected, but past result cards
     // and map searches must never be shown as a new search.
     private func openFreshGuide() {
+        skipLunch = false
+        skipDinner = false
+        visitPace = "standard"
+        showingSummary = false
+        savedConfirmation = false
         resetHotelSelection()
         resetJourney()
         savedChoices = "{}"
@@ -2555,6 +2733,58 @@ private struct PlannerView: View {
         if let dinner = dinnerSelection, origin == dinner.query { return max(17 * 60, finishMinutes) + 75 }
         return max(17 * 60, finishMinutes)
     }
+    private var itinerarySummary: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    Text(routeText(route, 0)).font(.title2.bold())
+                    Text(ux("summaryNote")).font(.footnote).foregroundStyle(.secondary)
+                    ForEach(stages.indices, id: \.self) { index in
+                        HStack(alignment: .top, spacing: 12) {
+                            Image(systemName: stageSymbol(stages[index]))
+                                .foregroundStyle(PlannerTheme.amber)
+                                .frame(width: 28, height: 28)
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text(stageTitle(stages[index])).font(.headline)
+                                if let stamp = stageTime(stages[index]) {
+                                    Text(stamp).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                                }
+                                if let destination = destination(for: stages[index]),
+                                   let url = mapURL(destination: destination, mode: "walking") {
+                                    Link(destination: url) {
+                                        Label(ux("nextMap"), systemImage: "location.north.fill")
+                                            .font(.subheadline.bold())
+                                    }
+                                }
+                            }
+                            Spacer(minLength: 0)
+                        }.frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(14).background(PlannerTheme.surface, in: RoundedRectangle(cornerRadius: 14))
+                    }
+                    Button { saveItinerary() } label: {
+                        Label(savedConfirmation ? ux("saved") : ux("save"), systemImage: "bookmark.fill")
+                            .font(.headline).foregroundStyle(.black)
+                            .frame(maxWidth: .infinity, minHeight: 56)
+                            .background(PlannerTheme.amber, in: RoundedRectangle(cornerRadius: 16))
+                    }.buttonStyle(.plain)
+                    ShareLink(item: sharedPlan) {
+                        Label(ux("share"), systemImage: "square.and.arrow.up")
+                            .frame(maxWidth: .infinity, minHeight: 50)
+                            .background(PlannerTheme.surface, in: RoundedRectangle(cornerRadius: 16))
+                    }
+                }.padding()
+            }
+            .background(PlannerTheme.background)
+            .navigationTitle(ux("summary"))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button(ux("close")) { showingSummary = false }
+                }
+            }
+        }.preferredColorScheme(.dark)
+    }
+
     private var journeyOverview: some View {
         journeyPanel {
             Text(journeyText("order")).font(.title3.bold())
@@ -2601,7 +2831,7 @@ private struct PlannerView: View {
             switch currentStage {
             case .departure:
                 if hotelQuery.isEmpty {
-                    journeyPanel { Text(journeyText("enterHotel")) }
+                    journeyPanel { Text(ux("hotelOptional")) }
                 } else {
                     travelPanel(origin: hotelQuery, destination: venueQuery(selectedVenue(0)), title: journeyText("firstDestination"), fromName: hotelName, toName: venueText(selectedVenue(0), 0))
                 }
@@ -2642,12 +2872,25 @@ private struct PlannerView: View {
             case .hotelAfterDinner:
                 if let place = dinnerSelection, !hotelQuery.isEmpty {
                     travelPanel(origin: place.query, destination: hotelQuery, title: journeyText("afterDinner"), fromName: place.name, toName: hotelName)
-                } else {
-                    journeyPanel { Text(journeyText("selectDinnerHotel")) }
+                } else if !hotelQuery.isEmpty {
+                    travelPanel(origin: venueQuery(lastVenue), destination: hotelQuery, title: journeyText("returnHotel"), fromName: venueText(lastVenue, 0), toName: hotelName)
                 }
                 if journeyCompleted {
                     Label(journeyText("completed"), systemImage: "checkmark.circle.fill").font(.headline).foregroundStyle(journeyGold)
                 }
+            }
+            if let next = nextDestination,
+               let url = mapURL(destination: next, mode: "walking") {
+                Link(destination: url) {
+                    Label(ux("nextDestination"), systemImage: "location.north.line.fill")
+                        .font(.headline).foregroundStyle(.black)
+                        .frame(maxWidth: .infinity, minHeight: 56)
+                        .background(PlannerTheme.amber, in: RoundedRectangle(cornerRadius: 16))
+                }.buttonStyle(.plain)
+            }
+            if journeyCompleted {
+                journeyAction(ux("summary"), systemImage: "list.bullet.rectangle") { showingSummary = true }
+                journeyAction(savedConfirmation ? ux("saved") : ux("save"), systemImage: "bookmark.fill") { saveItinerary() }
             }
             if !journeyCompleted {
                 // Choosing a hotel, lunch or dinner enriches the itinerary.
@@ -2704,6 +2947,13 @@ private struct PlannerView: View {
                 Text("\(journeyText("selectedLunch")) · \(place.name)").font(.headline).foregroundStyle(journeyGold)
                 routeLinks(origin: anchor, destination: place.query)
             }
+            Button(ux("skipLunch")) {
+                skipLunch = true
+                let next = min(index + 1, route.stops.count - 1)
+                selectedJourneyStage = .stop(next)
+                discardTransientSearchResults()
+            }
+            .font(.subheadline.bold()).frame(maxWidth: .infinity, minHeight: 44)
             Text(journeyText("optionalMeal")).font(.footnote).foregroundStyle(.secondary)
             Text(journeyText("dinnerCheck")).font(.footnote).foregroundStyle(.secondary)
         }
@@ -2813,6 +3063,17 @@ private struct PlannerView: View {
                 routeLinks(origin: dinnerNearHotel ? hotelQuery : venueQuery(lastVenue), destination: place.query)
                 Text(journeyText("dinnerThenHotel")).font(.subheadline)
             }
+            Button(ux("skipDinner")) {
+                skipDinner = true
+                if !hotelQuery.isEmpty {
+                    selectedJourneyStage = .hotelAfterDinner
+                } else {
+                    selectedJourneyStage = stages.last ?? .departure
+                    journeyCompleted = true
+                }
+                discardTransientSearchResults()
+            }
+            .font(.subheadline.bold()).frame(maxWidth: .infinity, minHeight: 44)
             Text(journeyText("optionalMeal")).font(.footnote).foregroundStyle(.secondary)
             Text(journeyText("dinnerCheck")).font(.footnote).foregroundStyle(.secondary)
         }
@@ -3398,36 +3659,49 @@ private struct PlannerView: View {
 
     private var controls: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Label(featuredText("featured"), systemImage: "sparkles").font(.headline).foregroundStyle(journeyGold)
-            Text(featuredText("featuredNote")).font(.caption).foregroundStyle(.secondary)
-            ForEach(FeaturedRoutes.routes) { item in courseButton(item) }
-            originalCourseEntry
-            Divider()
-            Text(journeyText("region")).font(.headline)
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 105), spacing: 8)], spacing: 8) {
-                ForEach(NationwideRoutes.regions) { item in
-                    roundChoice(label(item.japanese, item.english), symbol: "globe.asia.australia", selected: regionID == item.id, accent: PlannerTheme.cyan) { selectRegion(item.id) }
+            DisclosureGroup {
+                Text(featuredText("featuredNote")).font(.caption).foregroundStyle(.secondary)
+                ForEach(FeaturedRoutes.routes) { item in courseButton(item) }
+                Text(journeyText("region")).font(.headline)
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 105), spacing: 8)], spacing: 8) {
+                    ForEach(NationwideRoutes.regions) { item in
+                        roundChoice(label(item.japanese, item.english), symbol: "globe.asia.australia", selected: regionID == item.id, accent: PlannerTheme.cyan) { selectRegion(item.id) }
+                    }
                 }
+                Text(journeyText("prefecture")).font(.headline)
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 105), spacing: 8)], spacing: 8) {
+                    ForEach(prefecturesInRegion) { item in
+                        roundChoice(label(item.ja, item.en), symbol: "mappin.and.ellipse", selected: prefectureID == item.id, accent: PlannerTheme.violet) { selectPrefecture(item.id) }
+                    }
+                }
+                Text(text("route")).font(.headline)
+                ForEach(routesInPrefecture) { item in courseButton(item) }
+                Text(String(format: journeyText("courseCount"), locale: language.locale, arguments: [routesInPrefecture.count]))
+                    .font(.footnote).foregroundStyle(.secondary)
+            } label: {
+                Label(ux("changeCourse"), systemImage: "slider.horizontal.3")
+                    .font(.headline).foregroundStyle(PlannerTheme.amber)
             }
-            Text(journeyText("prefecture")).font(.headline)
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 105), spacing: 8)], spacing: 8) {
-                ForEach(prefecturesInRegion) { item in
-                    roundChoice(label(item.ja, item.en), symbol: "mappin.and.ellipse", selected: prefectureID == item.id, accent: PlannerTheme.violet) { selectPrefecture(item.id) }
+            Text(ux("pace")).font(.headline)
+            Picker(ux("pace"), selection: $visitPace) {
+                Text(ux("relaxed")).tag("relaxed")
+                Text(ux("standard")).tag("standard")
+                Text(ux("full")).tag("full")
+            }.pickerStyle(.segmented)
+            Text(ux("paceHint")).font(.caption).foregroundStyle(.secondary)
+            DisclosureGroup {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 85), spacing: 8)], spacing: 8) {
+                    ForEach(Array(stride(from: 540, through: 840, by: 60)), id: \.self) { value in
+                        visibleChoice(time(value), selected: startMinutes == value) { startMinutes = value }
+                    }
                 }
-            }
-            Text(text("route")).font(.headline)
-            ForEach(routesInPrefecture) { item in courseButton(item) }
-            Text(String(format: journeyText("courseCount"), locale: language.locale, arguments: [routesInPrefecture.count]))
-                .font(.footnote).foregroundStyle(.secondary)
-            Text(text("start")).font(.headline)
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 85), spacing: 8)], spacing: 8) {
-                ForEach(Array(stride(from: 540, through: 840, by: 60)), id: \.self) { value in
-                    visibleChoice(time(value), selected: startMinutes == value) { startMinutes = value }
-                }
+            } label: {
+                Label(text("start") + " · " + time(startMinutes), systemImage: "clock")
+                    .font(.subheadline.bold()).foregroundStyle(PlannerTheme.amber)
             }
             if let info = FeaturedRoutes.info[route.id] {
-                Text(info.fields[language.index][2]).font(.subheadline)
-                Text(info.notes[language.index]).font(.footnote).foregroundStyle(journeyGold)
+                Text(info.fields[language.index][2]).font(.subheadline).lineLimit(3)
+                Text(info.notes[language.index]).font(.footnote).foregroundStyle(.secondary).lineLimit(3)
                 if let url = URL(string: info.accessURL) { translatedGuideLink(featuredText("access"), url: url) }
                 if let url = URL(string: info.sourceURL) { translatedGuideLink(featuredText("source"), url: url) }
             }
@@ -3444,7 +3718,7 @@ private struct PlannerView: View {
                     Image(systemName: "mappin.and.ellipse")
                         .font(.system(size: 22, weight: .bold))
                         .frame(width: 44, height: 44)
-                        .background(Color(red: 0.96, green: 0.66, blue: 0.15), in: Circle())
+                        .background(PlannerTheme.amber.opacity(0.18), in: Circle())
                         .overlay(Circle().stroke(.white.opacity(0.65), lineWidth: 1.5))
                     VStack(alignment: .leading, spacing: 5) {
                         Text(OriginalCourseText.get("open", language))
@@ -3454,17 +3728,17 @@ private struct PlannerView: View {
                             .allowsTightening(true)
                         Text(OriginalCourseText.get("tagline", language))
                             .font(.caption2.bold())
-                            .foregroundStyle(Color(red: 1.0, green: 0.91, blue: 0.68))
+                            .foregroundStyle(Color.white.opacity(0.80))
                             .padding(.horizontal, 9).padding(.vertical, 4)
                             .background(Color(red: 0.14, green: 0.20, blue: 0.25), in: RoundedRectangle(cornerRadius: 6))
                     }.frame(maxWidth: .infinity, alignment: .leading)
                     Image(systemName: "chevron.right").font(.headline.bold())
                 }
-                .foregroundStyle(Color(red: 0.10, green: 0.14, blue: 0.18))
+                .foregroundStyle(.white)
                 .padding(.horizontal, 14).padding(.vertical, 12)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(LinearGradient(colors: [Color(red: 1, green: 0.82, blue: 0.42), Color(red: 0.93, green: 0.66, blue: 0.21)], startPoint: .leading, endPoint: .trailing), in: RoundedRectangle(cornerRadius: 18))
-                .overlay(RoundedRectangle(cornerRadius: 18).stroke(Color(red: 1, green: 0.92, blue: 0.68), lineWidth: 1.5))
+                .frame(maxWidth: .infinity, minHeight: 56, alignment: .leading)
+                .background(PlannerTheme.surface, in: RoundedRectangle(cornerRadius: 18))
+                .overlay(RoundedRectangle(cornerRadius: 18).stroke(PlannerTheme.amber.opacity(0.45), lineWidth: 1.3))
             }
             Text(OriginalCourseText.get("entryNote", language))
                 .font(.subheadline)
@@ -3493,11 +3767,11 @@ private struct PlannerView: View {
                 VStack(alignment: .leading, spacing: 5) {
                     Text(featuredHomeTitle)
                         .font(.system(size: 20, weight: .heavy))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(.black)
                         .fixedSize(horizontal: false, vertical: true)
                     Text(featuredHomeNote)
                         .font(.caption.bold())
-                        .foregroundStyle(.white.opacity(0.9))
+                        .foregroundStyle(Color.black.opacity(0.80))
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 0)
@@ -3511,9 +3785,8 @@ private struct PlannerView: View {
             .background(
                 LinearGradient(
                     colors: [
-                        Color(red: 0.96, green: 0.38, blue: 0.12),
-                        Color(red: 0.76, green: 0.12, blue: 0.38),
-                        Color(red: 0.35, green: 0.12, blue: 0.62)
+                        Color(red: 0.90, green: 0.72, blue: 0.34),
+                        Color(red: 0.98, green: 0.83, blue: 0.47)
                     ],
                     startPoint: .leading,
                     endPoint: .trailing
@@ -3548,7 +3821,7 @@ private struct PlannerView: View {
                     .font(.caption2.bold()).tracking(1).foregroundStyle(.orange)
             }
             Text(venueText(venue, 0)).font(.title3.bold())
-            Text(venueText(venue, 1)).font(.subheadline).foregroundStyle(.secondary)
+            Text(venueText(venue, 1)).font(.subheadline).foregroundStyle(.secondary).lineLimit(3)
             readerTranslationLink(venueText(venue, 1))
             if language == .en {
                 Text(guide.notes[venue.name] ?? text("check"))
@@ -5073,7 +5346,7 @@ private enum TravelExtras {
     ]
 }
 
-private struct DinnerPlace: Identifiable {
+private struct DinnerPlace: Identifiable, Codable {
     let id: String
     let name: String
     let address: String
@@ -5692,6 +5965,9 @@ private struct OriginalCourseView: View {
     private func clock(_ minutes: Int) -> String {
         String(format: "%02d:%02d", (minutes / 60) % 24, minutes % 60)
     }
+    private var originalShareText: String {
+        (["Japan Day Planner"] + stops.filter { !$0.name.isEmpty }.map { "\(clock($0.target)) · \($0.name)" }).joined(separator: "\n")
+    }
     private var searchKey: String { stops.map { "\($0.id):\($0.name)" }.joined(separator: "|") }
     private var routeKey: String {
         stops.map { "\($0.id):\($0.name):\($0.address):\($0.latitude ?? 0):\($0.longitude ?? 0):\($0.target):\($0.duration):\($0.mode)" }.joined(separator: "|")
@@ -5738,6 +6014,23 @@ private struct OriginalCourseView: View {
             VStack(alignment: .leading, spacing: 16) {
                 Text(t("intro")).font(.subheadline)
                 Text(t("choose")).font(.caption).foregroundStyle(.secondary)
+                DisclosureGroup(PlannerUX.text("summary", language)) {
+                    ForEach(stops.indices, id: \.self) { index in
+                        let item = stops[index]
+                        HStack(spacing: 9) {
+                            Text(clock(arrival(index))).font(.caption.monospacedDigit())
+                            Text(item.name.isEmpty ? t(item.kind) : item.name).font(.subheadline)
+                            Spacer()
+                            if !item.name.isEmpty, let link = url(placeQuery(item)) {
+                                Link(destination: link) { Image(systemName: "map.fill") }
+                                    .accessibilityLabel(t("map"))
+                            }
+                        }.frame(minHeight: 44)
+                    }
+                    ShareLink(item: originalShareText) {
+                        Label(PlannerUX.text("share", language), systemImage: "square.and.arrow.up")
+                    }.frame(minHeight: 44)
+                }.padding(14).background(PlannerTheme.surface, in: RoundedRectangle(cornerRadius: 14))
                 ForEach(stops.indices, id: \.self) { index in
                     stopCard(index)
                     if index + 1 < stops.count { transfer(index + 1) }
