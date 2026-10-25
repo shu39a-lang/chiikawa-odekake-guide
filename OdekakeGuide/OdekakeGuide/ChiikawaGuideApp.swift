@@ -1008,6 +1008,18 @@ private enum PlannerUX {
         "summaryNote": ["時刻は計画用の目安です。移動時間は地図でご確認ください。", "시간은 계획용입니다. 지도에서 이동 시간을 확인하세요.", "时间为规划参考，请在地图确认实际路线。", "Schedule is a guide. Confirm travel times on the map.", "เวลาเป็นเพียงแผน โปรดตรวจเวลาเดินทางบนแผนที่"]
     ]
     static func text(_ key: String, _ language: GuideLanguage) -> String {
+        // The 34 languages using the English base translation index must
+        // still have native-language map labels on every map entry point.
+        if language != .en && language.index == 3 {
+            if key == "nextDestination" {
+                let next = VisitorActionCopy.text("next", language: language) ?? "Next"
+                let map = VisitorActionCopy.text("map", language: language) ?? "Map"
+                return next + " · " + map
+            }
+            if key == "nextMap" {
+                return VisitorActionCopy.text("map", language: language) ?? "Map"
+            }
+        }
         guard let variants = words[key], variants.indices.contains(language.index) else { return key }
         return VisitorCopy.show(variants[language.index], language: language)
     }
@@ -2751,10 +2763,12 @@ private struct PlannerView: View {
                                 }
                                 if let destination = destination(for: stages[index]),
                                    let url = mapURL(destination: destination, mode: "walking") {
-                                    Link(destination: url) {
+                                    Button {
+                                        presentedMap = PlannerMapRequest(url: localizedMapURL(url), title: ux("nextMap"))
+                                    } label: {
                                         Label(ux("nextMap"), systemImage: "location.north.fill")
                                             .font(.subheadline.bold())
-                                    }
+                                    }.buttonStyle(.plain)
                                 }
                             }
                             Spacer(minLength: 0)
@@ -2881,7 +2895,9 @@ private struct PlannerView: View {
             }
             if let next = nextDestination,
                let url = mapURL(destination: next, mode: "walking") {
-                Link(destination: url) {
+                Button {
+                    presentedMap = PlannerMapRequest(url: localizedMapURL(url), title: ux("nextDestination"))
+                } label: {
                     Label(ux("nextDestination"), systemImage: "location.north.line.fill")
                         .font(.headline).foregroundStyle(.black)
                         .frame(maxWidth: .infinity, minHeight: 56)
@@ -4064,6 +4080,15 @@ private enum GuideLanguage: String, CaseIterable, Identifiable {
 
 
 private enum GoogleMapsLocale {
+    // Google Maps has its own language identifiers. Do not reuse the Google
+    // Translate code (e.g. Tagalog "tl") for the Google Maps UI ("fil").
+    static func mapLanguageCode(_ language: GuideLanguage) -> String {
+        switch language {
+        case .fil: return "fil"
+        case .he: return "iw"
+        default: return language.webLanguageCode
+        }
+    }
     // Region and language are fixed by the visitor's chosen country, never
     // by the device's Japanese language settings. Native Google Maps may
     // retain its account's own language; the in-app browser uses this locale.
@@ -4074,7 +4099,7 @@ private enum GoogleMapsLocale {
               url.path == "/maps" || url.path.hasPrefix("/maps/") || host.hasPrefix("maps.") else { return url }
         var parts = URLComponents(url: url, resolvingAgainstBaseURL: false)
         var query = (parts?.queryItems ?? []).filter { $0.name != "hl" && $0.name != "gl" }
-        query.append(URLQueryItem(name: "hl", value: language.webLanguageCode))
+        query.append(URLQueryItem(name: "hl", value: mapLanguageCode(language)))
         if let region = language.locale.region?.identifier {
             query.append(URLQueryItem(name: "gl", value: region))
         }
@@ -6022,7 +6047,10 @@ private struct OriginalCourseView: View {
                             Text(item.name.isEmpty ? t(item.kind) : item.name).font(.subheadline)
                             Spacer()
                             if !item.name.isEmpty, let link = url(placeQuery(item)) {
-                                Link(destination: link) { Image(systemName: "map.fill") }
+                                Button {
+                                    presentedMap = PlannerMapRequest(url: link, title: t("map"))
+                                } label: { Image(systemName: "map.fill") }
+                                    .buttonStyle(.plain)
                                     .accessibilityLabel(t("map"))
                             }
                         }.frame(minHeight: 44)
@@ -6197,7 +6225,10 @@ private struct OriginalCourseView: View {
                                     .font(.caption.bold())
                                 Spacer()
                                 if let link = url("\(result.place.latitude),\(result.place.longitude)") {
-                                    Link(destination: link) { Label(t("map"), systemImage: "map") }.font(.caption)
+                                    Button {
+                                        presentedMap = PlannerMapRequest(url: link, title: t("map"))
+                                    } label: { Label(t("map"), systemImage: "map") }
+                                        .font(.caption).buttonStyle(.plain)
                                 }
                             }
                         }.padding(9).frame(maxWidth: .infinity, alignment: .leading)
@@ -6475,7 +6506,7 @@ private enum PlannerMapText {
     static func text(_ key: String, _ language: GuideLanguage) -> String {
         if key == "close" { return PlannerInstructions.closeTitle(language) }
         if key == "retry" { return TravelMapCopy.retry(language) }
-        if key == "external" { return TravelMapCopy.time(language) }
+        if key == "external" { return VisitorActionCopy.text("map", language: language) ?? (language == .ja ? "地図" : "Google Maps") }
         if key == "note" { return TravelMapCopy.note(language) }
         if key == "loading" { return "Google Maps…" }
         if key == "error" { return TravelMapCopy.error(language) }
@@ -6562,7 +6593,7 @@ private struct PlannerMapWebView: UIViewRepresentable {
         view.allowsBackForwardNavigationGestures = true
         var request = URLRequest(url: url)
         let countryLanguage = GuideLanguage(rawValue: languageCode) ?? .ja
-        let code = countryLanguage.webLanguageCode
+        let code = GoogleMapsLocale.mapLanguageCode(countryLanguage)
         request.setValue("\(code),en;q=0.5", forHTTPHeaderField: "Accept-Language")
         view.load(request)
         return view
