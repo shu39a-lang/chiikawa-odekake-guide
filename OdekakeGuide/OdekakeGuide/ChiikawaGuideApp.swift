@@ -1527,9 +1527,46 @@ private struct PlannerView: View {
                             DisclosureGroup {
                                 journeyHotelPicker
                             } label: {
-                                Label(journeyText("chooseHotel"), systemImage: "bed.double.fill")
-                                    .font(.headline).foregroundStyle(PlannerTheme.amber)
-                            }.padding(12).background(journeySurface, in: RoundedRectangle(cornerRadius: 16))
+                                HStack(spacing: 12) {
+                                    Image(systemName: "bed.double.fill")
+                                        .font(.title2.bold())
+                                        .frame(width: 46, height: 46)
+                                        .background(Color.black.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text(journeyText("chooseHotel"))
+                                            .font(.system(size: 19, weight: .heavy))
+                                            .fixedSize(horizontal: false, vertical: true)
+                                        Text(hotelQuery.isEmpty ? hotelTravelText("chooseNow") : hotelName)
+                                            .font(.subheadline.bold())
+                                            .lineLimit(2)
+                                            .minimumScaleFactor(0.8)
+                                    }
+                                    Spacer(minLength: 2)
+                                    Image(systemName: "hand.tap.fill")
+                                        .font(.title3.bold())
+                                }
+                                .foregroundStyle(Color.black)
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 14)
+                                .frame(maxWidth: .infinity, minHeight: 82, alignment: .leading)
+                                .background(
+                                    LinearGradient(
+                                        colors: [
+                                            Color(red: 0.99, green: 0.83, blue: 0.42),
+                                            Color(red: 0.95, green: 0.70, blue: 0.20)
+                                        ],
+                                        startPoint: .topLeading,
+                                        endPoint: .bottomTrailing
+                                    ),
+                                    in: RoundedRectangle(cornerRadius: 17)
+                                )
+                                .overlay(RoundedRectangle(cornerRadius: 17)
+                                    .stroke(Color.white.opacity(0.75), lineWidth: 1.5))
+                                .shadow(color: PlannerTheme.amber.opacity(0.36), radius: 9, y: 4)
+                            }
+                            .tint(PlannerTheme.amber)
+                            .padding(6)
+                            .background(journeySurface, in: RoundedRectangle(cornerRadius: 19))
                             DisclosureGroup {
                                 dinnerAreaPicker
                             } label: {
