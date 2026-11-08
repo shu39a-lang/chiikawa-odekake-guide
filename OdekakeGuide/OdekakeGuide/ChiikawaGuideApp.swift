@@ -1121,6 +1121,9 @@ private struct PlannerView: View {
     @State private var routePlaceRevision = 0
     @State private var hotelResults: [HotelSuggestion] = []
     @State private var showingOtherHotels = false
+    // Focus the selected card after the surrounding candidates collapse.
+    @State private var selectionFocusTarget = ""
+    @State private var selectionFocusRequest = 0
     @State private var hotelSearching = false
     @State private var hotelSearchError = false
     @State private var hotelSearchID = UUID()
@@ -1593,6 +1596,15 @@ private struct PlannerView: View {
                     .onChange(of: selectedJourneyStage) { _ in
                         withAnimation { proxy.scrollTo("currentStage", anchor: .top) }
                     }
+                    .onChange(of: selectionFocusRequest) { _ in
+                        let target = selectionFocusTarget
+                        // Allow the chosen card to replace the result list before scrolling.
+                        DispatchQueue.main.async {
+                            withAnimation(.easeInOut(duration: 0.25)) {
+                                proxy.scrollTo(target, anchor: .center)
+                            }
+                        }
+                    }
                 }
                 .navigationTitle("Japan Day Planner")
                 .navigationBarTitleDisplayMode(.inline)
@@ -1685,6 +1697,10 @@ private struct PlannerView: View {
     private func storedValues(_ value: String) -> [String: String] {
         guard let data = value.data(using: .utf8) else { return [:] }
         return (try? JSONDecoder().decode([String: String].self, from: data)) ?? [:]
+    }
+    private func centerSelectedPlace(_ target: String) {
+        selectionFocusTarget = target
+        selectionFocusRequest += 1
     }
     private func saveHotelValue(_ value: String, custom: Bool = false) {
         var values = storedValues(custom ? savedCustomHotels : savedHotels)
@@ -2113,6 +2129,7 @@ private struct PlannerView: View {
                     Label(hotelTravelText("selectedHotel"), systemImage: "checkmark.circle.fill")
                         .font(.caption.bold()).foregroundStyle(PlannerTheme.amber)
                     Text(hotelName).font(.headline)
+                        .id("focusedHotel")
                     if hotelChoice == "suggested", let hotel = selectedSuggestedHotel {
                         Text(hotel.address).font(.subheadline).foregroundStyle(.secondary)
                         if let phone = hotel.phone, let url = URL(string: "tel:\(phone)") {
@@ -2163,6 +2180,7 @@ private struct PlannerView: View {
                     if let phone = hotel.phone, let url = URL(string: "tel:\(phone)") { journeyLink("\(extra("call")) · \(phone)", url: url, systemImage: "phone") }
                     journeyAction(isSelected ? hotelTravelText("selectedHotel") : journeyText("chooseThisHotel"), systemImage: "checkmark.circle", accent: PlannerTheme.amber, selected: isSelected) {
                         chooseSuggestedHotel(hotel)
+                        centerSelectedPlace("focusedHotel")
                     }
                     if isSelected {
                         hotelTravelSummary
@@ -2176,7 +2194,10 @@ private struct PlannerView: View {
             }
             if hotelChoice == "suggested", let hotel = selectedSuggestedHotel, !selectedSearchedHotelVisible {
                 Text(hotelTravelText("selectedHotel")).font(.caption).foregroundStyle(journeyGold)
-                visibleChoice(hotel.name, selected: true) { saveHotelValue("suggested") }
+                visibleChoice(hotel.name, selected: true) {
+                    saveHotelValue("suggested")
+                    centerSelectedPlace("focusedHotel")
+                }
                 hotelTravelSummary
                 Text(hotel.address).font(.subheadline).foregroundStyle(.secondary)
                 if let url = hotel.website.flatMap(URL.init(string:)) { translatedGuideLink(extra("rate"), url: url) }
@@ -2190,11 +2211,17 @@ private struct PlannerView: View {
             if hotelChoice == "custom" {
                 TextField(journeyText("hotelInput"), text: Binding(get: { customHotel }, set: { saveHotelValue($0, custom: true) }))
                     .textFieldStyle(.roundedBorder)
-                    .onSubmit { if !hotelQuery.isEmpty { showingOtherHotels = false } }
+                    .onSubmit {
+                        if !hotelQuery.isEmpty {
+                            showingOtherHotels = false
+                            centerSelectedPlace("focusedHotel")
+                        }
+                    }
                 Text(journeyText("hotelInputNote")).font(.footnote).foregroundStyle(.secondary)
                 if !hotelQuery.isEmpty {
                     journeyAction(journeyText("chooseThisHotel"), systemImage: "checkmark.circle", accent: PlannerTheme.amber) {
                         showingOtherHotels = false
+                        centerSelectedPlace("focusedHotel")
                     }
                     hotelTravelSummary
                 }
@@ -3098,6 +3125,7 @@ private struct PlannerView: View {
                 Label(journeyText("selectedLunch"), systemImage: "checkmark.circle.fill")
                     .font(.caption.bold()).foregroundStyle(PlannerTheme.coral)
                 Text(selected.name).font(.headline)
+                    .id("focusedLunch")
                 Text(selected.address).font(.subheadline).foregroundStyle(.secondary)
                 if let url = locationURL(selected.query) {
                     journeyLink(journeyText("menuHours"), url: url)
@@ -3123,6 +3151,7 @@ private struct PlannerView: View {
                     journeyAction(journeyText(lunchSelection?.id == place.id ? "selectedLunch" : "selectLunch"), systemImage: "checkmark.circle", accent: PlannerTheme.coral, selected: lunchSelection?.id == place.id) {
                         lunchSelection = place
                         showingOtherLunchRestaurants = false
+                        centerSelectedPlace("focusedLunch")
                     }
                 }
                 .padding(12)
@@ -3222,6 +3251,7 @@ private struct PlannerView: View {
                 Label(journeyText("selectedDinner"), systemImage: "checkmark.circle.fill")
                     .font(.caption.bold()).foregroundStyle(PlannerTheme.coral)
                 Text(selected.name).font(.headline)
+                    .id("focusedDinner")
                 Text(selected.address).font(.subheadline).foregroundStyle(.secondary)
                 if let url = locationURL(selected.query) {
                     journeyLink(journeyText("menuHours"), url: url)
@@ -3254,6 +3284,7 @@ private struct PlannerView: View {
                     journeyAction(journeyText(dinnerSelection?.id == place.id ? "selectedDinner" : "selectDinner"), systemImage: dinnerSelection?.id == place.id ? "checkmark.circle.fill" : "fork.knife", accent: PlannerTheme.coral, selected: dinnerSelection?.id == place.id) {
                         dinnerSelection = place
                         showingOtherDinnerRestaurants = false
+                        centerSelectedPlace("focusedDinner")
                     }
                 }
                 .padding(14)
