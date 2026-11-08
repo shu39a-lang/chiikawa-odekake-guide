@@ -4238,11 +4238,15 @@ private enum GoogleMapsLocale {
     // Region and language are fixed by the visitor's chosen country, never
     // by the device's Japanese language settings. Native Google Maps may
     // retain its account's own language; the in-app browser uses this locale.
-    static func localize(_ url: URL, language: GuideLanguage) -> URL {
+    static func isMapURL(_ url: URL) -> Bool {
         guard let host = url.host?.lowercased(),
-              (host == "www.google.com" || host == "google.com" || host == "maps.google.com"
-                || host == "www.google.co.jp" || host == "maps.google.co.jp"),
-              url.path == "/maps" || url.path.hasPrefix("/maps/") || host.hasPrefix("maps.") else { return url }
+              url.scheme == "https" || url.scheme == "http" else { return false }
+        return (host == "www.google.com" || host == "google.com" || host == "maps.google.com"
+                || host == "www.google.co.jp" || host == "google.co.jp" || host == "maps.google.co.jp")
+            && (url.path == "/maps" || url.path.hasPrefix("/maps/") || host.hasPrefix("maps."))
+    }
+    static func localize(_ url: URL, language: GuideLanguage) -> URL {
+        guard isMapURL(url) else { return url }
         var parts = URLComponents(url: url, resolvingAgainstBaseURL: false)
         var query = (parts?.queryItems ?? []).filter { $0.name != "hl" && $0.name != "gl" }
         query.append(URLQueryItem(name: "hl", value: mapLanguageCode(language)))
@@ -6728,7 +6732,10 @@ private struct PlannerMapWebView: UIViewRepresentable {
     @Binding var loading: Bool
     @Binding var failed: Bool
 
-    func makeCoordinator() -> Coordinator { Coordinator(loading: $loading, failed: $failed) }
+    func makeCoordinator() -> Coordinator {
+        Coordinator(language: GuideLanguage(rawValue: languageCode) ?? .ja,
+                    loading: $loading, failed: $failed)
+    }
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
         // A fresh map session avoids inheriting a previous signed-in display language.
@@ -6737,11 +6744,7 @@ private struct PlannerMapWebView: UIViewRepresentable {
         view.navigationDelegate = context.coordinator
         view.uiDelegate = context.coordinator
         view.allowsBackForwardNavigationGestures = true
-        var request = URLRequest(url: url)
-        let countryLanguage = GuideLanguage(rawValue: languageCode) ?? .ja
-        let code = GoogleMapsLocale.mapLanguageCode(countryLanguage)
-        request.setValue("\(code),en;q=0.5", forHTTPHeaderField: "Accept-Language")
-        view.load(request)
+        view.load(context.coordinator.localizedRequest(URLRequest(url: url)))
         return view
     }
     func updateUIView(_ uiView: WKWebView, context: Context) {}
@@ -6753,9 +6756,22 @@ private struct PlannerMapWebView: UIViewRepresentable {
     final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
         let loading: Binding<Bool>
         let failed: Binding<Bool>
-        init(loading: Binding<Bool>, failed: Binding<Bool>) {
+        let language: GuideLanguage
+        init(language: GuideLanguage, loading: Binding<Bool>, failed: Binding<Bool>) {
+            self.language = language
             self.loading = loading
             self.failed = failed
+        }
+        // Preserve the destination, transport mode, method and body. Only map
+        // document navigation receives the selected locale, not third-party links.
+        func localizedRequest(_ original: URLRequest) -> URLRequest {
+            guard let url = original.url, GoogleMapsLocale.isMapURL(url) else { return original }
+            let localizedURL = GoogleMapsLocale.localize(url, language: language)
+            var request = original
+            request.url = localizedURL
+            let code = GoogleMapsLocale.mapLanguageCode(language)
+            request.setValue("\(code),en;q=0.5", forHTTPHeaderField: "Accept-Language")
+            return request
         }
         func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
             loading.wrappedValue = true
@@ -6778,8 +6794,22 @@ private struct PlannerMapWebView: UIViewRepresentable {
         func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
                      decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
             let scheme = navigationAction.request.url?.scheme?.lowercased()
-            // Keep maps in this screen; app-launch schemes do not take over navigation.
-            decisionHandler(scheme == "https" || scheme == "http" || scheme == "about" ? .allow : .cancel)
+            guard scheme == "https" || scheme == "http" || scheme == "about" else {
+                decisionHandler(.cancel)
+                return
+            }
+            // Reapply the language after Continue, redirects and back/forward.
+            // Compare URLs only: WebKit may strip custom headers on redirects.
+            // This keeps an already-localized URL from entering a reload loop.
+            if navigationAction.targetFrame?.isMainFrame != false {
+                let request = localizedRequest(navigationAction.request)
+                if request.url != navigationAction.request.url {
+                    decisionHandler(.cancel)
+                    webView.load(request)
+                    return
+                }
+            }
+            decisionHandler(.allow)
         }
         func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse,
                      decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
@@ -6801,7 +6831,7 @@ private struct PlannerMapWebView: UIViewRepresentable {
             if navigationAction.targetFrame == nil,
                let scheme = navigationAction.request.url?.scheme?.lowercased(),
                scheme == "https" || scheme == "http" {
-                webView.load(navigationAction.request)
+                webView.load(localizedRequest(navigationAction.request))
             }
             return nil
         }
