@@ -1105,11 +1105,13 @@ private struct PlannerView: View {
     @State private var journeyCompleted = false
     @State private var dinnerResults: [DinnerPlace] = []
     @State private var dinnerSelection: DinnerPlace?
+    @State private var showingOtherDinnerRestaurants = false
     @State private var dinnerSearching = false
     @State private var dinnerSearchError = false
     @State private var dinnerSearchID = UUID()
     @State private var lunchResults: [DinnerPlace] = []
     @State private var lunchSelection: DinnerPlace?
+    @State private var showingOtherLunchRestaurants = false
     @State private var lunchSearching = false
     @State private var lunchSearchError = false
     @State private var lunchSearchID = UUID()
@@ -1850,6 +1852,8 @@ private struct PlannerView: View {
         lunchResults = []
         lunchSearching = false
         lunchSearchError = false
+        showingOtherLunchRestaurants = false
+        showingOtherDinnerRestaurants = false
         dinnerSearchID = UUID()
         dinnerResults = []
         dinnerSearching = false
@@ -1938,6 +1942,7 @@ private struct PlannerView: View {
         resetLunch()
     }
     private func resetLunch() {
+        showingOtherLunchRestaurants = false
         lunchSearchID = UUID()
         lunchResults = []
         lunchSelection = nil
@@ -1945,6 +1950,7 @@ private struct PlannerView: View {
         lunchSearchError = false
     }
     private func resetDinner() {
+        showingOtherDinnerRestaurants = false
         dinnerSearchID = UUID()
         dinnerResults = []
         dinnerSelection = nil
@@ -3088,6 +3094,20 @@ private struct PlannerView: View {
             Text("\(venueText(previous, 0)) · \(journeyText("nearby"))")
                 .font(.subheadline).foregroundStyle(.secondary)
             Text(journeyText("lunchNote")).font(.subheadline)
+            if let selected = lunchSelection, !showingOtherLunchRestaurants {
+                Label(journeyText("selectedLunch"), systemImage: "checkmark.circle.fill")
+                    .font(.caption.bold()).foregroundStyle(PlannerTheme.coral)
+                Text(selected.name).font(.headline)
+                Text(selected.address).font(.subheadline).foregroundStyle(.secondary)
+                if let url = locationURL(selected.query) {
+                    journeyLink(journeyText("menuHours"), url: url)
+                }
+                routeLinks(origin: anchor, destination: selected.query)
+                journeyAction(CompactPlannerCopy.otherRestaurant(language),
+                              systemImage: "arrow.triangle.2.circlepath", accent: PlannerTheme.coral) {
+                    showingOtherLunchRestaurants = true
+                }
+            } else {
             journeyAction(journeyText("findLunch"), systemImage: "magnifyingglass", accent: PlannerTheme.coral) { searchLunch(near: anchor) }
                 .disabled(lunchSearching)
             if lunchSearching { ProgressView(journeyText("searching")) }
@@ -3102,6 +3122,7 @@ private struct PlannerView: View {
                     if let url = locationURL(place.query) { journeyLink(journeyText("menuHours"), url: url) }
                     journeyAction(journeyText(lunchSelection?.id == place.id ? "selectedLunch" : "selectLunch"), systemImage: "checkmark.circle", accent: PlannerTheme.coral, selected: lunchSelection?.id == place.id) {
                         lunchSelection = place
+                        showingOtherLunchRestaurants = false
                     }
                 }
                 .padding(12)
@@ -3111,6 +3132,7 @@ private struct PlannerView: View {
             if let place = lunchSelection {
                 Text("\(journeyText("selectedLunch")) · \(place.name)").font(.headline).foregroundStyle(journeyGold)
                 routeLinks(origin: anchor, destination: place.query)
+            }
             }
             Button(ux("skipLunch")) {
                 skipLunch = true
@@ -3163,8 +3185,7 @@ private struct PlannerView: View {
     @MainActor
     private func searchLunch(near anchor: String) {
         guard !lunchSearching else { return }
-        // A fresh lunch search cannot inherit the previous restaurant.
-        lunchSelection = nil
+        // Keep the selected restaurant until the user picks a replacement.
         routeLegTimes = [:]
         routeLegDiagnostics = [:]
         let token = UUID()
@@ -3197,6 +3218,22 @@ private struct PlannerView: View {
             Label(journeyText(dinnerNearHotel ? "dinnerHotel" : "dinnerLast"), systemImage: "fork.knife").font(.title3.bold())
             Text(dinnerAnchorName).font(.subheadline.bold())
             Text(journeyText(dinnerNearHotel ? "earlyNote" : "lateNote")).font(.subheadline)
+            if let selected = dinnerSelection, !showingOtherDinnerRestaurants {
+                Label(journeyText("selectedDinner"), systemImage: "checkmark.circle.fill")
+                    .font(.caption.bold()).foregroundStyle(PlannerTheme.coral)
+                Text(selected.name).font(.headline)
+                Text(selected.address).font(.subheadline).foregroundStyle(.secondary)
+                if let url = locationURL(selected.query) {
+                    journeyLink(journeyText("menuHours"), url: url)
+                }
+                routeLinks(origin: dinnerNearHotel ? hotelQuery : venueQuery(lastVenue),
+                           destination: selected.query)
+                Text(journeyText("dinnerThenHotel")).font(.subheadline)
+                journeyAction(CompactPlannerCopy.otherRestaurant(language),
+                              systemImage: "arrow.triangle.2.circlepath", accent: PlannerTheme.coral) {
+                    showingOtherDinnerRestaurants = true
+                }
+            } else {
             if dinnerAnchorQuery.isEmpty {
                 Text(journeyText("enterHotel")).foregroundStyle(journeyGold)
             } else {
@@ -3216,6 +3253,7 @@ private struct PlannerView: View {
                     if let url = locationURL(place.query) { journeyLink(journeyText("menuHours"), url: url) }
                     journeyAction(journeyText(dinnerSelection?.id == place.id ? "selectedDinner" : "selectDinner"), systemImage: dinnerSelection?.id == place.id ? "checkmark.circle.fill" : "fork.knife", accent: PlannerTheme.coral, selected: dinnerSelection?.id == place.id) {
                         dinnerSelection = place
+                        showingOtherDinnerRestaurants = false
                     }
                 }
                 .padding(14)
@@ -3227,6 +3265,7 @@ private struct PlannerView: View {
                 Text("\(journeyText("selectedDinner")) · \(place.name)").font(.headline).foregroundStyle(journeyGold)
                 routeLinks(origin: dinnerNearHotel ? hotelQuery : venueQuery(lastVenue), destination: place.query)
                 Text(journeyText("dinnerThenHotel")).font(.subheadline)
+            }
             }
             Button(ux("skipDinner")) {
                 skipDinner = true
@@ -3246,8 +3285,7 @@ private struct PlannerView: View {
     @MainActor
     private func searchDinner() {
         guard !dinnerAnchorQuery.isEmpty, !dinnerSearching else { return }
-        // Do not keep showing a restaurant from the previous search.
-        dinnerSelection = nil
+        // Keep the selected restaurant until the user picks a replacement.
         routeLegTimes = [:]
         routeLegDiagnostics = [:]
         let anchor = dinnerAnchorQuery
@@ -4291,6 +4329,50 @@ private enum CompactPlannerCopy {
     }
     static func otherHotel(_ language: GuideLanguage) -> String {
         (labels[language.rawValue] ?? labels["en"]!)[3]
+    }
+    static func otherRestaurant(_ language: GuideLanguage) -> String {
+        let titles: [String: String] = [
+            "ja": "他のレストランを選ぶ",
+            "en": "Choose another restaurant",
+            "ko": "다른 식당 선택",
+            "zh": "选择其他餐厅",
+            "zht": "選擇其他餐廳",
+            "th": "เลือกร้านอาหารอื่น",
+            "fil": "Pumili ng ibang restawran",
+            "vi": "Chọn nhà hàng khác",
+            "id": "Pilih restoran lain",
+            "ms": "Pilih restoran lain",
+            "fr": "Choisir un autre restaurant",
+            "de": "Anderes Restaurant wählen",
+            "hi": "दूसरा रेस्तराँ चुनें",
+            "it": "Scegli un altro ristorante",
+            "es": "Elegir otro restaurante",
+            "ru": "Выбрать другой ресторан",
+            "nl": "Ander restaurant kiezen",
+            "pt": "Escolher outro restaurante",
+            "sv": "Välj en annan restaurang",
+            "mn": "Өөр ресторан сонгох",
+            "ar": "اختر مطعماً آخر",
+            "tr": "Başka restoran seç",
+            "pl": "Wybierz inną restaurację",
+            "my": "အခြားစားသောက်ဆိုင်ရွေးရန်",
+            "ne": "अर्को रेस्टुरेन्ट छान्नुहोस्",
+            "si": "වෙනත් අවන්හලක් තෝරන්න",
+            "da": "Vælg en anden restaurant",
+            "fi": "Valitse toinen ravintola",
+            "no": "Velg en annen restaurant",
+            "km": "ជ្រើសរើសភោជនីយដ្ឋានផ្សេង",
+            "he": "בחרו מסעדה אחרת",
+            "cs": "Vybrat jinou restauraci",
+            "el": "Επιλέξτε άλλο εστιατόριο",
+            "ro": "Alege alt restaurant",
+            "hu": "Másik étterem választása",
+            "bn": "অন্য রেস্তোরাঁ বেছে নিন",
+            "ur": "دوسرا ریستوران منتخب کریں",
+            "uk": "Вибрати інший ресторан",
+            "hr": "Odaberi drugi restoran"
+        ]
+        return titles[language.rawValue] ?? titles["en"]!
     }
 }
 
