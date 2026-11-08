@@ -1118,6 +1118,7 @@ private struct PlannerView: View {
     @State private var selectingRoutePlace: RoutePlaceSelection?
     @State private var routePlaceRevision = 0
     @State private var hotelResults: [HotelSuggestion] = []
+    @State private var showingOtherHotels = false
     @State private var hotelSearching = false
     @State private var hotelSearchError = false
     @State private var hotelSearchID = UUID()
@@ -1692,6 +1693,7 @@ private struct PlannerView: View {
         } else {
             if savedHotels != string { savedHotels = string }
         }
+        if !custom { showingOtherHotels = value == "custom" }
         // Each hotel selection has a distinct origin. Invalidate every old
         // origin/destination route and map view when that origin changes.
         presentedMap = nil
@@ -1705,6 +1707,7 @@ private struct PlannerView: View {
         routePlaceRevision += 1
     }
     private func resetHotelSelection() {
+        showingOtherHotels = false
         savedHotels = "{}"
         savedCustomHotels = "{}"
         savedSuggestedHotels = "{}"
@@ -2099,6 +2102,33 @@ private struct PlannerView: View {
                 Label(hotelTravelText("notChosen"), systemImage: "info.circle")
                     .font(.subheadline).foregroundStyle(journeyGold)
             }
+            if !hotelQuery.isEmpty && !showingOtherHotels {
+                VStack(alignment: .leading, spacing: 10) {
+                    Label(hotelTravelText("selectedHotel"), systemImage: "checkmark.circle.fill")
+                        .font(.caption.bold()).foregroundStyle(PlannerTheme.amber)
+                    Text(hotelName).font(.headline)
+                    if hotelChoice == "suggested", let hotel = selectedSuggestedHotel {
+                        Text(hotel.address).font(.subheadline).foregroundStyle(.secondary)
+                        if let phone = hotel.phone, let url = URL(string: "tel:\(phone)") {
+                            journeyLink("\(extra("call")) · \(phone)", url: url, systemImage: "phone")
+                        }
+                        if let url = hotel.website.flatMap(URL.init(string:)) {
+                            translatedGuideLink(extra("rate"), url: url)
+                        }
+                    }
+                    if let url = locationURL(hotelQuery) {
+                        journeyLink(extra("hotelMap"), url: url, systemImage: "mappin.and.ellipse")
+                    }
+                    hotelTravelSummary
+                }
+                .padding(12)
+                .background(PlannerTheme.amber.opacity(0.18), in: RoundedRectangle(cornerRadius: 12))
+                .overlay(RoundedRectangle(cornerRadius: 12).stroke(PlannerTheme.amber, lineWidth: 1))
+                journeyAction(CompactPlannerCopy.otherHotel(language), systemImage: "arrow.triangle.2.circlepath",
+                              accent: PlannerTheme.amber) {
+                    showingOtherHotels = true
+                }
+            } else {
             if !hotelSearching {
                 journeyAction(journeyText("findHotels"), systemImage: "magnifyingglass", accent: PlannerTheme.amber) { searchHotels() }
             } else {
@@ -2154,10 +2184,15 @@ private struct PlannerView: View {
             if hotelChoice == "custom" {
                 TextField(journeyText("hotelInput"), text: Binding(get: { customHotel }, set: { saveHotelValue($0, custom: true) }))
                     .textFieldStyle(.roundedBorder)
+                    .onSubmit { if !hotelQuery.isEmpty { showingOtherHotels = false } }
                 Text(journeyText("hotelInputNote")).font(.footnote).foregroundStyle(.secondary)
                 if !hotelQuery.isEmpty {
+                    journeyAction(journeyText("chooseThisHotel"), systemImage: "checkmark.circle", accent: PlannerTheme.amber) {
+                        showingOtherHotels = false
+                    }
                     hotelTravelSummary
                 }
+            }
             }
             Text(hotelTravelText("afterChoosing"))
                 .font(.footnote).foregroundStyle(journeyGold)
@@ -3337,16 +3372,16 @@ private struct PlannerView: View {
         return VStack(alignment: .leading, spacing: 10) {
             if !sameSite,
                let url = mapURL(origin: origin, destination: destination, mode: "transit") {
-                timedRouteLink(extra("transitRoute"), url: url,
+                timedRouteLink(CompactPlannerCopy.route("transit", language), url: url,
                                systemImage: "tram.fill", mode: "transit")
             }
             if let url = mapURL(origin: origin, destination: destination, mode: "walking") {
-                timedRouteLink(extra("walkRoute"), url: url,
+                timedRouteLink(CompactPlannerCopy.route("walking", language), url: url,
                                systemImage: "figure.walk", mode: "walking")
             }
             if !sameSite,
                let url = mapURL(origin: origin, destination: destination, mode: "driving") {
-                timedRouteLink(extra("driveRoute"), url: url,
+                timedRouteLink(CompactPlannerCopy.route("taxi", language), url: url,
                                systemImage: "car.fill", mode: "taxi")
             }
             Text(mapDirectionsNote).font(.caption).foregroundStyle(.secondary)
@@ -3403,28 +3438,10 @@ private struct PlannerView: View {
     }
     private func timedRouteLink(_ title: String, url: URL,
                                 systemImage: String, mode: String) -> some View {
-        let accent = mode == "walking" ? PlannerTheme.coral
-            : mode == "taxi" ? PlannerTheme.amber : PlannerTheme.cyan
-        return Button(action: {
+        Button(action: {
             presentedMap = PlannerMapRequest(url: localizedMapURL(url), title: title)
         }) {
-            HStack(spacing: 8) {
-                Image(systemName: systemImage).font(.headline)
-                    .frame(width: 36, height: 36)
-                    .background(accent.opacity(0.15), in: Circle())
-                Text(title).frame(maxWidth: .infinity, alignment: .leading)
-                Text(mapTimeLabel).font(.caption.bold())
-                    .fixedSize(horizontal: false, vertical: true)
-                    .multilineTextAlignment(.trailing)
-                Image(systemName: "arrow.up.right.square").font(.caption)
-            }
-            .font(.subheadline.bold()).fixedSize(horizontal: false, vertical: true)
-            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-            .padding(.horizontal, 12).padding(.vertical, 8)
-            .foregroundStyle(accent)
-            .background(PlannerTheme.raised, in: RoundedRectangle(cornerRadius: 22))
-            .overlay(RoundedRectangle(cornerRadius: 22)
-                .stroke(accent.opacity(0.35), lineWidth: 1))
+            CompactRouteButtonLabel(title: title, systemImage: systemImage)
         }.buttonStyle(.plain)
     }
     @MainActor
@@ -4224,6 +4241,81 @@ private enum GuideLanguage: String, CaseIterable, Identifiable {
     }
 }
 
+
+private enum CompactPlannerCopy {
+    // One label in the selected language; no bilingual suffixes.
+    private static let labels: [String: [String]] = [
+        "ja": ["電車ルート", "徒歩ルート", "車ルート", "他のホテルを選ぶ"],
+        "en": ["Transit", "Walk", "Drive", "Choose another hotel"],
+        "ko": ["대중교통", "도보", "자동차", "다른 호텔 선택"],
+        "zh": ["公共交通", "步行", "驾车", "选择其他酒店"],
+        "zht": ["大眾運輸", "步行", "開車", "選擇其他飯店"],
+        "th": ["ขนส่งสาธารณะ", "เดิน", "ขับรถ", "เลือกโรงแรมอื่น"],
+        "fil": ["Pampublikong sasakyan", "Lakad", "Kotse", "Pumili ng ibang hotel"],
+        "vi": ["Công cộng", "Đi bộ", "Ô tô", "Chọn khách sạn khác"],
+        "id": ["Transportasi umum", "Jalan kaki", "Mobil", "Pilih hotel lain"],
+        "ms": ["Transit", "Berjalan kaki", "Kereta", "Pilih hotel lain"],
+        "fr": ["Transports", "À pied", "Voiture", "Choisir un autre hôtel"],
+        "de": ["ÖPNV", "Zu Fuß", "Auto", "Anderes Hotel wählen"],
+        "hi": ["सार्वजनिक परिवहन", "पैदल", "कार", "दूसरा होटल चुनें"],
+        "it": ["Mezzi pubblici", "A piedi", "Auto", "Scegli un altro hotel"],
+        "es": ["Transporte público", "A pie", "Coche", "Elegir otro hotel"],
+        "ru": ["Транспорт", "Пешком", "На авто", "Выбрать другой отель"],
+        "nl": ["Openbaar vervoer", "Lopen", "Auto", "Ander hotel kiezen"],
+        "pt": ["Transporte público", "A pé", "Carro", "Escolher outro hotel"],
+        "sv": ["Kollektivtrafik", "Till fots", "Bil", "Välj ett annat hotell"],
+        "mn": ["Нийтийн тээвэр", "Явган", "Машин", "Өөр зочид буудал сонгох"],
+        "ar": ["نقل عام", "مشياً", "بالسيارة", "اختر فندقاً آخر"],
+        "tr": ["Toplu taşıma", "Yürüyüş", "Araba", "Başka otel seç"],
+        "pl": ["Komunikacja", "Pieszo", "Samochód", "Wybierz inny hotel"],
+        "my": ["အများသုံးယာဉ်", "လမ်းလျှောက်", "ကား", "အခြားဟိုတယ်ရွေးရန်"],
+        "ne": ["सार्वजनिक यातायात", "पैदल", "कार", "अर्को होटल छान्नुहोस्"],
+        "si": ["පොදු ප්‍රවාහනය", "පයින්", "මෝටර් රථයෙන්", "වෙනත් හෝටලයක් තෝරන්න"],
+        "da": ["Offentlig transport", "Til fods", "Bil", "Vælg et andet hotel"],
+        "fi": ["Joukkoliikenne", "Kävellen", "Auto", "Valitse toinen hotelli"],
+        "no": ["Kollektivtransport", "Til fots", "Bil", "Velg et annet hotell"],
+        "km": ["ដឹកជញ្ជូនសាធារណៈ", "ថ្មើរជើង", "រថយន្ត", "ជ្រើសរើសសណ្ឋាគារផ្សេង"],
+        "he": ["תחבורה ציבורית", "ברגל", "ברכב", "בחירת מלון אחר"],
+        "cs": ["Veřejná doprava", "Pěšky", "Autem", "Vybrat jiný hotel"],
+        "el": ["Συγκοινωνίες", "Πεζή", "Αυτοκίνητο", "Επιλογή άλλου ξενοδοχείου"],
+        "ro": ["Transport public", "Pe jos", "Mașină", "Alege alt hotel"],
+        "hu": ["Tömegközlekedés", "Gyalog", "Autó", "Másik szálloda választása"],
+        "bn": ["গণপরিবহন", "হাঁটা", "গাড়ি", "অন্য হোটেল বাছুন"],
+        "ur": ["عوامی ٹرانسپورٹ", "پیدل", "گاڑی", "دوسرا ہوٹل منتخب کریں"],
+        "uk": ["Транспорт", "Пішки", "Авто", "Вибрати інший готель"],
+        "hr": ["Javni prijevoz", "Pješice", "Automobil", "Odaberi drugi hotel"]
+    ]
+    static func route(_ mode: String, _ language: GuideLanguage) -> String {
+        let index = mode == "transit" ? 0 : mode == "walking" ? 1 : 2
+        return (labels[language.rawValue] ?? labels["en"]!)[index]
+    }
+    static func otherHotel(_ language: GuideLanguage) -> String {
+        (labels[language.rawValue] ?? labels["en"]!)[3]
+    }
+}
+
+private struct CompactRouteButtonLabel: View {
+    let title: String
+    let systemImage: String
+    var detail: String? = nil
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: systemImage).font(.system(size: 19, weight: .semibold))
+                .frame(width: 26).accessibilityHidden(true)
+            Text(title).font(.subheadline.bold())
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 4)
+            if let detail { Text(detail).font(.caption.bold()) }
+            Image(systemName: "chevron.forward").font(.caption.bold()).accessibilityHidden(true)
+        }
+        .padding(.horizontal, 14).padding(.vertical, 10)
+        .frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
+        .foregroundStyle(.white)
+        .background(Color(red: 0.02, green: 0.28, blue: 0.72), in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.cyan.opacity(0.8), lineWidth: 1))
+        .contentShape(RoundedRectangle(cornerRadius: 12))
+    }
+}
 
 private enum GoogleMapsLocale {
     // Google Maps has its own language identifiers. Do not reuse the Google
@@ -6481,20 +6573,14 @@ private struct OriginalCourseView: View {
             if !stops[index - 1].name.isEmpty && !stops[index].name.isEmpty {
                 ForEach(["walking", "taxi", "transit"], id: \.self) { mode in
                     if let link = directions(index, mode: mode) {
-                        Button(action: { presentedMap = PlannerMapRequest(url: link, title: t("route")) }) {
-                            HStack {
-                                Image(systemName: mode == "walking" ? "figure.walk" : mode == "taxi" ? "car.fill" : "tram.fill")
-                                Text(t(mode == "walking" ? "walk" : mode))
-                                Spacer()
-                                if let verifiedTime = times[legKey(index)]?[mode] {
-                                    Text("\(verifiedTime.minutes) \(t("minutes"))")
-                                        .font(.headline.bold()).monospacedDigit()
-                                } else {
-                                    Text(t("checkTransit")).font(.caption)
-                                }
-                                Image(systemName: "arrow.up.right.square")
-                            }.font(.subheadline)
-                        }
+                        Button(action: {
+                            presentedMap = PlannerMapRequest(url: link, title: CompactPlannerCopy.route(mode, language))
+                        }) {
+                            CompactRouteButtonLabel(
+                                title: CompactPlannerCopy.route(mode, language),
+                                systemImage: mode == "walking" ? "figure.walk" : mode == "taxi" ? "car.fill" : "tram.fill",
+                                detail: times[legKey(index)]?[mode].map { "\($0.minutes) \(t("minutes"))" })
+                        }.buttonStyle(.plain)
                     }
                 }
                 Text(t("timeNote")).font(.caption).foregroundStyle(.secondary)
